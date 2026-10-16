@@ -46,6 +46,20 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov httpx ruff mypy
 
+      # 防回退：requirements.txt 一旦被改回 `PySide6`（完整版），会静默多装
+      # Addons / WebEngine / Pdf 约 441 MB，而界面一个都用不到。这里直接卡住。
+      - name: 依赖瘦身校验（必须只用 PySide6-Essentials）
+        shell: pwsh
+        run: |
+          $bad = @('PySide6', 'PySide6-Addons', 'PySide6-WebEngine', 'PySide6-Pdf')
+          $found = pip list --format=freeze |
+            Where-Object { $bad -contains ($_ -split '==')[0] }
+          if ($found) {
+            Write-Error "检测到完整版 PySide6 组件，请改用 PySide6-Essentials：`n$found"
+            exit 1
+          }
+          Write-Host 'OK：仅安装了 PySide6-Essentials'
+
       - name: 代码规范与静态缺陷（ruff）
         run: ruff check . --output-format=github
 

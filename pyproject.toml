@@ -19,7 +19,9 @@ readme = "README.md"
 # ── 依赖 ──
 # 运行时依赖的权威清单在 requirements.txt（PyInstaller 打包脚本也读它）。
 dependencies = [
-    "PySide6>=6.6",
+    # 只要 Essentials：Addons / WebEngine / Pdf 本项目一个都用不到，
+    # 装上会让 site-packages/PySide6 从 215 MB 涨到 656 MB。见 requirements.txt。
+    "PySide6-Essentials>=6.6",
     "fastapi>=0.110",
     "uvicorn>=0.27",
 ]
@@ -75,7 +77,7 @@ ignore = [
     "RUF001", "RUF002", "RUF003",
 
     # ── 刻意为之 ──
-    "PLC0415",    # 函数内 import：PySide6 体积大，延迟到用到处导入可显著加快启动
+    "PLC0415",    # 函数内 import：Qt 绑定初始化重，延迟到用到处导入可显著加快启动
     "PLW0603",    # global：core.database / settings / db_writer 用模块级单例
     "S101",       # assert：用于内部不变量与测试
     "S110", "S112",  # try-except-pass/continue：边界处兜底，已统一改为记日志
@@ -120,7 +122,7 @@ python_version = "3.11"
 # 注意：mypy 的 exclude 是正则，Windows 上路径会带反斜杠，
 # 故用「斜杠两侧可选」的写法，确保 vendored 的 ip2region 一定被排除。
 exclude = ["(^|[/\\\\])ip2region([/\\\\]|$)", "(^|[/\\\\])(build|dist)([/\\\\]|$)"]
-# PySide6 / uvicorn 等未必带完整类型存根
+# PySide6-Essentials / uvicorn 等未必带完整类型存根
 ignore_missing_imports = true
 # 即使函数没写注解也检查函数体（能抓出真实的类型错用）
 check_untyped_defs = true

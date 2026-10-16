@@ -52,6 +52,8 @@ a = Analysis(
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
+    # 说明：依赖只装 PySide6-Essentials，正常情况不会有 WebEngine；
+    # 这里仍显式排除，防止开发机装了完整版 PySide6 时把 100+ MB 的 WebEngine 打进去。
     excludes=["tkinter", "matplotlib", "numpy", "pandas", "PySide6.QtWebEngineCore"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

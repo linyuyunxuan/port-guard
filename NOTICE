@@ -36,12 +36,19 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 
 | 包 | 用途 | 许可 |
 | --- | --- | --- |
-| PySide6 | 桌面界面 | **LGPL v3**（另有 Qt 商业许可可选） |
+| PySide6-Essentials | 桌面界面（QtCore / QtGui / QtWidgets 等） | **LGPL v3**（另有 Qt 商业许可可选） |
 | shiboken6 | PySide6 的 C++/Python 绑定层 | LGPL v3 |
 | FastAPI | 上报接收服务 | MIT |
 | Uvicorn | ASGI 服务器 | BSD-3-Clause |
 | Starlette（FastAPI 依赖） | ASGI 框架 | BSD-3-Clause |
 | Pydantic（FastAPI 依赖） | 数据校验 | MIT |
+
+> **为什么只装 PySide6-Essentials**：PySide6 拆成 Essentials / Addons / WebEngine / Pdf
+> 几个发行包。本项目界面只用到 QtCore / QtGui / QtWidgets / QtNetwork / QtSvg，**全部在
+> Essentials 内**；装上 Addons 与 WebEngine 会多出 Qt3D、Charts、Multimedia、Quick3D、
+> Sensors 等一批从没用过的模块，site-packages/PySide6 会从约 215 MB 涨到约 656 MB。
+> 因此依赖里写 `PySide6-Essentials`，**导入路径不变**（仍是 `PySide6.*`）。
+> 这不影响许可判断：Essentials 同样是 LGPL v3，下面的义务一字不变。
 
 > **为什么用 PySide6 而不是 PyQt6**：两者 API 基本同源，但许可差异决定了能怎么分发。
 > PyQt6 是 GPL v3 / 商业双许可 —— 闭源分发会直接触发 GPL 的传染性，必须购买商业许可。
@@ -55,6 +62,9 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 >
 > 本项目仅以动态链接方式使用，未修改 Qt 源码，也不对其做静态链接，
 > 因此上述 1、4 项自动满足；发布闭源产品时请补齐第 2、3 项材料。
+>
+> 注：只安装 `PySide6-Essentials`（而非完整版 PySide6）**不削弱第 2 项的可替换性** ——
+> 最终用户随时可以用官方原版 `PySide6-Essentials` wheel 覆盖同名文件，替换后程序照常工作。
 
 开发期依赖（pytest / ruff / mypy / httpx）仅用于 CI 与本地开发，不随产品分发。
 

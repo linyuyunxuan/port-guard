@@ -25,6 +25,11 @@ start_as_admin.bat
 C:\Users\Administrator\.workbuddy\binaries\python\envs\portguard\Scripts\python.exe main.py
 ```
 
+> `install.bat` 读的是 `requirements.txt`，其中 GUI 依赖写的是 **PySide6-Essentials**
+> （Qt 官方绑定，LGPL v3，允许闭源分发）。**不要**再手工 `pip install PySide6` ——
+> 完整版会额外拉入 Addons / WebEngine / Pdf 约 380 MB，本项目一个都用不到。
+> 两个包的导入路径相同，都是 `PySide6.*`。
+
 ---
 
 ## 二、让业务系统上报访问记录
@@ -368,3 +373,6 @@ pyinstaller port_guard.spec
   可开启在线同步保持最新
 * 第三方代码与许可见 `NOTICE`。**GUI 使用 PySide6（LGPL v3），因此允许闭源分发**；
   此前用的 PyQt6 是 GPL v3 / 商业双许可，闭源分发会触发 GPL 传染性，已整体迁移
+* 依赖里装的是 **PySide6-Essentials** 而非完整版 PySide6：界面只用到 QtCore / QtGui /
+  QtWidgets / QtNetwork / QtSvg，都在 Essentials 内；不装 Addons / WebEngine / Pdf，
+  `site-packages/PySide6` 从约 656 MB 降到约 215 MB。导入路径仍是 `PySide6.*`，代码零改动

@@ -1,6 +1,9 @@
-# 桌面界面：PySide6 是 Qt 官方绑定，LGPL v3，允许闭源分发（见 NOTICE）
-# 若只关心体积，可换成 PySide6-Essentials（仅含 QtCore/QtGui/QtWidgets 等必需模块，
-# 不含 Addons / WebEngine / Pdf，可省下约 200 MB）；本项目只用得到 Essentials 的部分。
-PySide6>=6.6.0
+# 桌面界面：PySide6 是 Qt 官方绑定，LGPL v3，允许闭源分发（见 NOTICE）。
+# 这里刻意只装 **PySide6-Essentials**：本项目仅用到 QtCore / QtGui / QtWidgets /
+# QtNetwork / QtSvg，全部属于 Essentials；完整版 PySide6 会额外拖入 Addons
+# （Qt3D / Charts / Multimedia / Quick3D / Sensors / TextToSpeech …）与 WebEngine /
+# Pdf，实测 site-packages/PySide6 从 656 MB 降到 215 MB（省 441 MB）。
+# 导入路径不变（仍是 PySide6.QtCore 等），所以代码零改动。
+PySide6-Essentials>=6.6.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0

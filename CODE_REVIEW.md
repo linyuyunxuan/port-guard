@@ -883,4 +883,16 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
   商业双许可，闭源分发会触发 GPL 传染性；PySide6 为 Qt 官方绑定、LGPL v3，允许闭源分发。
   迁移只涉及导入路径与 `pyqtSignal`/`pyqtProperty` 改名（共 67 处、13 个文件），无逻辑改动；
   离屏自检 35 项与 195 个用例全部通过。合规义务清单见 `NOTICE` 第 3 节。
+* **已完成（2026-10-16）**：GUI 依赖由完整版 `PySide6` 收敛为 **`PySide6-Essentials`**。
+  界面只用到 QtCore / QtGui / QtWidgets / QtNetwork / QtSvg，全在 Essentials 内；完整版会额外
+  拉入 Addons（Qt3D / Charts / Multimedia / Quick3D / Sensors / TextToSpeech …）与 WebEngine /
+  Pdf，本项目一个都用不到。实测 `site-packages/PySide6` 由 656 MB 降到 **215 MB**（省 441 MB），
+  导入路径仍是 `PySide6.*`，代码零改动；`pip check` 无破损依赖。CI 增加一步「依赖瘦身校验」，
+  防止 `requirements.txt` 被改回完整版。
+  * 实操坑一：`PySide6/__init__.py`、`_config.py`、`py.typed` 等 **7 个文件被 Essentials 与
+    Addons 同时登记**在各自 RECORD 里，直接 `pip uninstall PySide6-Addons` 会连带删掉它们 ——
+    需先备份这几个文件、卸载后再还原。
+  * 实操坑二：卸载过程若中断，pip 会把已删一半的目录改名为 `~` 前缀（`~yside6_*_dist-info`、
+    `plugins/~ultimedia`、`translations/~twebengine_locales` …）留在 site-packages 里，
+    导致后续每条 pip 命令都刷 `Ignoring invalid distribution` 警告；需按 RECORD 差集清理。
 
