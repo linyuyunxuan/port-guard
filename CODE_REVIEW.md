@@ -762,10 +762,10 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
 | 检查项 | 命令 | 结果 |
 |---|---|---|
 | 静态检查 | `ruff check .` | **All checks passed!**（0 问题） |
-| 类型检查 | `mypy core app` | **Success: no issues found in 23 source files** |
-| 类型检查（参考） | `mypy gui main.py` | 107 个报错，均来自 Qt 动态属性，暂不设门禁（见 `pyproject.toml` 说明） |
-| 单元 / 集成测试 | `pytest -q` | **195 passed**（0.5 分钟级，全离线、全隔离） |
-| 端到端自检 | `python selftest.py` | **35 项全通过，退出码 0** |
+| 格式检查 | `ruff format --check .` | **49 files already formatted** |
+| 类型检查 | `mypy .` | **Success: no issues found in 47 source files**（全项目、无目录豁免） |
+| 单元 / 集成测试 | `pytest -q` | **209 passed**（全离线、全隔离） |
+| 端到端自检 | `python selftest.py` | **37 项全通过，退出码 0** |
 
 ### 7.2 逐项落地情况
 
@@ -785,7 +785,7 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
 | # | 动作 | 验证 |
 |---|---|---|
 | 7 | 令牌桶限流 + 请求体上限 | 超限 429、>1 MB body 返回 413，均有用例 |
-| 8 | 轮转日志落盘，关键路径不再静默吞异常 | `core/logger.py`，`logs/portguard.log`（5 MB × 5） |
+| 8 | 日志落盘（按天滚动 + 保留天数可配），关键路径不再静默吞异常 | `core/logger.py`，`logs/portguard.log`；见 7.7 |
 | 9 | UI 增量更新省份下拉、条件滚动、不可见页不刷新 | 设置页/监控页改造，自检覆盖筛选回归 |
 | 10 | 打开日志目录入口 | 设置页按钮 → 系统文件管理器 |
 
@@ -916,4 +916,67 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
   * 实操坑二：卸载过程若中断，pip 会把已删一半的目录改名为 `~` 前缀（`~yside6_*_dist-info`、
     `plugins/~ultimedia`、`translations/~twebengine_locales` …）留在 site-packages 里，
     导致后续每条 pip 命令都刷 `Ignoring invalid distribution` 警告；需按 RECORD 差集清理。
+
+### 7.7 上报服务「启动失败」根因与工作日志改造（2026-10-16）
+
+**用户报障**：点击「启动接收服务」提示
+`启动失败（端口 18080）：Unable to configure formatter 'default' 可能被占用或权限不足`。
+
+**根因与端口、权限**毫无关系，链路如下：
+
+| 步 | 事实 |
+|---|---|
+| 1 | 打包后的窗口程序 `console=False`，且 `pythonw` 同理 → **`sys.stdout` / `sys.stderr` 都是 `None`** |
+| 2 | uvicorn 0.54 的 `DefaultFormatter.__init__`（`uvicorn/logging.py:42`）执行 `sys.stdout.isatty()` |
+| 3 | `None.isatty()` → `AttributeError: 'NoneType' object has no attribute 'isatty'` |
+| 4 | 该异常发生在 `dictConfig` 解析 formatter 阶段，被包成 `ValueError: Unable to configure formatter 'default'` |
+| 5 | 异常从 `uvicorn.Config.__init__` → `configure_logging()` 抛出，**服务根本没走到绑定端口那一步** |
+
+**同时暴露的第二个缺陷**：`uvicorn.Server.startup()` 绑定失败时走 `sys.exit(STARTUP_FAILURE)`，
+抛的是 `SystemExit`（`BaseException` 子类）。原 `run()` 只 `except Exception` → **整段被静默吞掉**，
+`_running` 仍为 `True`，界面显示「已启动」但实际没有任何监听 —— 比直接报错更难排查。
+
+**修复（三道独立防线 + 归因）**：
+
+| # | 措施 | 位置 |
+|---|---|---|
+| ① | `ensure_std_streams()`：std 流为 `None` 时顶上可写、`isatty()` 恒 False、`fileno()` 抛 `OSError` 的替身流 | `core/logger.py` |
+| ② | 给 uvicorn 传 `log_config=None`，**完全不走它的 dictConfig/formatter**；uvicorn 自身日志改由 `route_uvicorn_logs()` 并入 portguard 的 handler | `core/report_server.py` |
+| ③ | 捕获 `BaseException`（含 `SystemExit`）并如实归因；启动后轮询 `Server.started` 确认真的在监听；另有朴素 bind 预检 | `core/report_server.py` |
+| ④ | 失败提示按 `occupied / permission / internal / unknown` 归因，给出可执行下一步，替换原来那句硬编码的「可能被占用或权限不足」 | `core/report_server.py`、`app/server_ctl.py` |
+
+**工作日志与定期清理（同批需求）**：
+
+* 日志改为**按天滚动**，保留天数与「自动清理时刻」都在设置页可改（默认 30 天 / 每天 3 点）；
+  首次运行不受时刻限制立即清一次。清理同时覆盖 DB 访问记录与磁盘上的日志归档。
+* 实现时发现两处标准库陷阱，均已处理并加测试：
+  * `TimedRotatingFileHandler.shouldRollover()` **只比时间、不读 `maxBytes`** —— 直接传参是
+    静默失效的，日志风暴时单文件可能涨到 GB 级。已补大小判断（5 MB 兜底）。
+  * 同一天内第二次滚动会算出**同名归档**并 `os.remove` 掉前一份（静默丢日志）。已通过
+    `rotation_filename()` 追加序号解决。
+* `setup()` 增加重入保护：它内部要读设置（保留天数）→ 触达 `core.database` → 该模块末尾的
+  `log = get_logger(__name__)` 会回调 `setup()`。不先置 `_configured` 就会被装上**两套 handler**，
+  表现为每条日志重复输出两遍（真实踩到，已用用例锁死）。
+
+**新增回归护栏**：
+
+| 用例 / 检查 | 锁死的行为 |
+|---|---|
+| `tests/test_logger_startup.py`（+14 用例） | 替身流、`log_config=None`、`SystemExit` 捕获与归因、日志按日期清理、按大小兜底、同名归档不覆盖、`setup()` 重入 |
+| `selftest.py` 第 8 节 | 真实环境「无控制台下接收服务仍能启动」 |
+| `PortGuard.exe --selfcheck` | **打包产物**上的等价冒烟（窗口程序没有 stdout，靠退出码与日志文件判定） |
+
+> ⚠️ 上一轮打包验证之所以漏掉这条路径：只检查了日志里的「后端就绪」，
+> 而接收服务是**用户手动点击**才启动的，自动化没覆盖到。`--selfcheck` 就是补这个洞。
+
+**实测结果**：
+
+| 项 | 结果 |
+| --- | --- |
+| 复现（`sys.stdout/stderr = None` 下用 uvicorn 默认 `log_config`） | 稳定复现 `ValueError: Unable to configure formatter 'default'` |
+| 修复后源码运行 `main.py --selfcheck` | 通过，退出码 0 |
+| 修复后**打包产物** `PortGuardSmoke.exe --selfcheck` | 通过，退出码 0（日志：`运行方式=打包 exe 管理员=False`） |
+| 端口被占用归因 | `cause=occupied`，提示给出 `netstat -ano \| findstr :端口` |
+| 门禁 | `ruff check` / `ruff format --check` / `mypy`(47 文件) / `pytest` **209 passed** |
+| 端到端自检 | `selftest.py` **37 项全通过，退出码 0** |
 

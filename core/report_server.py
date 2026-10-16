@@ -16,8 +16,11 @@ PortGuard — 业务系统上报接收服务（FastAPI + 后台线程 uvicorn）
 """
 
 import contextlib
+import errno
+import socket
 import threading
 import time
+import traceback
 from typing import Any, Dict, Optional
 
 import uvicorn
@@ -41,7 +44,7 @@ from core.database import (
 from core.db_writer import get_writer
 from core.event_bus import bus
 from core.geo_locator import get_locator
-from core.logger import get_logger
+from core.logger import get_logger, log_file, route_uvicorn_logs
 from core.models import STATUS_ACTIVE, AccessRecord, BanRecord, GeoInfo, RiskResult
 from core.ratelimit import TokenBucket
 from core.rule_engine import get_engine, is_never_ban
@@ -55,10 +58,128 @@ _running = False
 _host = DEFAULT_LISTEN_HOST
 _port = DEFAULT_LISTEN_PORT
 _start_error = ""
+_start_error_cause = ""
+_start_error_detail = ""
+# 真实异常是否"什么都没说明"（uvicorn 绑定失败只抛 SystemExit(1)，不携带原因）
+_start_error_bare = False
 _generated_key = ""  # 对外监听时自动生成的 Key（用于提示用户）
 
 # 限流桶：上报接口按来源 IP 计
 _bucket = TokenBucket(rate=300.0, burst=600)
+
+# 启动后等待「真正开始监听」的上限。正常情况下 uvicorn 在几十毫秒内就绪，
+# 这个等待只在失败时才会跑满，用来把失败原因如实返回给界面。
+_READY_TIMEOUT_MS = 5000
+
+
+# ═══════════════════════════════════════════════════════════
+#  启动失败诊断
+# ═══════════════════════════════════════════════════════════
+
+# 故障归因分类。之所以要分：以前界面不管什么原因都硬编码一句
+# 「可能被占用或权限不足」，而真实原因可能和端口毫无关系
+# （例如 uvicorn 的 formatter 配置异常），误导排障方向。
+CAUSE_OCCUPIED = "occupied"
+CAUSE_PERMISSION = "permission"
+CAUSE_INTERNAL = "internal"
+CAUSE_UNKNOWN = "unknown"
+
+# Windows 的 WSAEADDRINUSE / WSAEACCES，以及类 Unix 的 errno
+_OCCUPIED_CODES = {errno.EADDRINUSE, 10048, 98}
+_PERMISSION_CODES = {errno.EACCES, errno.EPERM, errno.EADDRNOTAVAIL, 10013, 13, 1, 10049}
+
+
+def _code_of(exc: BaseException) -> int:
+    """取异常里的错误码（Windows 优先用 winerror）"""
+    return int(getattr(exc, "winerror", 0) or getattr(exc, "errno", 0) or 0)
+
+
+def _cause_of(exc: BaseException) -> str:
+    """把异常归到一个可解释的原因上"""
+    if isinstance(exc, OSError):
+        code = _code_of(exc)
+        if code in _OCCUPIED_CODES:
+            return CAUSE_OCCUPIED
+        if code in _PERMISSION_CODES:
+            return CAUSE_PERMISSION
+        return CAUSE_UNKNOWN
+    return CAUSE_INTERNAL
+
+
+def _hint_for(cause: str) -> str:
+    """给用户一句话的下一步动作，而不是笼统地猜"""
+    if cause == CAUSE_OCCUPIED:
+        return (
+            "该端口已被其它程序占用。可在设置页换一个端口；"
+            f"或用 netstat -ano | findstr :{_port} 查出占用进程。"
+        )
+    if cause == CAUSE_PERMISSION:
+        return (
+            "系统拒绝绑定该端口。低于 1024 的端口需要管理员权限；"
+            "也可能被系统保留段拦下（netsh http show urlacl 可查）。"
+        )
+    if cause == CAUSE_INTERNAL:
+        return "这是程序内部错误，与端口占用、权限无关。完整堆栈已写入日志文件。"
+    return "原因未知，完整堆栈已写入日志文件。"
+
+
+def _record_start_error(exc: BaseException) -> None:
+    """记录启动失败：给界面看的短信息 + 归因 + 完整堆栈"""
+    global _start_error, _start_error_cause, _start_error_detail, _start_error_bare
+    # uvicorn 绑定端口失败时走的是 sys.exit(STARTUP_FAILURE)，属于 BaseException
+    # 而非 Exception —— 以前只 except Exception 会把它整个漏掉，结果是
+    # 「界面显示已启动、实际没有任何监听」，比直接报错更难查。这种异常本身
+    # 不携带原因，所以要靠预检结论补上。
+    bare = isinstance(exc, SystemExit)
+    _start_error_bare = bare
+    if bare:
+        _start_error = f"服务启动失败（uvicorn 退出码 {getattr(exc, 'code', None)}）"
+    else:
+        _start_error = f"{type(exc).__name__}: {exc}"
+    _start_error_cause = CAUSE_INTERNAL if bare else _cause_of(exc)
+    _start_error_detail = traceback.format_exc()
+
+
+def _probe_bind(host: str, port: int) -> Optional[BaseException]:
+    """
+    预检：这个地址能不能绑定成功。
+
+    与 uvicorn 的实际行为保持一致（Windows 下 asyncio 不会设 SO_REUSEADDR，
+    两边都是朴素 bind），所以结论可靠。返回 None 表示可以绑定。
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        s.bind((host, port))
+        return None
+    except OSError as e:
+        return e
+    finally:
+        with contextlib.suppress(Exception):
+            s.close()
+
+
+def _wait_ready(timeout_ms: int = _READY_TIMEOUT_MS) -> bool:
+    """
+    等 uvicorn 真正开始监听。
+
+    `Server.started` 是 uvicorn 在绑定+启动完成后置位的标志。超时但没出现
+    任何错误时按「可能只是慢」处理（返回 True），避免在慢机器上误判失败。
+    """
+    if _server is None:
+        return False
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if _server.started:
+            return True
+        if _start_error:
+            return False
+        if _thread is not None and not _thread.is_alive():
+            return False
+        time.sleep(0.02)
+    if not _server.started and not _start_error:
+        log.warning("接收服务在 %d ms 内未报告就绪，按已启动继续（可能只是启动较慢）", timeout_ms)
+    return True
 
 
 def _client_key(request: Request) -> str:
@@ -376,10 +497,48 @@ def _ensure_api_key(host: str, provided: str) -> str:
     return key
 
 
+def _finalize_failure(probe_err: Optional[BaseException]) -> None:
+    """
+    失败收尾：优先采信真实异常，其次是预检结论，都没有才给兜底文案。
+
+    为什么不是简单地用预检结论：预检只是朴素 bind，理论上存在极小概率的
+    误报；真实异常才是权威。但如果真实异常是 uvicorn 的 `SystemExit(1)`
+    （它不携带任何原因），此时预检结论反而是唯一有信息量的线索。
+    """
+    global _start_error, _start_error_cause, _start_error_detail
+    if not _start_error_bare and _start_error_cause in (CAUSE_OCCUPIED, CAUSE_PERMISSION):
+        pass  # 已经有明确定论，不必再动
+    elif _start_error_bare or not _start_error:
+        if probe_err is not None:
+            _start_error = f"{type(probe_err).__name__}: {probe_err}"
+            _start_error_cause = _cause_of(probe_err)
+            _start_error_detail = "".join(
+                traceback.format_exception(type(probe_err), probe_err, probe_err.__traceback__)
+            )
+        else:
+            if not _start_error:
+                _start_error = "服务未能在超时时间内就绪"
+            _start_error_cause = CAUSE_UNKNOWN
+
+    log.error(
+        "接收服务启动失败：%s | %s（日志：%s）",
+        _start_error,
+        _hint_for(_start_error_cause),
+        log_file(),
+    )
+
+
 def start_server(port: Optional[int] = None, api_key: str = "") -> bool:
     global _server, _thread, _running, _port, _start_error, _host
+    global _start_error_cause, _start_error_detail, _start_error_bare
     if _running:
         return True
+
+    _start_error = ""
+    _start_error_cause = ""
+    _start_error_detail = ""
+    _start_error_bare = False
+
     try:
         init_db()
         _port = int(port or cfg.get_int("listen_port", DEFAULT_LISTEN_PORT))
@@ -389,6 +548,10 @@ def start_server(port: Optional[int] = None, api_key: str = "") -> bool:
         _bucket.configure(
             cfg.get_int("rate_limit_per_sec", 300), cfg.get_int("rate_limit_burst", 600)
         )
+
+        # 预检端口：把「被占用 / 权限不足」这类确定性失败提前到同步路径上，
+        # 不用等 uvicorn 在后台线程里 sys.exit(1)（那个信号以前会被漏掉）
+        probe_err = _probe_bind(_host, _port)
 
         app = _make_app(key)
         max_body = cfg.get_int("max_body_mb", 2)
@@ -400,45 +563,70 @@ def start_server(port: Optional[int] = None, api_key: str = "") -> bool:
             access_log=False,
             # 单次未完成事件的字节上限，兜住不带 Content-Length 的慢速大 body
             h11_max_incomplete_event_size=max(16 * 1024, max_body * 1024 * 1024),
+            # ⚠️ 不能让 uvicorn 配置自己的日志：它的 DefaultFormatter 在构造时会执行
+            # `sys.stdout.isatty()`，窗口化运行（pythonw / 打包后 console=False）下
+            # std 流为 None，于是抛 AttributeError，被 dictConfig 包成
+            # 「Unable to configure formatter 'default'」，服务根本起不来，
+            # 而且报错和端口毫无关系、极易误导排障。日志统一交给 core.logger。
+            log_config=None,
         )
         _server = uvicorn.Server(config)
+        # 把 uvicorn 自己的日志接到 portguard 的 handler 上，避免排障时两头找
+        route_uvicorn_logs()
 
         def run():
             import asyncio
 
+            global _running
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(_server.serve())
-            except Exception as e:
-                global _start_error
-                _start_error = str(e)
+            except BaseException as e:
+                # 必须连 SystemExit 一起抓：uvicorn 绑定端口失败时走的就是
+                # sys.exit(STARTUP_FAILURE)，它属于 BaseException 而非 Exception，
+                # 以前只 except Exception 会把它整个吞掉 —— 结果是「界面显示已启动、
+                # 实际没有任何监听」，比直接报错更糟。
+                _record_start_error(e)
                 log.exception("接收服务异常退出")
+            finally:
+                with contextlib.suppress(Exception):
+                    loop.close()
+                _running = False
 
         _thread = threading.Thread(target=run, daemon=True, name="portguard-api")
         _thread.start()
+
+        if not _wait_ready():
+            _running = False
+            _finalize_failure(probe_err)
+            return False
+
         _running = True
-        _start_error = ""
         log.info(
-            "接收服务已启动：http://%s:%d（API Key %s）",
+            "接收服务已启动：http://%s:%d（API Key %s，日志 %s）",
             _host,
             _port,
             "已启用" if key else "未启用",
+            log_file(),
         )
         return True
     except Exception as e:
-        _start_error = str(e)
+        _record_start_error(e)
         _running = False
-        log.exception("接收服务启动失败")
+        log.exception("接收服务启动失败：%s", _start_error)
         return False
 
 
 def stop_server() -> None:
     global _running
+    was_running = _running
     if _server:  # 只读引用，不需要 global 声明
         with contextlib.suppress(Exception):
             _server.should_exit = True
     _running = False
+    if was_running:
+        log.info("接收服务已收到停止指令（端口 %d）", _port)
 
 
 def is_running() -> bool:
@@ -455,6 +643,23 @@ def get_host() -> str:
 
 def get_start_error() -> str:
     return _start_error
+
+
+def get_start_error_cause() -> str:
+    """启动失败的归因（occupied / permission / internal / unknown）"""
+    return _start_error_cause
+
+
+def get_start_error_hint() -> str:
+    """给用户看的下一步动作建议（不是笼统猜测）"""
+    if not _start_error_cause:
+        return ""
+    return _hint_for(_start_error_cause)
+
+
+def get_start_error_detail() -> str:
+    """完整堆栈（已同时写入日志文件）"""
+    return _start_error_detail
 
 
 def get_generated_key() -> str:

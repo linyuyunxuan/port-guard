@@ -20,6 +20,7 @@ from PySide6.QtCore import QTimer
 from app import ban_service, maintenance, server_ctl
 from app.xdb_service import get_service as get_xdb_service
 from core import report_server
+from core import settings as cfg
 from core.config import LEVEL_LABEL
 from core.database import count_active_bans, count_risk_unhandled, count_today
 from core.event_bus import bus
@@ -53,7 +54,8 @@ log = get_logger(__name__)
 PUMP_INTERVAL_MS = 150
 STATS_INTERVAL_MS = 2000
 EXPIRE_INTERVAL_MS = 60_000
-CLEANUP_INTERVAL_MS = 3600_000
+# 维护巡检节拍：只负责「看一眼今天到点没有」，真正的清理每天最多跑一次
+CLEANUP_TICK_MS = 10 * 60_000
 
 
 class EventPumpMixin(_HostBase):
@@ -104,9 +106,9 @@ class EventPumpMixin(_HostBase):
         self.expire_timer.timeout.connect(self._check_expired)
         self.expire_timer.start()
 
-        # 日志/备份清理
+        # 日志/备份清理：每 10 分钟看一眼，每天到点才真跑（见 _maintenance_due）
         self.clean_timer = QTimer(self)
-        self.clean_timer.setInterval(CLEANUP_INTERVAL_MS)
+        self.clean_timer.setInterval(CLEANUP_TICK_MS)
         self.clean_timer.timeout.connect(self._cleanup_logs)
         self.clean_timer.start()
 
@@ -238,10 +240,20 @@ class EventPumpMixin(_HostBase):
             self._refresh_stats(force=True)
 
     def _cleanup_logs(self) -> None:
+        """定期清理：访问记录、日志文件、离线库备份、下载残留（每天到点跑一次）"""
+        if not maintenance.due_today():
+            return
         try:
-            maintenance.cleanup_logs()
+            n_rows = maintenance.cleanup_logs()
+            n_files = maintenance.cleanup_log_files()
             maintenance.cleanup_backups()
             maintenance.cleanup_downloads()
+            log.info(
+                "定期清理完成：访问记录 %d 条、日志文件 %d 个（保留 %d 天）",
+                n_rows,
+                n_files,
+                cfg.get_int("log_retention_days", 30),
+            )
         except Exception:
             log.exception("定期清理失败")
 

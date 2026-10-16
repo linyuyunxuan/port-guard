@@ -567,6 +567,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         event.accept()
 
     def _shutdown(self) -> None:
+        log.info("PortGuard 退出：正在停止后台服务与批量写入器")
         try:
             server_ctl.stop()
         except Exception:
@@ -577,6 +578,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             stop_writer(timeout=3.0)
         except Exception:
             log.exception("停止批量写入器失败")
+        log.info("PortGuard 已退出")
 
     def _quit(self) -> None:
         self._really_quit = True

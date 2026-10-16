@@ -12,11 +12,16 @@ PortGuard PyInstaller 打包配置
   并用 start_as_admin.bat / 界面上的「以管理员身份重启」按钮在需要时提权
 
 打包产物的运行验证（2026-10-16 实做过）：
-- uac_admin=True 的 exe 从非提权进程启动会直接被系统拒绝（ERROR_ELEVATION_REQUIRED），
-  所以「自动化冒烟」要另建一份 uac_admin=False 的临时 spec：
+- **首选：`PortGuard.exe --selfcheck`** —— 在「模拟无控制台」的条件下真正启停一次接收服务，
+  退出码 0 即通过（窗口程序没有 stdout，`print` 看不到，细节看日志文件）。
+  这一步专门覆盖「窗口化 + sys.stdout 为 None」这条路径：uvicorn 的彩色 formatter 会执行
+  `sys.stdout.isatty()`，std 流为 None 时会抛 AttributeError，被 dictConfig 包成
+  「Unable to configure formatter 'default'」，表现成「接收服务启动失败」。
+- 但 `uac_admin=True` 的 exe 从非提权进程启动会直接被系统拒绝（ERROR_ELEVATION_REQUIRED），
+  所以要自动化跑 `--selfcheck` 时，另建一份 `uac_admin=False` 的临时 spec：
       copy port_guard.spec _smoke.spec      # 把 uac_admin 改 False、name 改成 PortGuardSmoke
       pyinstaller --noconfirm --workpath build_smoke --distpath dist_smoke _smoke.spec
-  然后用普通权限启动 dist_smoke/PortGuardSmoke/PortGuardSmoke.exe 即可。
+      dist_smoke\PortGuardSmoke\PortGuardSmoke.exe --selfcheck
 - 判定「跑起来了」不能只看进程存活：窗口化程序崩溃时会弹错误框并一直卡住，进程同样“活着”。
   可靠做法是看 %APPDATA%/PortGuard/logs/portguard.log 里出现
   「PortGuard 后端就绪（配置项 N 条）」且没有「界面启动失败」。

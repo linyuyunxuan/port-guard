@@ -46,6 +46,11 @@ htmlcov/
 build/
 dist/
 *.spec.bak
+# 自动化冒烟用的临时产物（做法见 port_guard.spec 顶部说明）：
+# copy port_guard.spec _smoke.spec → 改 uac_admin=False → 单独构建，避免污染正式产物
+build_smoke/
+dist_smoke/
+_smoke.spec
 
 # ── 编辑器 / 操作系统 ──
 .idea/

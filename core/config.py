@@ -233,7 +233,9 @@ DEFAULT_SETTINGS = {
     "alert_popup_level": LEVEL_CRITICAL,
     "alert_merge_sec": "60",  # 同 IP 告警合并窗口
     # 数据
-    "log_retention_days": "30",
+    "log_retention_days": "30",  # 访问记录 + 日志文件的保留天数
+    "maintenance_hour": "3",  # 每天几点执行定期清理（0-23）
+    "maintenance_last_date": "",  # 最近一次清理日期 YYYY-MM-DD（内部状态）
     "log_level": "INFO",
     "geo_cache_size": "20000",
     "monitor_buffer_size": "5000",  # 实时监控环形缓冲行数

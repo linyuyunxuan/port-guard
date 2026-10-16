@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app import maintenance
 from core import firewall, report_server
 from core import settings as cfg
 from core.config import (
@@ -36,7 +37,7 @@ from core.config import (
     user_data_dir,
 )
 from core.database import clear_all_logs, delete_old_access
-from core.logger import get_logger
+from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.theme import C
 from gui.widgets import ToggleSwitch
@@ -364,6 +365,13 @@ class SettingsPage(QWidget):
         self.sp_cache.setValue(20000)
         self.sp_cache.setFixedWidth(140)
 
+        # 定期清理的执行时刻（24 小时制）。默认凌晨 3 点，避开营业时段。
+        self.sp_maint_hour = QSpinBox()
+        self.sp_maint_hour.setRange(0, 23)
+        self.sp_maint_hour.setValue(3)
+        self.sp_maint_hour.setSuffix(" 点")
+        self.sp_maint_hour.setFixedWidth(120)
+
         row_data = QHBoxLayout()
         b_clean = QPushButton("清理过期日志")
         b_clean.setObjectName("btn_outline")
@@ -382,10 +390,15 @@ class SettingsPage(QWidget):
         self.lbl_datadir = QLabel(user_data_dir())
         self.lbl_datadir.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
         self.lbl_datadir.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_logfile = QLabel(log_file())
+        self.lbl_logfile.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_logfile.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         f.addRow("日志保留", self.sp_retention)
+        f.addRow("自动清理时刻", self.sp_maint_hour)
         f.addRow("监控缓冲行数", self.sp_buffer)
         f.addRow("归属地缓存条数", self.sp_cache)
+        f.addRow("日志文件", self.lbl_logfile)
         f.addRow("数据目录", self.lbl_datadir)
         f.addRow("", self._wrap(row_data))
         return g
@@ -442,6 +455,7 @@ class SettingsPage(QWidget):
 
         # 数据
         self.sp_retention.setValue(cfg.get_int("log_retention_days", 30))
+        self.sp_maint_hour.setValue(cfg.get_int("maintenance_hour", 3))
         self.sp_buffer.setValue(cfg.get_int("monitor_buffer_size", 5000))
         self.sp_cache.setValue(cfg.get_int("geo_cache_size", 20000))
 
@@ -482,6 +496,7 @@ class SettingsPage(QWidget):
                 ),
                 "alert_merge_sec": self.sp_merge.value(),
                 "log_retention_days": self.sp_retention.value(),
+                "maintenance_hour": self.sp_maint_hour.value(),
                 "monitor_buffer_size": self.sp_buffer.value(),
                 "geo_cache_size": self.sp_cache.value(),
                 "xdb_auto_sync": "1" if self.tg_xdb_auto.isChecked() else "0",
@@ -499,6 +514,12 @@ class SettingsPage(QWidget):
             get_locator().set_cache_size(self.sp_cache.value())
         except Exception:
             log.exception("应用归属地缓存条数失败")
+
+        # 日志保留天数改动即时生效（滚动 handler 每次滚动时才读 backupCount）
+        try:
+            set_retention(self.sp_retention.value())
+        except Exception:
+            log.exception("应用日志保留天数失败")
 
         self.settings_saved.emit()
         QMessageBox.information(
@@ -661,9 +682,16 @@ class SettingsPage(QWidget):
         )
 
     def _clean_logs(self) -> None:
+        """手动立即清理：访问记录 + 磁盘上的过期日志文件"""
         days = self.sp_retention.value()
         n = delete_old_access(days)
-        QMessageBox.information(self, "完成", f"已清理 {n} 条超过 {days} 天的访问日志。")
+        n_files = maintenance.cleanup_log_files(days)
+        QMessageBox.information(
+            self,
+            "完成",
+            f"已清理 {n} 条超过 {days} 天的访问记录，"
+            f"以及 {n_files} 个过期日志文件。\n\n日志文件：{log_file()}",
+        )
 
     def _clear_logs(self) -> None:
         if (

@@ -16,7 +16,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import List
+from typing import Any, List
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -300,7 +300,69 @@ finally:
 
 check("停止接收服务", not report_server.is_running())
 
-# ── 8. 数据库总览 ──
+# ── 8. 无控制台启动回归（窗口化运行的真实场景）──
+# pythonw / 打包后 console=False 时 sys.stdout 与 sys.stderr 是 None。此前 uvicorn 的
+# DefaultFormatter 会因此抛 AttributeError（sys.stdout.isatty()），被 dictConfig 包成
+# 「Unable to configure formatter 'default'」——接收服务直接起不来，而界面提示的却是
+# 「可能被占用或权限不足」。这一段就是那个 bug 的回归护栏。
+_saved_out, _saved_err = sys.stdout, sys.stderr
+sys.stdout = None  # 模拟窗口化运行：无控制台
+sys.stderr = None
+_nc_ok = _nc_null_ok = False
+_nc_patched: List[str] = []
+_nc_err = _nc_detail = ""
+try:
+    from core.logger import ensure_std_streams
+
+    _nc_patched = ensure_std_streams()
+    # 上面把 sys.* 置成 None 后，类型检查器已把它们收窄为 None；
+    # 先落到 Any 变量上，后面才能安全地调用 write/flush/isatty
+    _out: Any = sys.stdout
+    _err_out: Any = sys.stderr
+    try:
+        _out.write("x")
+        _err_out.flush()
+        _nc_null_ok = _out.isatty() is False and _err_out.isatty() is False
+    except Exception:
+        _nc_null_ok = False
+    _nc_ok = report_server.start_server(PORT + 1, API_KEY)
+    _nc_err = report_server.get_start_error()
+    _nc_detail = report_server.get_start_error_detail()
+    report_server.stop_server()
+finally:
+    sys.stdout = _saved_out
+    sys.stderr = _saved_err
+
+check(
+    "无控制台时自动兜底 std 流", set(_nc_patched) == {"stdout", "stderr"}, f"patched={_nc_patched}"
+)
+check("替身流可写且 isatty 为假", _nc_null_ok)
+check("无控制台下接收服务仍能启动", _nc_ok, f"{_nc_err} {_nc_detail[:120]}")
+
+# ── 9. 日志保留（定期清理）──
+from app import maintenance
+from core.logger import log_file, logs_dir
+
+_d = logs_dir()
+_stale_file = os.path.join(_d, "portguard.log.2000-01-01")
+with open(_stale_file, "w", encoding="utf-8") as f:
+    f.write("stale\n")
+_old_ts = time.time() - 400 * 86400
+os.utime(_stale_file, (_old_ts, _old_ts))
+_removed = maintenance.cleanup_log_files(30)
+check(
+    "超期日志归档被清理、活跃日志保留",
+    _removed >= 1 and not os.path.exists(_stale_file) and os.path.exists(log_file()),
+    f"删除={_removed} 保留天数={cfg.get_int('log_retention_days', 30)}",
+)
+check(
+    "定期清理时刻可配置",
+    isinstance(cfg.get_int("maintenance_hour", -1), int)
+    and cfg.get_int("maintenance_hour", -1) >= 0,
+    f"maintenance_hour={cfg.get('maintenance_hour')} last={cfg.get('maintenance_last_date') or '(未跑过)'}",
+)
+
+# ── 10. 数据库总览 ──
 today = count_today()
 check(
     "数据库统计可读",

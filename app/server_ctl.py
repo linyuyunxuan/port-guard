@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple
 from core import report_server
 from core import settings as cfg
 from core.config import DEFAULT_LISTEN_PORT, LOOPBACK_HOSTS
-from core.logger import get_logger
+from core.logger import get_logger, log_file
 
 log = get_logger(__name__)
 
@@ -30,6 +30,8 @@ def state() -> Dict:
         "api_key_set": bool((cfg.get("api_key", "") or "").strip()),
         "generated_key": report_server.get_generated_key(),
         "error": report_server.get_start_error(),
+        "error_cause": report_server.get_start_error_cause(),
+        "error_hint": report_server.get_start_error_hint(),
         "rate_limit": report_server.rate_limit_stats(),
     }
 
@@ -43,8 +45,14 @@ def start(port: Optional[int] = None) -> Tuple[bool, str]:
     ok = report_server.start_server(p)
     if not ok:
         err = report_server.get_start_error() or "未知错误"
-        log.error("接收服务启动失败：%s", err)
-        return False, f"启动失败（端口 {p}）：{err}\n可能被占用或权限不足"
+        hint = report_server.get_start_error_hint()
+        host = report_server.get_host()
+        log.error("接收服务启动失败（%s:%d）：%s", host, p, err)
+        msg = f"启动失败（{host}:{p}）：{err}"
+        if hint:
+            msg += f"\n{hint}"
+        msg += f"\n详细堆栈见日志：{log_file()}"
+        return False, msg
 
     host = report_server.get_host()
     if host in LOOPBACK_HOSTS:
