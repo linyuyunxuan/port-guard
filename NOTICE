@@ -1,0 +1,55 @@
+# NOTICE — 第三方代码与数据
+
+PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**本项目编写、
+或来自第三方的部分，以及各自的许可与来源，便于合规审查与后续升级。
+
+---
+
+## 1. `ip2region/` —— IP 归属地离线查询客户端（vendored）
+
+- **来源**：https://github.com/lionsoul2014/ip2region  （仓库内 `binding/python/ip2region/`）
+- **版本**：随上游仓库 3.18.0 一同引入
+- **许可**：Apache License 2.0
+- **引入方式**：整体复制（vendored），**未做逻辑修改**
+- **为什么 vendored 而不是声明依赖**：上游 Python binding 零第三方依赖、体量小，
+  直接内置可避免打包（PyInstaller）与运行期 pip 依赖问题，也便于离线部署。
+- **本项目的改动**：仅通过 `core/geo_locator.py` 调用，未修改该目录内任何文件。
+  **升级方式**：从上游 `binding/python/ip2region/` 整目录替换。
+- **注意**：该目录在 `pyproject.toml` 中已 `exclude`，不参与 ruff / mypy 检查；
+  其代码风格与本项目无关，评审时请勿对其提出风格问题。
+
+## 2. `data/ip2region_v4.xdb` / `ip2region_v6.xdb` —— 离线 IP 数据库
+
+- **来源**：https://github.com/lionsoul2014/ip2region  （仓库内 `data/`）
+- **许可**：Apache License 2.0
+- **格式**：xdb（ip2region 自有二进制格式）
+- **运行期更新**：`core/xdb_updater.py` 会在版本指纹变化时从
+  jsDelivr CDN / GitHub raw / ghproxy 等镜像下载新版本，
+  经「大小 → git blob SHA-1 → xdb 结构校验 → 抽样查询」四重校验后原子替换，
+  旧库备份到 `data/backup/`，可一键回滚。下载源受主机白名单约束（见
+  `core/config.py` 的 `XDB_ALLOWED_HOSTS`）。
+
+## 3. 运行时依赖（通过 pip 安装，未内置）
+
+| 包 | 用途 | 许可 |
+| --- | --- | --- |
+| PyQt6 | 桌面界面 | GPL v3 / 商业双许可 |
+| FastAPI | 上报接收服务 | MIT |
+| Uvicorn | ASGI 服务器 | BSD-3-Clause |
+| Starlette（FastAPI 依赖） | ASGI 框架 | BSD-3-Clause |
+| Pydantic（FastAPI 依赖） | 数据校验 | MIT |
+
+> **PyQt6 许可提示**：PyQt6 采用 GPL v3 / 商业双许可。若 PortGuard 需要以
+> **闭源**形式对外分发，应改用 **PySide6**（LGPL，可闭源动态链接），
+> 或购买 Riverbank 的商业许可。仅内部自用不受影响，但请知悉此约束。
+
+开发期依赖（pytest / ruff / mypy / httpx）仅用于 CI 与本地开发，不随产品分发。
+
+---
+
+## 4. 检查项
+
+```bash
+# 列出所有直接依赖及其许可（需先安装 pip-licenses）
+pip install pip-licenses && pip-licenses --with-urls --format=markdown
+```

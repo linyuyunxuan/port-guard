@@ -1,0 +1,157 @@
+# PortGuard 工程配置
+#
+# 这份文件是「工程规范落地」的锚点：格式化、静态检查、类型检查、测试
+# 四件事的规则都写在这里，避免每个开发者的本机规则不一致。
+#
+# 用法：
+#   ruff check .            # 静态检查（CI 门禁）
+#   ruff format .           # 格式化
+#   mypy core app           # 类型检查（当前非门禁，见 README）
+#   pytest                  # 测试（CI 门禁）
+
+[project]
+name = "portguard"
+version = "1.1.0"
+description = "Windows 端口访问防御工具：HTTP 上报 → 离线 IP 归属地 → 规则打分 → 防火墙封禁"
+requires-python = ">=3.11"
+readme = "README.md"
+
+# ── 依赖 ──
+# 运行时依赖的权威清单在 requirements.txt（PyInstaller 打包脚本也读它）。
+dependencies = [
+    "PyQt6>=6.6",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",   # fastapi TestClient 依赖
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+# ═══════════════════════════════════════════════════════════
+#  ruff —— 代码规范与静态缺陷
+# ═══════════════════════════════════════════════════════════
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# ip2region/ 是上游 vendored 代码（见 NOTICE），不做任何风格要求
+extend-exclude = ["ip2region", "build", "dist", "assets", "data"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle error
+    "W",    # pycodestyle warning
+    "F",    # pyflakes（未定义名、未使用导入等真缺陷）
+    "I",    # isort
+    "B",    # flake8-bugbear（循环变量闭包、可变默认参数等）
+    "C4",   # 推导式简化
+    "UP",   # pyupgrade
+    "SIM",  # 可简化写法
+    "RUF",  # ruff 自有规则
+    "S",    # flake8-bandit（安全）
+    "PIE",  # 杂项
+    "RET",  # 返回值写法
+    "PL",   # pylint 子集
+]
+ignore = [
+    # ── 风格类 ──
+    "E501",       # 行宽交给 ruff format，不因注释超宽报错
+    # 统一使用 typing 泛型（List/Optional/Dict），不混用两种风格。
+    # 若要现代化，应一次性全量改并同步更新文档，而不是让两种写法共存。
+    "UP006", "UP035", "UP045",
+    "PLR2004",    # 魔法数字：本工具里 1000/86400/端口号等语义清晰
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915",  # 分支/参数/语句数上限
+    "PLR0917",    # 位置参数过多：Qt 信号槽回调签名由框架决定
+
+    # ── 中文文案 ──
+    # RUF001/002/003 会把中文注释和界面文案里的全角标点（，、：）当成
+    # 「易混淆字符」报错。全项目界面均为中文，直接关闭。
+    "RUF001", "RUF002", "RUF003",
+
+    # ── 刻意为之 ──
+    "PLC0415",    # 函数内 import：PyQt6 体积大，延迟到用到处导入可显著加快启动
+    "PLW0603",    # global：core.database / settings / db_writer 用模块级单例
+    "S101",       # assert：用于内部不变量与测试
+    "S110", "S112",  # try-except-pass/continue：边界处兜底，已统一改为记日志
+    "S105", "S106", "S107",  # 硬编码「口令」串：实际是 settings 的 key 名
+    "S311",       # random：仅用于规则名后缀，不涉及密码学
+    "S324",       # md5：用于文件指纹比对（非签名），且优先使用 git blob sha1
+    "S603", "S607",  # subprocess：本工具的核心功能就是调用 PowerShell 操作防火墙
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里 assert 与「故意构造的危险输入」是主业，安全规则不适用
+"tests/*" = ["S", "B011", "PLR2004", "E402"]
+# 示例脚本是给业务系统开发者抄的样板，URL 由调用方传入，非攻击面
+"examples/*" = ["S310", "C408"]
+# 自检脚本同样是开发工具，访问的是本机 localhost
+"selftest.py" = ["S310", "E402"]
+# 上传入口需在加载 Qt 之前改 sys.path，import 只能靠后
+"main.py" = ["E402"]
+# 下载源 URL 全部经 validators.safe_https_url 做 https + 主机白名单校验
+"core/xdb_updater.py" = ["S310"]
+# vendored 上游代码不做要求
+"ip2region/*" = ["ALL"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "app", "gui"]
+
+# ═══════════════════════════════════════════════════════════
+#  mypy —— 类型检查
+#  当前状态：已配置但**不作为 CI 门禁**。历史代码大量使用 Qt 动态属性与
+#  字典结构，一次性补齐注解成本过高；先用 check_untyped_defs 逐步收紧，
+#  新写的 core/ 模块要求注解完整。
+# ═══════════════════════════════════════════════════════════
+
+[tool.mypy]
+python_version = "3.11"
+# 注意：mypy 的 exclude 是正则，Windows 上路径会带反斜杠，
+# 故用「斜杠两侧可选」的写法，确保 vendored 的 ip2region 一定被排除。
+exclude = ["(^|[/\\\\])ip2region([/\\\\]|$)", "(^|[/\\\\])(build|dist)([/\\\\]|$)"]
+# PyQt6 / uvicorn 等未必带完整类型存根
+ignore_missing_imports = true
+# 即使函数没写注解也检查函数体（能抓出真实的类型错用）
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+# 渐进式：允许从宽松开始
+disallow_untyped_defs = false
+
+# vendored 的上游客户端：不跟随、不报错
+# （mypy 的 exclude 只作用于「目录扫描发现的文件」，被 import 进来的模块
+#  必须用 follow_imports=skip 才能真正跳过，否则仍会报上游的类型问题）
+[[tool.mypy.overrides]]
+module = ["ip2region.*", "ip2region"]
+follow_imports = "skip"
+ignore_errors = true
+
+# ═══════════════════════════════════════════════════════════
+#  pytest
+# ═══════════════════════════════════════════════════════════
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+# 测试全部离线运行：不访问网络（在线同步用 monkeypatch 打桩）
+markers = [
+    "online: 需要访问外网的用例（默认不跑，见 tests/README 说明）",
+]
+
+[tool.coverage.run]
+source = ["core", "app", "gui"]
+omit = ["ip2region/*", "tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

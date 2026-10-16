@@ -1,0 +1,71 @@
+name: CI
+
+# 门禁目标：ruff 全绿 + pytest 全绿。
+# mypy 目前只跑不拦（历史代码注解不全，见 pyproject.toml 说明），
+# 目的是让类型问题可见，但不阻塞交付。
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "port-guard/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "port-guard/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: port-guard
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: ruff + pytest (Python ${{ matrix.python-version }})
+    runs-on: windows-latest      # 目标平台就是 Windows：防火墙/编码相关逻辑必须在此验证
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: port-guard/requirements*.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov httpx ruff mypy
+
+      - name: 代码规范与静态缺陷（ruff）
+        run: ruff check . --output-format=github
+
+      - name: 格式检查（ruff format）
+        run: ruff format --check .
+        continue-on-error: true   # 格式化暂不拦，先让存量代码逐步对齐
+
+      - name: 类型检查（mypy，非门禁）
+        run: mypy core app
+        continue-on-error: true
+
+      - name: 单元测试 + 覆盖率
+        run: pytest -q --cov --cov-report=term-missing --cov-report=xml
+
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: port-guard/coverage.xml
+          if-no-files-found: ignore

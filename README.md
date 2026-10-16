@@ -1,0 +1,354 @@
+# PortGuard 端口访问防御工具
+
+Windows 桌面端「端口访问防御工具」：**业务系统把访问记录上报给本工具 → 本工具用离线 IP 库识别来源归属地 → 规则引擎打分 → 给出封禁建议 → 人工确认后写入 Windows 防火墙**。
+
+基于本仓库（ip2region 3.18.0）自带的离线 IP 定位库与 Python 查询客户端实现，**IP 归属地查询全程离线，不依赖任何外部服务**。
+
+---
+
+## 一、快速开始
+
+```bat
+:: 1) 首次安装依赖（已安装可跳过）
+install.bat
+
+:: 2) 普通权限启动：仅监控 + 生成封禁建议
+start.bat
+
+:: 3) 管理员权限启动：启用封禁 / 解封功能
+start_as_admin.bat
+```
+
+或直接用虚拟环境运行：
+
+```bat
+C:\Users\Administrator\.workbuddy\binaries\python\envs\portguard\Scripts\python.exe main.py
+```
+
+---
+
+## 二、让业务系统上报访问记录
+
+工具启动后内置一个 HTTP 接收服务，**默认只监听 `127.0.0.1:18080`**（仅本机业务系统可上报）。
+需要局域网内其它机器上报时，到「设置 → 接收服务」打开「允许局域网访问」——
+此时会**强制要求 API Key**（界面会自动生成一个，复制到业务系统的 `X-API-Key` 请求头）。
+
+> 为什么不默认监听 `0.0.0.0`：上报接口可以直接影响封禁决策。若暴露在局域网且无鉴权，
+> 内网任意主机都能伪造上报把某个 IP 的规则打到满分，进而「借 PortGuard 之手」封掉它。
+> 因此默认收敛为本机，局域网访问必须显式开启并带 Key。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/v1/access/report` | 单条上报（返回本次风险判定） |
+| POST | `/api/v1/access/batch` | 批量上报（单次 ≤ 1000 条） |
+| GET | `/api/v1/health` | 健康检查（含写入器与限流状态） |
+| GET | `/api/v1/version` | 版本 / 规则数 / 监听端口 |
+| GET | `/api/v1/banned/{ip}` | 查询某 IP 是否处于封禁中 |
+| POST | `/api/v1/rules/reload` | 让服务重载规则文件 |
+
+鉴权：设置了 API Key 后，所有接口都要求请求头 `X-API-Key: <key>`，不匹配返回 401。
+限流：默认每 IP 300 次/秒、突发 600（设置页可调，`0` 表示关闭），超限返回 429。
+请求体：默认上限 8 MB，超限返回 413。
+`/docs`、`/redoc`、`/openapi.json` 均**已关闭**（减少信息暴露面）。
+
+### 请求体
+
+```json
+{
+  "ip": "113.118.113.77",
+  "remote_port": 54321,
+  "local_port": 3000,
+  "protocol": "http",
+  "method": "POST",
+  "path": "/admin/login",
+  "status_code": 401,
+  "user_agent": "Mozilla/5.0 (compatible; Nmap Scripting Engine)",
+  "bytes": 512,
+  "timestamp": "2026-10-16T10:15:00+08:00",
+  "host": "api.example.com",
+  "server_name": "xcl-pos",
+  "tags": {"biz": "order", "trace_id": "abc123"}
+}
+```
+
+* 必填：`ip`、`local_port`
+* `timestamp` 支持 ISO8601（带或不带时区）与 epoch 毫秒 / 秒；不传则用服务端接收时间
+* 若配置了 API Key，需带请求头 `X-API-Key: <你的密钥>`
+
+### 响应
+
+```json
+{"success": true, "data": {"id": 1287, "ip": "113.118.113.77",
+ "geo": "中国·广东省·深圳市·电信", "risk_score": 0, "risk_level": "normal",
+ "matched_rules": [], "suggest_ban": false}}
+```
+
+### curl 示例
+
+```bash
+curl -X POST http://127.0.0.1:18080/api/v1/access/report \
+  -H "Content-Type: application/json" \
+  -d "{\"ip\":\"45.33.32.156\",\"local_port\":8080,\"method\":\"POST\",\"path\":\"/admin/login\",\"status_code\":401,\"user_agent\":\"sqlmap/1.7\"}"
+```
+
+### 业务系统接入（Python，见 `examples/report_client.py`）
+
+要点：**上报失败绝不能影响业务主流程**，务必加超时并吞掉异常。
+
+```python
+import datetime
+import requests
+
+PORTGUARD_URL = "http://127.0.0.1:18080/api/v1/access/report"
+
+def report_access(client_ip, local_port, path, status_code,
+                  user_agent="", method="GET", server_name="xcl-pos"):
+    try:
+        requests.post(PORTGUARD_URL, json={
+            "ip": client_ip, "local_port": local_port, "protocol": "http",
+            "method": method, "path": path, "status_code": status_code,
+            "user_agent": user_agent, "bytes": 0,
+            "server_name": server_name,
+            "timestamp": datetime.datetime.now().astimezone().isoformat(),
+        }, timeout=1.0)
+    except Exception:
+        pass   # 熔断：上报失败不影响业务
+```
+
+---
+
+## 三、内置风险规则
+
+规则可在界面「规则配置」页启停与调参，保存后即时生效；也可直接编辑 `data/rules.json`。
+
+| 规则 | 触发条件（默认） | 分值 | 等级 |
+| --- | --- | --- | --- |
+| 黑名单命中 | 来源 IP 在黑名单中 | 100 | 严重 |
+| 端口扫描 | 同 IP 30 秒内访问 ≥15 个不同端口 | 80 | 严重 |
+| 敏感路径爆破 | 60 秒内 `/admin`、`/login` 等敏感路径返回 401/403 ≥10 次 | 70 | 高 |
+| 境外访问管理端口 | 归属地在境外且访问 22/3389/1433/3306/6379/8080 等 | 65 | 高 |
+| 高频请求 | 同 IP 10 秒内请求 ≥50 次 | 60 | 高 |
+| 扫描器特征 | UA 为空或命中 nmap / sqlmap / masscan / nikto / curl 等 | 45 | 中 |
+| 错误风暴 | 60 秒内 4xx+5xx 占比 ≥70% 且样本 ≥20 | 40 | 中 |
+| 异常 HTTP 方法 | TRACE / PUT / DELETE / CONNECT / PATCH | 30 | 低 |
+| 超大请求体 | 单次请求体 ≥5 MB | 25 | 低 |
+
+评分映射：`≥90 严重` / `≥65 高` / `≥40 中` / `≥20 低`，多规则命中累加，单条封顶 100。
+`高` 与 `严重` 会生成**封禁建议**（不自动执行，除非手动开启「自动模式」）。
+
+**白名单优先**：命中白名单的 IP 直接豁免且永不封禁。内网 / 回环 / 保留地址段（`127.0.0.0/8`、`192.168.0.0/16`…）受硬保护，永远无法被封禁。
+
+---
+
+## 四、离线 IP 库的在线同步（保持与上游同步）
+
+离线库（`data/ip2region_v4.xdb` / `ip2region_v6.xdb`）会随上游仓库更新，
+本工具内置**在线同步**能力，可以在不重启、不重装的前提下把离线库换成最新版。
+
+**判新旧的方式（关键设计）**：用 git blob SHA-1 做内容指纹比对 ——
+`sha1("blob <size>\0" + 文件内容)`，与 GitHub Contents API 返回的 `sha` 逐字节一致。
+所以「探测是否有新版本」只需要几百字节的请求，**不需要下载整个库**
+（v4 约 10.6 MB、v6 约 35.6 MB）。
+
+**同步流程**（任一步失败都不动正式库）：
+
+```
+版本指纹比对  →  多源下载（CDN → 官方 → 镜像，自动容错）
+             →  四重校验：文件大小 / git blob SHA-1 / xdb 结构 / 抽样查询
+             →  备份旧库到 data/backup/
+             →  原子替换（os.replace，同盘原子）
+             →  热加载新库（代数 +1，无需重启进程）
+```
+
+* 失败自动回滚到旧库；正在进行的上报不受影响（新老 searcher 都是只读内存对象）
+* 界面入口：「设置 → 离线库在线同步」有 **立即检查更新 / 立即同步 / 强制重新下载**，
+  以及自动检查（可设间隔，默认 24 小时）、启动时检查、自动下载并热换三个开关
+* 进度通过事件总线推到界面（进度条 + 阶段文案），全程不阻塞 UI
+* 可将下载源换成自定义镜像（必须是 https 且在白名单主机内，防 SSRF）
+* 命令行验证：
+
+```bat
+python -c "from core import xdb_updater as U; c=U.check(); print(c.method, c.message)"
+```
+
+---
+
+## 五、封禁机制
+
+* 仅操作**以 `PortGuard_Block_` 为前缀**的自有规则，不会误伤系统或第三方规则
+* 优先 `New-NetFirewallRule`（原生支持 IPv6），失败自动回退 `netsh advfirewall`
+* 规则命名：`PortGuard_Block_<IP>_<毫秒时间戳>_<随机后缀>`（同毫秒重复封禁也不会重名）
+* **所有拼进命令行的值都先过 `core.validators`**：IP 先做白名单归一化，文本走
+  PowerShell 单引号字面量。非法输入直接拒绝，**不会产生任何命令**
+* 支持封禁时长与到期自动解封（每分钟巡检）
+* 「与防火墙对账」按钮可清理数据库中已失效的记录
+* 需要管理员权限；普通权限下监控与判定照常，封禁按钮不生效并给出提示
+
+---
+
+## 六、界面
+
+| 页面 | 作用 |
+| --- | --- |
+| 实时监控 | 实时访问流水（时间 / IP / 归属地 / 端口 / 路径 / UA / 命中规则 / 风险），统计卡片、多维筛选、右键快捷操作 |
+| 风险事件 | 命中规则的记录，可按等级与处理状态筛选，支持确认 / 忽略 / 一键封禁 |
+| 封禁管理 | 待确认建议区 + 已封禁列表，手动封禁、解封、一键全部解封、防火墙对账 |
+| 规则配置 | 9 条规则可视化启停调参 + 黑 / 白名单（支持 CIDR）编辑 |
+| IP 查询 | 单条 / 批量归属地查询，支持 IPv4 + IPv6，可导出 CSV |
+| 设置 | 接收服务（端口 / 局域网开关 / API Key）、离线库在线同步、封禁策略、限流、告警、数据保留 |
+
+界面截图见 `screenshots/`。
+
+---
+
+## 七、项目结构
+
+```
+port-guard/
+├── main.py                 程序入口（后端先就绪 → 单实例保护 → 托盘常驻）
+├── selftest.py             离屏端到端自检（真实环境冒烟，35 项检查）
+├── pyproject.toml          ruff / mypy / pytest 统一配置（工程规范的锚点）
+├── NOTICE                  第三方代码与数据来源、许可说明
+├── .github/workflows/ci.yml  CI：ruff 门禁 + pytest 门禁
+├── requirements.txt        运行时依赖
+├── requirements-dev.txt    开发依赖（pytest / ruff / mypy / httpx）
+├── install.bat / start.bat / start_as_admin.bat
+├── app.manifest            PyInstaller 用的管理员权限清单
+├── port_guard.spec         PyInstaller 打包配置
+├── assets/                 图标等资源
+├── data/                   运行时数据（xdb 库、rules.json、名单、db、backup/、download/）
+├── ip2region/              内置的 ip2region Python 客户端（vendored，上游 Apache-2.0）
+├── core/
+│   ├── config.py           路径与常量（含离线库同步的源与白名单）
+│   ├── logger.py           滚动日志（logs/portguard.log，5MB × 5）
+│   ├── validators.py       输入校验与命令安全（IP 归一化 / PowerShell 单引号转义）
+│   ├── models.py           领域模型
+│   ├── database.py         SQLite 数据层（WAL + 迁移入口 + 批量插入 SQL）
+│   ├── migrations.py       schema 版本迁移（PRAGMA user_version）
+│   ├── settings.py         设置内存缓存（写穿透）
+│   ├── db_writer.py        单写线程 + 攒批事务写入器
+│   ├── geo_locator.py      归属地查询（整库入内存 + LRU + 热换库）
+│   ├── rule_engine.py      规则引擎（滑动窗口 + 评分）
+│   ├── ratelimit.py        令牌桶限流
+│   ├── firewall.py         Windows 防火墙执行器
+│   ├── report_server.py    FastAPI 上报接收服务
+│   ├── xdb_updater.py      离线库在线同步（指纹比对 / 下载 / 校验 / 回滚）
+│   ├── alerts.py           托盘 / 声音 / 弹窗告警
+│   └── event_bus.py        跨线程事件总线
+├── app/                    无 Qt 依赖的业务层（供 GUI 与测试共用）
+│   ├── ban_service.py      封禁唯一校验入口与执行流程
+│   ├── xdb_service.py      离线库同步的后台调度
+│   ├── server_ctl.py       上报服务启停
+│   └── maintenance.py      日志 / 备份 / 临时文件清理
+├── gui/                    PyQt6 界面（主题 / 主窗口 + mixins / 6 个页面 / 通用控件）
+└── tests/                  pytest 用例（隔离环境，全离线）
+```
+
+---
+
+## 八、技术要点
+
+* **线程模型**：Qt 主线程（唯一可操作控件）+ uvicorn 后台线程 + 规则评估 +
+  批量写入线程 + 防火墙子进程。后台线程只往队列投递事件，主线程用定时器批量消费，
+  从根上避免跨线程崩溃
+* **写入路径**：每条上报都丢进 `BatchWriter` 队列，由唯一的写线程按批（默认 200 条 / 200ms）
+  提交。SQLite 只允许一个写者，单写线程同时消除了 `database is locked`
+* **设置读取**：`core.settings` 进程内缓存 + 写穿透，上报热点路径不再查库
+  （原实现每条上报查 3 次 settings 表）
+* **命令安全**：所有进命令行的值先经 `core.validators` 白名单归一化 +
+  PowerShell 单引号字面量包装（`$(...)`、反引号、`;` 全部失效）
+* **归属地查询**：启动时一次性校验 xdb，整库读入内存后用 `new_with_buffer`
+  构造无状态 Searcher（线程安全、可全局共享），实测加载约 60ms、单次查询微秒级；
+  支持在线同步后**热换库**（代数 +1，不重启进程）
+* **时间统一存 epoch 毫秒** 用于滑动窗口计算，展示层再转本地时间
+* **SQLite 开启 WAL + `synchronous=NORMAL`**：读侧短连接，写侧单长连接；
+  NORMAL 是 WAL 下的常规取舍（极端断电可能丢最后几批日志，但不会损坏库）
+* **高频爆发保护**：事件队列满时丢弃最旧数据；表格批量刷新 + 5000 行环形缓冲，
+  滑动窗口按 IP 限长（`deque(maxlen=5000)`）避免内存无界增长
+
+---
+
+## 九、测试与自检
+
+### 单元 / 集成测试（CI 门禁）
+
+```bat
+python -m pytest -q                 :: 全部用例
+python -m pytest -q --cov           :: 带覆盖率
+```
+
+用例全部**离线、隔离**运行：`tests/conftest.py` 把 `config.project_dir()` 指到临时目录，
+只有读内置 xdb 与 rules.json 时才映射回真实 `data/`（只读），
+因此跑测试绝不会碰你的数据库、备份和日志。
+
+覆盖重点：
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_validators.py` | IP 归一化、PowerShell 转义、URL 白名单边界 |
+| `test_firewall_cmd.py` | **S1 命令注入回归**：恶意输入必须产生 0 条命令 |
+| `test_db_writer.py` | 攒批写入、commit 次数、低流量落库、停止时排空 |
+| `test_core_infra.py` | 设置缓存、令牌桶、schema 迁移、老库安全收敛 |
+| `test_rule_engine.py` | 各规则触发与不触发、窗口隔离、白名单豁免 |
+| `test_geo_and_xdb.py` | 定位器、热换库、指纹计算、下载四重校验、备份回滚 |
+| `test_ban_service.py` | 封禁校验入口、内网硬保护 |
+| `test_report_server.py` | 默认收敛、鉴权、限流、请求体上限、CORS、错误处理 |
+
+### 端到端自检（真实环境冒烟，交付前跑）
+
+```bat
+python selftest.py
+```
+
+覆盖：后端初始化 → 设置缓存 → 定位库 → **在线同步模块** → 正常/恶意判定 →
+批量落库 → 主窗口与 6 个页面 → 筛选回归 → 封禁校验（拒绝注入 / 内网保护）→
+服务启停与真实 HTTP 接口 → 统计。全部通过时退出码为 0。
+
+> 自检会临时关闭「自动封禁」并在结束时还原，避免以管理员身份跑自检时真的写防火墙规则。
+
+---
+
+## 十、开发规范
+
+```bat
+:: 静态检查（CI 门禁，必须全绿）
+ruff check .
+
+:: 格式化
+ruff format .
+
+:: 类型检查（core/app 已全绿；gui 因 Qt 动态属性暂不设门禁）
+mypy core app
+```
+
+* 规则配置统一在 `pyproject.toml`，不要在各自机器上各配一套
+* 新增「拼进命令行」的值 → 必须先在 `core/validators.py` 加校验/转义
+* 新增「会影响判定逻辑」的改动 → 必须补 `tests/` 用例
+* 日志统一走 `core.logger.get_logger()`，不要用裸 `print` 或静默 `except: pass`
+
+---
+
+## 十一、打包为 exe
+
+```bat
+pyinstaller port_guard.spec
+```
+
+产物在 `dist/PortGuard/`。打包后只读资源（xdb、rules.json 默认值）随包分发，运行时数据写入 `%APPDATA%/PortGuard/`。
+
+---
+
+## 十二、注意事项
+
+* 封禁需要**管理员权限**，请在 `start_as_admin.bat` 中启动
+* 「自动封禁模式」默认**关闭**。开启后会跳过人工确认直接写防火墙，请先确认规则的评分阈值
+* 上报服务默认只监听 `127.0.0.1`。需要局域网访问时到设置页打开开关，
+  系统会**自动生成 API Key**（必须复制给业务系统，否则会上报 401）
+* 单次扫描器探测（如一条 sqlmap 请求）只会**告警**，不会建议封禁；
+  持续爆破（窗口型规则）才会升级为封禁建议 —— 这是刻意设计，避免误伤
+* IP 归属地数据来自 `data/ip2region_v*.xdb`，精度到城市，不保证 100% 准确；
+  可开启在线同步保持最新
+* 第三方代码与许可见 `NOTICE`（特别注意 **PyQt6 是 GPL v3/商业双许可**，
+  若需闭源分发请改用 PySide6 或购买商业许可）

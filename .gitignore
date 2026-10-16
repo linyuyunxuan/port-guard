@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────
+# PortGuard .gitignore
+# 原则：源码 / 默认配置 / 文档进库；
+#       运行时状态、大体积二进制、本机缓存一律不进库。
+# ─────────────────────────────────────────────────────────────
+
+# ── 运行时状态（可重新生成或含本机信息）──
+data/port_guard.db
+data/port_guard.db-wal
+data/port_guard.db-shm
+data/blacklist.json
+data/whitelist.json
+data/rules.json
+
+# ── 大体积定位库（从仓库 data/ 拷贝而来，且可在设置页从上游重新同步）──
+data/*.xdb
+data/ip2region_v4.xdb
+data/ip2region_v6.xdb
+data/xdb_manifest.json
+
+# ── 离线库同步产生的暂存与备份 ──
+data/backup/
+data/download/
+data/logs/
+logs/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+
+# ── 检查工具缓存 ──
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ── 打包产物 ──
+build/
+dist/
+*.spec.bak
+
+# ── 编辑器 / 操作系统 ──
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db
+Desktop.ini

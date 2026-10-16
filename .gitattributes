@@ -1,0 +1,12 @@
+# 统一换行与二进制判定，避免 Windows/Linux 协作时产生无意义的行尾差异
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则个别命令解析会出错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：不做行尾转换、不参与文本 diff
+*.png binary
+*.ico binary
+*.xdb binary
+*.db binary

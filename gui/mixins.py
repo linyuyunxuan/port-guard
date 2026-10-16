@@ -1,0 +1,256 @@
+"""
+PortGuard — 主窗口的行为 Mixin
+
+原 `MainWindow` 是 609 行 God Object：UI 组装、托盘、事件泵、服务启停、
+封禁编排、到期巡检、统计刷新、日志清理全塞在一起，改一处要在 600 行里翻找。
+
+现在按职责拆开：
+- 本文件（gui/mixins.py）：与 Qt 生命周期强耦合的胶水逻辑
+  · EventPumpMixin —— 事件泵 / 统计刷新 / 状态栏
+  · ServerCtlMixin —— 上报服务启停
+- app/*.py：不依赖 Qt 的业务编排（可单测）
+- gui/main_window.py：只剩界面组装与信号连线
+"""
+import contextlib
+
+from PyQt6.QtCore import QTimer
+
+from app import ban_service, maintenance, server_ctl
+from app.xdb_service import get_service as get_xdb_service
+from core import report_server
+from core.config import LEVEL_LABEL
+from core.database import count_active_bans, count_risk_unhandled, count_today
+from core.event_bus import bus
+from core.logger import get_logger
+from gui.theme import C
+
+log = get_logger(__name__)
+
+# 事件泵节拍（毫秒）：兼顾实时感与 CPU
+PUMP_INTERVAL_MS = 150
+STATS_INTERVAL_MS = 2000
+EXPIRE_INTERVAL_MS = 60_000
+CLEANUP_INTERVAL_MS = 3600_000
+
+
+class EventPumpMixin:
+    """跨线程事件泵 + 统计刷新 + 状态栏"""
+
+    def _setup_timers(self) -> None:
+        # 主事件泵：批量把后台队列里的记录搬到界面
+        self.pump = QTimer(self)
+        self.pump.setInterval(PUMP_INTERVAL_MS)
+        self.pump.timeout.connect(self._drain_events)
+        self.pump.start()
+
+        self.stat_timer = QTimer(self)
+        self.stat_timer.setInterval(STATS_INTERVAL_MS)
+        self.stat_timer.timeout.connect(self._refresh_stats)
+        self.stat_timer.start()
+
+        # 到期自动解封巡检
+        self.expire_timer = QTimer(self)
+        self.expire_timer.setInterval(EXPIRE_INTERVAL_MS)
+        self.expire_timer.timeout.connect(self._check_expired)
+        self.expire_timer.start()
+
+        # 日志/备份清理
+        self.clean_timer = QTimer(self)
+        self.clean_timer.setInterval(CLEANUP_INTERVAL_MS)
+        self.clean_timer.timeout.connect(self._cleanup_logs)
+        self.clean_timer.start()
+
+        # 离线库自动同步调度（间隔由设置决定，默认 24 小时）
+        self.xdb_timer = QTimer(self)
+        self.xdb_timer.setInterval(10 * 60_000)
+        self.xdb_timer.timeout.connect(lambda: self._maybe_sync_xdb(first_run=False))
+        self.xdb_timer.start()
+
+    def _drain_events(self) -> None:
+        # 1) 实时访问记录
+        records = bus.drain_access(500)
+        if records:
+            self.page_monitor.append_records(records)
+
+        # 2) 风险事件
+        risks = bus.drain_risk(200)
+        if risks:
+            last = risks[-1]
+            rec, res = last.get("record"), last.get("result")
+            if rec and res:
+                self._set_status(
+                    f"风险事件：{rec.ip} · {LEVEL_LABEL.get(res.level, res.level)} · "
+                    f"{res.score} 分 · {rec.geo.region_short if rec.geo else '未知'}",
+                    C.warning)
+            # 页面不可见时不刷新（原实现每次事件都重载整表）
+            if self.stack.currentIndex() == 1:
+                self.page_events.refresh()
+
+        # 3) 告警
+        for a in bus.drain_alert(50):
+            self.alerter.notify(a)
+
+        # 4) 封禁结果
+        bans = bus.drain_ban(200)
+        if bans:
+            for b in bans:
+                if b.get("error"):
+                    self._set_status(f"封禁 {b.get('ip')} 失败：{b.get('error')}", C.danger)
+                else:
+                    self._set_status(f"已封禁 {b.get('ip')}", C.success)
+            if self.stack.currentIndex() == 2 and self.page_bans.isVisible():
+                self.page_bans.refresh()
+            self._refresh_stats(force=True)
+
+        # 5) 离线库同步事件
+        for ev in bus.drain_xdb(100):
+            self._on_xdb_event(ev)
+
+    def _on_xdb_event(self, ev: dict) -> None:
+        """离线库同步进度 → 状态栏 + 设置页进度条"""
+        stage = ev.get("stage", "")
+        msg = ev.get("message", "")
+        pct = int(ev.get("percent", 0) or 0)
+        try:
+            self.page_settings.on_xdb_progress(stage, msg, pct)
+        except Exception:
+            log.exception("刷新离线库同步进度失败")
+
+        color = C.text_secondary
+        if stage == "failed":
+            color = C.danger
+        elif stage in ("done",):
+            color = C.success
+        elif stage in ("download", "verify", "apply", "reload", "check"):
+            color = C.warning
+        self._set_status(f"离线库同步：{msg}", color)
+        if self.lbl_xdb is not None:
+            self.lbl_xdb.setText(f"IP 库：{msg[:24]}")
+            self.lbl_xdb.setStyleSheet(f"color:{color};font-size:12px;")
+
+        if stage == "done":
+            with contextlib.suppress(Exception):
+                self.page_iplookup._update_lib_info()
+            # 换库后缓存已清空，刷新一次统计里的定位库提示
+            self._poll_geo_after_update()
+
+    def _poll_geo_after_update(self) -> None:
+        try:
+            loc = self._locator()
+            self.lbl_geo.setText(
+                f"定位库：已加载 v{loc.generation}（缓存 {loc.cache_info().get('size', 0)}）")
+            self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:12px;")
+        except Exception:
+            log.exception("刷新定位库状态失败")
+
+    # ── 统计 ──
+    def _refresh_stats(self, force: bool = False) -> None:
+        import time
+        now = time.time()
+        if not force and now - self._last_stats < 1.5:
+            return
+        self._last_stats = now
+        try:
+            total, risk = count_today()
+            bans = count_active_bans()
+            unhandled = count_risk_unhandled()
+        except Exception:
+            log.exception("统计刷新失败")
+            total = risk = bans = unhandled = 0
+        self.page_monitor.set_stats(total, risk, bans,
+                                    report_server.is_running(), report_server.get_port())
+        self.lbl_ban_count.setText(f"已封禁 {bans}")
+        if unhandled:
+            self.lbl_status.setText(f"有 {unhandled} 条风险事件待处理")
+            self.lbl_status.setStyleSheet(f"color:{C.warning};font-size:12px;")
+
+    def _set_status(self, text: str, color: str | None = None) -> None:
+        self.lbl_status.setText(text)
+        self.lbl_status.setStyleSheet(f"color:{color or C.text_secondary};font-size:12px;")
+
+    # ── 到期巡检 / 清理 ──
+    def _check_expired(self) -> None:
+        if not self._is_admin():
+            return
+        try:
+            done = ban_service.check_expired()
+        except Exception:
+            log.exception("到期解封巡检失败")
+            return
+        if done:
+            self._set_status(f"已自动解封 {len(done)} 个到期 IP", C.success)
+            if self.stack.currentIndex() == 2:
+                self.page_bans.refresh()
+            self._refresh_stats(force=True)
+
+    def _cleanup_logs(self) -> None:
+        try:
+            maintenance.cleanup_logs()
+            maintenance.cleanup_backups()
+            maintenance.cleanup_downloads()
+        except Exception:
+            log.exception("定期清理失败")
+
+    # ── 离线库同步 ──
+    def _maybe_sync_xdb(self, first_run: bool = False) -> None:
+        svc = get_xdb_service()
+        if svc.busy:
+            return
+        started = svc.maybe_auto(first_run=first_run)
+        if started:
+            self._set_status("正在检查离线 IP 库更新…", C.text_secondary)
+
+    def _sync_xdb_now(self, force: bool = False) -> None:
+        """手动触发同步（设置页 / IP 查询页按钮）"""
+        svc = get_xdb_service()
+        if svc.busy:
+            self._set_status("已有离线库同步任务在进行中", C.warning)
+            return
+        if svc.update_async(force=force):
+            self._set_status("已开始同步离线 IP 库…", C.warning)
+
+
+class ServerCtlMixin:
+    """上报服务启停"""
+
+    def _maybe_start_server_on_launch(self) -> None:
+        if server_ctl.should_autostart():
+            QTimer.singleShot(600, lambda: self._toggle_server(True))
+        else:
+            self._update_server_labels()
+
+    def _toggle_server(self, start=None) -> None:
+        ok, msg = server_ctl.toggle(start)
+        if not ok:
+            self._set_status(msg.splitlines()[0], C.danger)
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "启动失败", msg)
+        else:
+            color = C.success if report_server.is_running() else C.text_secondary
+            first = msg.splitlines()[0]
+            self._set_status(first, color)
+            if report_server.get_generated_key():
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self, "已启用局域网监听",
+                    msg + "\n\n安全提示：监听非本机地址时必须设置 API Key，"
+                          "否则局域网内任意主机都能伪造上报记录，"
+                          "进而污染风险判定甚至触发误封。")
+        self._update_server_labels()
+
+    def _update_server_labels(self) -> None:
+        st = server_ctl.state()
+        if st["running"]:
+            suffix = "" if st["loopback"] else "（局域网）"
+            self.lbl_server.setText(f"服务：运行中 :{st['port']}{suffix}")
+            self.lbl_server.setStyleSheet(f"color:{C.success};font-size:12px;")
+            self.a_server.setText("停止接收服务")
+        else:
+            self.lbl_server.setText("服务：未启动")
+            self.lbl_server.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+            self.a_server.setText("启动接收服务")
+        try:
+            self.page_settings.refresh_server_state()
+        except Exception:
+            log.exception("刷新服务状态失败")
+        self._refresh_stats(force=True)
