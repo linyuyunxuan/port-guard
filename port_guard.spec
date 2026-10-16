@@ -10,6 +10,17 @@ PortGuard PyInstaller 打包配置
 - 推荐 onedir 模式（启动更快）；如需单文件，把 EXE(...) 的 exclude_binaries / COLLECT 段改为 onefile 写法
 - uac_admin=True 会要求管理员权限；若只想默认普通权限，把 uac_admin 改为 False，
   并用 start_as_admin.bat / 界面上的「以管理员身份重启」按钮在需要时提权
+
+打包产物的运行验证（2026-10-16 实做过）：
+- uac_admin=True 的 exe 从非提权进程启动会直接被系统拒绝（ERROR_ELEVATION_REQUIRED），
+  所以「自动化冒烟」要另建一份 uac_admin=False 的临时 spec：
+      copy port_guard.spec _smoke.spec      # 把 uac_admin 改 False、name 改成 PortGuardSmoke
+      pyinstaller --noconfirm --workpath build_smoke --distpath dist_smoke _smoke.spec
+  然后用普通权限启动 dist_smoke/PortGuardSmoke/PortGuardSmoke.exe 即可。
+- 判定「跑起来了」不能只看进程存活：窗口化程序崩溃时会弹错误框并一直卡住，进程同样“活着”。
+  可靠做法是看 %APPDATA%/PortGuard/logs/portguard.log 里出现
+  「PortGuard 后端就绪（配置项 N 条）」且没有「界面启动失败」。
+- 离屏跑设 QT_QPA_PLATFORM=offscreen，避免在自动化环境里弹窗。
 """
 import os
 

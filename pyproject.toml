@@ -33,6 +33,7 @@ dev = [
     "httpx>=0.27",   # fastapi TestClient 依赖
     "ruff>=0.6",
     "mypy>=1.10",
+    "pyinstaller>=6.10",   # 打包验证：pyinstaller port_guard.spec
 ]
 
 # ═══════════════════════════════════════════════════════════
