@@ -95,6 +95,9 @@ ignore = [
 "examples/*" = ["S310", "C408"]
 # 自检脚本同样是开发工具，访问的是本机 localhost
 "selftest.py" = ["S310", "E402"]
+# tools/ 验证脚本同为开发/交付工具：必须在 import core 之前改 sys.path，
+# 且本就是「调用系统命令去改真实防火墙」的用途（S603/S607 已在全局忽略）
+"tools/*" = ["E402"]
 # 上传入口需在加载 Qt 之前改 sys.path，import 只能靠后
 "main.py" = ["E402"]
 # 下载源 URL 全部经 validators.safe_https_url 做 https + 主机白名单校验

@@ -762,10 +762,12 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
 | 检查项 | 命令 | 结果 |
 |---|---|---|
 | 静态检查 | `ruff check .` | **All checks passed!**（0 问题） |
-| 格式检查 | `ruff format --check .` | **49 files already formatted** |
-| 类型检查 | `mypy .` | **Success: no issues found in 47 source files**（全项目、无目录豁免） |
+| 格式检查 | `ruff format --check .` | **51 files already formatted** |
+| 类型检查 | `mypy .` | **Success: no issues found in 49 source files**（全项目、无目录豁免） |
 | 单元 / 集成测试 | `pytest -q` | **209 passed**（全离线、全隔离） |
 | 端到端自检 | `python selftest.py` | **37 项全通过，退出码 0** |
+| 真实防火墙链路 | `python tools/verify_firewall.py` | **11 项全通过**（改动系统状态，需提权） |
+| 打包产物运行 | `python tools/verify_exe.py` | **11 项全通过**（改动系统状态，需提权） |
 
 ### 7.2 逐项落地情况
 
@@ -868,7 +870,7 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
 ### 7.6 遗留与建议
 
 * **已完成（2026-10-16）**：`mypy` 已覆盖全项目并转为 CI 硬门禁，从 70 处报错降到 **0**
-  （`Success: no issues found in 46 source files`）。修法分两类：Mixin 通过 `self` 访问宿主
+  （`Success: no issues found in 49 source files`，含后加的 `tools/` 验证脚本）。修法分两类：Mixin 通过 `self` 访问宿主
   `MainWindow` 属性 → 在 `gui/mixins.py` 用「TYPE_CHECKING 下替换基类为 QMainWindow +
   显式声明宿主属性」；Qt 基类签名比实现更宽（如 `data()` 允许 `QPersistentModelIndex`）→
   按基类签名标注后 `isinstance` 收窄。过程中还清掉了 `page_rules.py` 里三处
@@ -879,7 +881,9 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
   通过把「绑定所有网卡」的地址收敛为 `core/config.py` 的 `WILDCARD_HOST` /
   `BIND_ALL_HOSTS` 常量解决（顺带消除了三处重复字面量与两处 `noqa`）。
 * **已完成（2026-10-16）**：真实防火墙规则增删 + 打包 exe 运行验证（此前因会改动系统状态而挂起，
-  经确认后执行）。
+  经确认后执行）。两项验证已固化为可复现脚本：`tools/verify_firewall.py`、
+  `tools/verify_exe.py`（各自自行请求提权，结果同时写 JSON 到 `%TEMP%\portguard-verify\`），
+  避免「结论留在文档里、脚本随临时目录一起消失」。
 
   **防火墙链路（以管理员身份实跑，用 RFC 5737 文档保留地址 `198.51.100.1`，永不可路由）**：
 
@@ -890,16 +894,32 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
   | 规则确实写入系统防火墙 | 通过（`Get-NetFirewallRule` 同名命中） |
   | 按规则名解封 | 通过 |
   | 规则已从系统防火墙移除 | 通过（剩余 0 条） |
-  | 命令注入输入 `1.2.3.4"; Start-Process calc; #` | 被拒绝，未返回规则名、未产生规则 |
+  | 命令注入输入 `1.2.3.4"; Start-Process calc; #` | 被拒绝（`IP 含非法字符`），未返回规则名、未产生规则 |
   | 内网地址 `192.168.1.10` | 硬保护生效，拒绝封禁 |
   | 用户既有规则 | 全程未被触碰（基线 0 → 收尾 0） |
 
+  > 复跑记录（2026-10-16 15:34）：11/11 通过，收尾规则数 0 —— 与首轮结论一致，
+  > 且这次留下了落盘的结果 JSON。归因提示比首轮更明确：注入输入报的是
+  > `IP 含非法字符`（而不是此前的空错误串），因为 `server_ctl` 已改为按真实异常分类。
+
   **打包 exe**：`pyinstaller port_guard.spec` 成功产出 `dist/PortGuard`（156 MB，278 个文件）。
   Qt6 只打进 `Core/Gui/Network/Svg/Widgets` 五个 DLL —— 与代码实际用到的模块一一对应，
-  确认 Essentials 瘦身没有把 Addons / WebEngine 带进包。产物运行验证（临时去掉提权清单的
-  等价变体，普通权限 + `QT_QPA_PLATFORM=offscreen` 跑 25 秒）：进程稳定存活，日志出现
-  「PortGuard 后端就绪（配置项 30 条）」，数据库自动迁移 v0→v2，离线定位库
-  `ip2region_v4.xdb`(10.6 MB) / `ip2region_v6.xdb`(35.6 MB) 均加载成功，无任何异常痕迹。
+  确认 Essentials 瘦身没有把 Addons / WebEngine 带进包。
+
+  运行验证改用 `tools/verify_exe.py`（**直接验正式产物，不再需要「临时去掉提权清单的等价变体」**），
+  两道检查各司其职：
+
+  | 检查 | 目的 | 结果 |
+  | --- | --- | --- |
+  | `PortGuard.exe --selfcheck` | 覆盖「窗口化 + std 流为 None」这条**只在打包产物里出现**的路径 | 退出码 0；日志 `std 流兜底=['stdout','stderr'] 无控制台启动接收服务 通过` |
+  | 正常启动一次（离屏 20 秒） | 真实 Qt 插件加载 + 完整界面链路 | 存活 20 秒；`PortGuard 后端就绪（配置项 32 条）`；无失败痕迹 |
+
+  日志同时确认 `运行方式=打包 exe`（即确实是 `sys.frozen` 产物在跑，不是源码），
+  以及离线定位库 `ip2region_v4.xdb`(10.6 MB) / `ip2region_v6.xdb`(35.6 MB) 加载成功。
+
+  > 踩坑：首轮该脚本第 10 项判为 FAIL（`新建=[]`）。**是脚本自身的断言错**，不是产品缺陷 ——
+  > 它只统计「有没有新文件」，而 `%APPDATA%\PortGuard` 早已存在（7 个文件），两次运行都是
+  > **追加写**既有日志与数据库，不产生新文件。已改为「新建或更新」，复跑 11/11。
 * **已决策（2026-10-16）**：GUI 框架由 PyQt6 整体迁移到 **PySide6**。PyQt6 是 GPL v3 /
   商业双许可，闭源分发会触发 GPL 传染性；PySide6 为 Qt 官方绑定、LGPL v3，允许闭源分发。
   迁移只涉及导入路径与 `pyqtSignal`/`pyqtProperty` 改名（共 67 处、13 个文件），无逻辑改动；

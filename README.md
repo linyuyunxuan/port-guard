@@ -224,7 +224,7 @@ python -c "from core import xdb_updater as U; c=U.check(); print(c.method, c.mes
 ```
 port-guard/
 ├── main.py                 程序入口（后端先就绪 → 单实例保护 → 托盘常驻）
-├── selftest.py             离屏端到端自检（真实环境冒烟，35 项检查）
+├── selftest.py             离屏端到端自检（真实环境冒烟，37 项检查）
 ├── pyproject.toml          ruff / mypy / pytest 统一配置（工程规范的锚点）
 ├── NOTICE                  第三方代码与数据来源、许可说明
 ├── .github/workflows/ci.yml  CI：ruff check + ruff format + mypy + pytest 四道门禁
@@ -259,6 +259,9 @@ port-guard/
 │   ├── server_ctl.py       上报服务启停
 │   └── maintenance.py      日志 / 备份 / 临时文件清理
 ├── gui/                    PySide6 界面（主题 / 主窗口 + mixins / 6 个页面 / 通用控件）
+├── tools/                  真实环境验证脚本（自行请求提权，不改动仓库状态）
+│   ├── verify_firewall.py  真实防火墙「封禁 → 解封」全链路
+│   └── verify_exe.py       打包产物运行验证（--selfcheck + 正常启动）
 └── tests/                  pytest 用例（隔离环境，全离线）
 ```
 
@@ -337,6 +340,28 @@ dist\PortGuard\PortGuard.exe --selfcheck
 为什么要单列这一条：打包后的窗口程序（`console=False`）**没有 stdout**，`print` 看不到，
 界面点击也没法自动化，而「窗口化 + std 流为 None」恰恰是唯一能让接收服务启动失败的环境
 （uvicorn 的彩色 formatter 会执行 `sys.stdout.isatty()`）。
+
+### 真实环境验证脚本（`tools/`，交付前跑）
+
+上面两条都还有盲区：单元测试把防火墙命令**全部打了桩**（只能证明「命令拼对了」，
+证明不了「Windows 真的接受了这条规则」），自检脚本也没法覆盖打包产物。这两个脚本补上：
+
+```bat
+:: 1. 真实防火墙链路：用文档保留地址 198.51.100.1 实跑「封禁 → 写入系统 → 解封 → 移除」
+python tools\verify_firewall.py
+
+:: 2. 打包产物运行验证：--selfcheck（无控制台启停接收服务）+ 正常启动一次（真实 Qt 插件）
+python tools\verify_exe.py
+```
+
+两个脚本都会**自行请求提权**（弹 UAC），退出码 `0` 通过 / `1` 有检查未通过 /
+`2` 提权被拒绝 / `3` 提权后超时未见结果；逐项结果与日志尾部会打印出来，同时写一份 JSON
+到 `%TEMP%\portguard-verify\`。已在管理员终端里时加 `--no-elevate` 跳过提权。
+
+安全边界：`verify_firewall.py` 只操作 `PortGuard_Block_` 前缀的规则，且**只删除自己刚创建
+的那一条**（按名字），绝不调用 `unblock_all()`，并会断言你的既有规则集一条未变；无论成功
+失败都在 `finally` 里兜底清理。`verify_exe.py` 默认离屏运行（`QT_QPA_PLATFORM=offscreen`），
+加 `--desktop` 才会在本机桌面弹窗。
 
 ---
 
