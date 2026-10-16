@@ -15,11 +15,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import List
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-_failures = []
+_failures: List[str] = []
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:

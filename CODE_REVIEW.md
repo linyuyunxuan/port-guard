@@ -838,7 +838,12 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
 
 ### 7.6 遗留与建议
 
-* `mypy gui`（107 处）未纳入门禁：绝大多数是 Qt 动态属性与信号槽签名，属框架特性而非缺陷。若要让 `gui` 也全绿，需要给控件属性补显式类型标注，建议作为独立任务推进。
+* **已完成（2026-10-16）**：`mypy` 已覆盖全项目并转为 CI 硬门禁，从 70 处报错降到 **0**
+  （`Success: no issues found in 46 source files`）。修法分两类：Mixin 通过 `self` 访问宿主
+  `MainWindow` 属性 → 在 `gui/mixins.py` 用「TYPE_CHECKING 下替换基类为 QMainWindow +
+  显式声明宿主属性」；Qt 基类签名比实现更宽（如 `data()` 允许 `QPersistentModelIndex`）→
+  按基类签名标注后 `isinstance` 收窄。过程中还清掉了 `page_rules.py` 里三处
+  `_fields["score"|"level"|"action"]` 的**只写不读死代码**，正是它造成 `_fields` 类型混杂。
 * `ruff format --check` 目前设为 `continue-on-error`，存量代码格式尚未统一；建议单独一个提交做一次全量 `ruff format` 后改为门禁。
 * 真实防火墙规则的创建/删除、打包后 exe 的运行验证仍未做（会改动系统状态），需要单独确认后进行。
 * **已决策（2026-10-16）**：GUI 框架由 PyQt6 整体迁移到 **PySide6**。PyQt6 是 GPL v3 /

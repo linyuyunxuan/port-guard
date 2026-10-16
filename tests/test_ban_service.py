@@ -113,8 +113,12 @@ def test_execute_failure_records_failed_status(isolated_env, admin, failing_fw):
 def test_execute_rejects_injection_without_touching_firewall(isolated_env, admin, monkeypatch):
     init_db()
     called = []
-    monkeypatch.setattr(firewall, "block_ip",
-                        lambda *a, **k: called.append(a) or (True, "r", ""))
+
+    def fake_block(*a, **k):
+        called.append(a)
+        return (True, "r", "")
+
+    monkeypatch.setattr(firewall, "block_ip", fake_block)
     ban_id, err = ban_service.execute('1.2.3.4"; Start-Process calc; #', 90, "x", 60)
     assert ban_id is None
     assert err
@@ -146,6 +150,7 @@ def test_unban_success(isolated_env, admin, monkeypatch):
                                status=STATUS_ACTIVE, source="manual"))
     monkeypatch.setattr(firewall, "unblock_ip", lambda ip, names=None: (True, "", 1))
     b = find_active_ban_by_ip("203.0.113.10")
+    assert b is not None
     ok, err = ban_service.unban(b)
     assert ok and err == ""
     assert query_bans(limit=10)[0].status == "unbanned"

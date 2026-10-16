@@ -2,6 +2,7 @@
 PortGuard — 规则元数据（规则名称、说明、默认参数）
 UI 与核心共用，避免循环依赖。
 """
+from typing import Any, Dict, List
 
 # 规则 ID -> 中文名
 RULE_LABELS = {
@@ -31,7 +32,7 @@ RULE_DESCS = {
 
 # 规则 ID -> 该规则可编辑的参数（供 UI 自动生成表单）
 #   key: 参数名, type: int/float/str/list, label: 中文标签
-RULE_PARAMS = {
+RULE_PARAMS: Dict[str, List[Dict[str, Any]]] = {
     "rate_limit": [
         {"key": "window_sec", "type": "int", "label": "统计窗口(秒)", "min": 1, "max": 3600},
         {"key": "threshold", "type": "int", "label": "请求次数阈值", "min": 1, "max": 100000},

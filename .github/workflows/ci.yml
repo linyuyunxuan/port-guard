@@ -1,8 +1,7 @@
 name: CI
 
-# 门禁目标：ruff 全绿 + pytest 全绿。
-# mypy 目前只跑不拦（历史代码注解不全，见 pyproject.toml 说明），
-# 目的是让类型问题可见，但不阻塞交付。
+# 门禁目标：ruff 全绿 + mypy 全绿 + pytest 全绿。
+# ruff format 暂只检查不拦（存量格式未统一，见 pyproject.toml 说明）。
 
 on:
   push:
@@ -55,9 +54,8 @@ jobs:
         run: ruff format --check .
         continue-on-error: true   # 格式化暂不拦，先让存量代码逐步对齐
 
-      - name: 类型检查（mypy，非门禁）
-        run: mypy core app
-        continue-on-error: true
+      - name: 类型检查（mypy）
+        run: mypy .
 
       - name: 单元测试 + 覆盖率
         run: pytest -q --cov --cov-report=term-missing --cov-report=xml

@@ -3,7 +3,13 @@ import datetime
 from collections import deque
 from typing import List, Optional
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QPersistentModelIndex,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QAction, QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -63,8 +69,11 @@ class AccessTableModel(QAbstractTableModel):
             return HEADERS[section]
         return None
 
-    def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
+    def data(self, index: "QModelIndex | QPersistentModelIndex",
+             role: int = Qt.ItemDataRole.DisplayRole):
+        # 基类签名允许 QPersistentModelIndex，但 QAbstractTableModel 实际只会传
+        # QModelIndex（两者并无继承关系），非 QModelIndex 一律按无效索引处理。
+        if not isinstance(index, QModelIndex) or not index.isValid():
             return None
         rec: AccessRecord = self._view[index.row()]
         col = index.column()
@@ -230,7 +239,7 @@ class AccessTableModel(QAbstractTableModel):
         port = self._filters["port"]
         if port and rec.local_port != port:
             return False
-        scope = self._filters["scope"]
+        scope = self._filters["scope"] or ""
         if scope == "中国":
             if not (rec.geo and rec.geo.is_china):
                 return False

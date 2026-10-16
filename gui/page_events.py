@@ -43,6 +43,8 @@ class EventDetailDialog(QDialog):
         txt = QTextEdit()
         txt.setReadOnly(True)
         geo = row.get("geo")
+        # row 取出的值类型是 Any|None，先归一化成 str 再查表，避免把 None 当字典键
+        risk_level = str(row.get("risk_level") or "")
         lines = [
             f"事件 ID：#{row.get('id')}",
             f"时间：{ms_to_str(row.get('event_ts'))}",
@@ -51,7 +53,7 @@ class EventDetailDialog(QDialog):
             f"目标端口：{row.get('local_port')}",
             f"请求路径：{row.get('path') or '/'}",
             f"风险评分：{row.get('risk_score')}",
-            f"风险等级：{LEVEL_LABEL.get(row.get('risk_level'), row.get('risk_level'))}",
+            f"风险等级：{LEVEL_LABEL.get(risk_level, risk_level)}",
             f"命中规则：{'、'.join(rule_label(r) for r in row.get('matched_rules', [])) or '-'}",
             f"处理状态：{HANDLED_LABEL.get(row.get('handled', 0), '-')}",
             "",

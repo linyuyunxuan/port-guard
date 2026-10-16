@@ -96,8 +96,12 @@ def test_block_ip_rejects_protected_networks(spy):
 def test_block_ip_without_admin_does_nothing(monkeypatch):
     calls = []
     monkeypatch.setattr(firewall, "is_admin", lambda: False)
-    monkeypatch.setattr(firewall, "_powershell",
-                        lambda s, timeout=30: calls.append(s) or (0, ""))
+
+    def fake_ps(script, timeout=30):
+        calls.append(script)
+        return (0, "")
+
+    monkeypatch.setattr(firewall, "_powershell", fake_ps)
     ok, _n, err = firewall.block_ip("203.0.113.10")
     assert ok is False
     assert "管理员" in err

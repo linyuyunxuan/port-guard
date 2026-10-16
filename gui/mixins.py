@@ -12,6 +12,7 @@ PortGuard — 主窗口的行为 Mixin
 - gui/main_window.py：只剩界面组装与信号连线
 """
 import contextlib
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QTimer
 
@@ -24,6 +25,27 @@ from core.event_bus import bus
 from core.logger import get_logger
 from gui.theme import C
 
+if TYPE_CHECKING:
+    from PySide6.QtGui import QAction
+    from PySide6.QtWidgets import QLabel, QMainWindow, QStackedWidget
+
+    from core.alerts import Alerter
+    from core.geo_locator import GeoLocator
+    from gui.page_bans import BansPage
+    from gui.page_events import EventsPage
+    from gui.page_iplookup import IpLookupPage
+    from gui.page_monitor import MonitorPage
+    from gui.page_settings import SettingsPage
+
+    # 这两个 Mixin 运行时通过 MainWindow 组合成 QMainWindow 的子类，
+    # 但单看 Mixin 自身，self 只是个 object —— 类型检查器因此既认不出
+    # QTimer(self) 的父对象，也认不出 QMessageBox.warning(self, ...) 的窗口。
+    # 这里只在「类型检查视角」把基类换成 QMainWindow，运行期仍是 object，
+    # 因此不会影响实际 MRO（MainWindow 会显式继承 QMainWindow）。
+    _HostBase = QMainWindow
+else:
+    _HostBase = object
+
 log = get_logger(__name__)
 
 # 事件泵节拍（毫秒）：兼顾实时感与 CPU
@@ -33,8 +55,35 @@ EXPIRE_INTERVAL_MS = 60_000
 CLEANUP_INTERVAL_MS = 3600_000
 
 
-class EventPumpMixin:
-    """跨线程事件泵 + 统计刷新 + 状态栏"""
+class EventPumpMixin(_HostBase):
+    """
+    跨线程事件泵 + 统计刷新 + 状态栏
+
+    下面的「宿主属性」由 MainWindow 在 __init__ 中创建；在此声明只是为了
+    让类型检查器知道它们存在，运行期不产生任何实际赋值。
+    """
+
+    stack: "QStackedWidget"
+    page_monitor: "MonitorPage"
+    page_events: "EventsPage"
+    page_bans: "BansPage"
+    page_settings: "SettingsPage"
+    page_iplookup: "IpLookupPage"
+    alerter: "Alerter"
+    lbl_status: "QLabel"
+    lbl_ban_count: "QLabel"
+    lbl_geo: "QLabel"
+    lbl_xdb: "QLabel | None"
+    _last_stats: float
+
+    # 这两个方法由 MainWindow 实现（MainWindow 自身的定义优先于 Mixin），
+    # 在此声明仅为让类型检查器知道它们存在；单独使用本 Mixin 会直接报错，
+    # 这也是刻意的——本 Mixin 不打算被独立实例化。
+    def _is_admin(self) -> bool:
+        raise NotImplementedError
+
+    def _locator(self) -> "GeoLocator":
+        raise NotImplementedError
 
     def _setup_timers(self) -> None:
         # 主事件泵：批量把后台队列里的记录搬到界面
@@ -210,8 +259,19 @@ class EventPumpMixin:
             self._set_status("已开始同步离线 IP 库…", C.warning)
 
 
-class ServerCtlMixin:
+class ServerCtlMixin(_HostBase):
     """上报服务启停"""
+
+    page_settings: "SettingsPage"
+    lbl_server: "QLabel"
+    a_server: "QAction"
+
+    # 由 EventPumpMixin 实现（MRO 中排在前面），在此声明仅供类型检查
+    def _set_status(self, text: str, color: str | None = None) -> None:
+        raise NotImplementedError
+
+    def _refresh_stats(self, force: bool = False) -> None:
+        raise NotImplementedError
 
     def _maybe_start_server_on_launch(self) -> None:
         if server_ctl.should_autostart():

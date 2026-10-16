@@ -1,5 +1,5 @@
 """PortGuard — 规则配置页"""
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -45,7 +45,7 @@ class RuleCard(QFrame):
         super().__init__(parent)
         self.rule_id = rule_id
         self.cfg = dict(cfg)
-        self._fields: Dict[str, object] = {}
+        self._fields: Dict[str, Tuple[QWidget, str]] = {}
         self.setObjectName("stat_card")
         self.setStyleSheet(
             f"#stat_card{{background:{C.bg_card};border:1px solid {C.border};border-radius:10px;}}")
@@ -83,7 +83,6 @@ class RuleCard(QFrame):
         self.sp_score.setValue(int(self.cfg.get("score", 0)))
         self.sp_score.setFixedWidth(90)
         grid.addWidget(self.sp_score, 1, col)
-        self._fields["score"] = self.sp_score
         col += 1
 
         # 等级
@@ -96,7 +95,6 @@ class RuleCard(QFrame):
             self.cb_level.setCurrentIndex(2)
         self.cb_level.setFixedWidth(110)
         grid.addWidget(self.cb_level, 1, col)
-        self._fields["level"] = self.cb_level
         col += 1
 
         # 动作
@@ -110,7 +108,6 @@ class RuleCard(QFrame):
             self.cb_action.setCurrentIndex(1)
         self.cb_action.setFixedWidth(140)
         grid.addWidget(self.cb_action, 1, col)
-        self._fields["action"] = self.cb_action
         col += 1
 
         # 参数
@@ -119,24 +116,29 @@ class RuleCard(QFrame):
             val = self.cfg.get(key)
             grid.addWidget(self._lbl(label), 0, col)
 
+            w: QWidget
             if typ == "int":
-                w = QSpinBox()
-                w.setRange(int(p.get("min", 0)), int(p.get("max", 2_000_000_000)))
-                w.setValue(int(val if val is not None else p.get("min", 0)))
-                w.setFixedWidth(110)
+                sp = QSpinBox()
+                sp.setRange(int(p.get("min", 0)), int(p.get("max", 2_000_000_000)))
+                sp.setValue(int(val if val is not None else p.get("min", 0)))
+                sp.setFixedWidth(110)
+                w = sp
             elif typ == "float":
-                w = QDoubleSpinBox()
-                w.setDecimals(2)
-                w.setSingleStep(0.05)
-                w.setRange(float(p.get("min", 0)), float(p.get("max", 1)))
-                w.setValue(float(val if val is not None else 0.5))
-                w.setFixedWidth(110)
+                dsp = QDoubleSpinBox()
+                dsp.setDecimals(2)
+                dsp.setSingleStep(0.05)
+                dsp.setRange(float(p.get("min", 0)), float(p.get("max", 1)))
+                dsp.setValue(float(val if val is not None else 0.5))
+                dsp.setFixedWidth(110)
+                w = dsp
             elif typ == "list_int":
-                w = QLineEdit(",".join(str(x) for x in (val or [])))
-                w.setFixedWidth(240)
+                le = QLineEdit(",".join(str(x) for x in (val or [])))
+                le.setFixedWidth(240)
+                w = le
             elif typ == "list_str":
-                w = QLineEdit(",".join(str(x) for x in (val or [])))
-                w.setFixedWidth(280)
+                le2 = QLineEdit(",".join(str(x) for x in (val or [])))
+                le2.setFixedWidth(280)
+                w = le2
             else:
                 w = QLineEdit(str(val or ""))
             grid.addWidget(w, 1, col)
@@ -155,11 +157,8 @@ class RuleCard(QFrame):
         return lb
 
     def _on_toggle(self, on: bool) -> None:
-        for k, v in self._fields.items():
-            if k in ("score", "level", "action"):
-                continue
-            widget = v[0] if isinstance(v, tuple) else v
-            widget.setEnabled(on)
+        for w, _typ in self._fields.values():
+            w.setEnabled(on)
         self.sp_score.setEnabled(on)
         self.cb_level.setEnabled(on)
         self.cb_action.setEnabled(on)
@@ -171,19 +170,17 @@ class RuleCard(QFrame):
             "level": LEVEL_ITEMS[self.cb_level.currentIndex()],
             "action": ACTION_ITEMS[self.cb_action.currentIndex()][0],
         }
-        for key, v in self._fields.items():
-            if key in ("score", "level", "action"):
-                continue
-            w, typ = v
-            text = w.text().strip()
-            if typ in {"int", "float"}:
+        for key, (w, typ) in self._fields.items():
+            if isinstance(w, (QSpinBox, QDoubleSpinBox)):
                 out[key] = w.value()
-            elif typ == "list_int":
-                out[key] = [int(x) for x in _split(text) if x.isdigit()]
-            elif typ == "list_str":
-                out[key] = _split(text)
-            else:
-                out[key] = text
+            elif isinstance(w, QLineEdit):
+                text = w.text().strip()
+                if typ == "list_int":
+                    out[key] = [int(x) for x in _split(text) if x.isdigit()]
+                elif typ == "list_str":
+                    out[key] = _split(text)
+                else:
+                    out[key] = text
         return out
 
 
@@ -289,6 +286,8 @@ class RulesPage(QWidget):
 
         while self.rules_lay.count() > 1:
             item = self.rules_lay.takeAt(0)
+            if item is None:
+                continue
             wdg = item.widget()
             if wdg:
                 wdg.deleteLater()

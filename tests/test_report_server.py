@@ -4,6 +4,7 @@
 覆盖：默认收敛、鉴权、限流、请求体上限、错误处理、CORS 收敛。
 """
 import json
+from typing import Any, Dict
 
 import pytest
 
@@ -207,7 +208,7 @@ def test_repeated_login_probing_escalates_to_ban(client):
     """
     evil = dict(GOOD, ip="45.33.32.156", path="/admin/login", status_code=401,
                 method="POST", user_agent="sqlmap/1.7")
-    last = None
+    last: Dict[str, Any] = {}
     for _ in range(12):
         last = client.post("/api/v1/access/report", json=evil).json()["data"]
     assert last["risk_score"] >= 90

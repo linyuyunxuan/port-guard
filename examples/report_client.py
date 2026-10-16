@@ -111,7 +111,7 @@ if __name__ == "__main__":
     url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:18080"
     cli = PortGuardClient(url)
 
-    demo = [
+    demo: List[Dict[str, Any]] = [
         # 正常业务访问
         {"client_ip": "113.118.113.77", "local_port": 3000, "path": "/api/products",
              "status_code": 200, "method": "GET",

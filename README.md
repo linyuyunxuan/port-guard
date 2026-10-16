@@ -211,7 +211,7 @@ port-guard/
 ├── selftest.py             离屏端到端自检（真实环境冒烟，35 项检查）
 ├── pyproject.toml          ruff / mypy / pytest 统一配置（工程规范的锚点）
 ├── NOTICE                  第三方代码与数据来源、许可说明
-├── .github/workflows/ci.yml  CI：ruff 门禁 + pytest 门禁
+├── .github/workflows/ci.yml  CI：ruff 门禁 + mypy 门禁 + pytest 门禁
 ├── requirements.txt        运行时依赖
 ├── requirements-dev.txt    开发依赖（pytest / ruff / mypy / httpx）
 ├── install.bat / start.bat / start_as_admin.bat
@@ -316,14 +316,16 @@ python selftest.py
 :: 静态检查（CI 门禁，必须全绿）
 ruff check .
 
-:: 格式化
+:: 格式化（CI 先只检查不拦，见下方说明）
 ruff format .
 
-:: 类型检查（core/app 已全绿；gui 因 Qt 动态属性暂不设门禁）
-mypy core app
+:: 类型检查（CI 门禁，覆盖全项目，必须全绿）
+mypy .
 ```
 
 * 规则配置统一在 `pyproject.toml`，不要在各自机器上各配一套
+* 三道门禁：`ruff check` / `mypy .` / `pytest` 全部必须全绿；`ruff format --check`
+  目前只提示不拦截
 * 新增「拼进命令行」的值 → 必须先在 `core/validators.py` 加校验/转义
 * 新增「会影响判定逻辑」的改动 → 必须补 `tests/` 用例
 * 日志统一走 `core.logger.get_logger()`，不要用裸 `print` 或静默 `except: pass`

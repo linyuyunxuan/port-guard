@@ -6,7 +6,7 @@
 # 用法：
 #   ruff check .            # 静态检查（CI 门禁）
 #   ruff format .           # 格式化
-#   mypy core app           # 类型检查（当前非门禁，见 README）
+#   mypy .                  # 类型检查（CI 门禁）
 #   pytest                  # 测试（CI 门禁）
 
 [project]
@@ -104,9 +104,15 @@ known-first-party = ["core", "app", "gui"]
 
 # ═══════════════════════════════════════════════════════════
 #  mypy —— 类型检查
-#  当前状态：已配置但**不作为 CI 门禁**。历史代码大量使用 Qt 动态属性与
-#  字典结构，一次性补齐注解成本过高；先用 check_untyped_defs 逐步收紧，
-#  新写的 core/ 模块要求注解完整。
+#  当前状态：**CI 硬门禁**，覆盖整个项目（core / app / gui / main / selftest /
+#  examples / tests），0 报错。
+#
+#  历史上 gui 层有 70 处报错，主要是两类「框架特性」而非真缺陷：
+#    1. Mixin 通过 self.xxx 访问宿主 MainWindow 的属性 —— 已在 gui/mixins.py
+#       用「TYPE_CHECKING 下替换基类 + 显式声明宿主属性」的标准写法解决；
+#    2. Qt 基类签名比实现更宽（如 data() 允许 QPersistentModelIndex）——
+#       已按基类签名标注 + isinstance 收窄。
+#  因此这里保留 disallow_untyped_defs = false（渐进式），但不再豁免任何目录。
 # ═══════════════════════════════════════════════════════════
 
 [tool.mypy]

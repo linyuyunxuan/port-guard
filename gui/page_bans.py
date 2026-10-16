@@ -412,4 +412,6 @@ class BansPage(QWidget):
                                 f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
         else:
             from PySide6.QtWidgets import QApplication
-            QApplication.instance().quit()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()

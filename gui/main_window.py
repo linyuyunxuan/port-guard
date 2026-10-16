@@ -167,12 +167,12 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
     #  小工具
     # ═══════════════════════════════════════════════
 
-    @staticmethod
-    def _is_admin() -> bool:
+    # 这两个方法被 gui/mixins.py 的 Mixin 以 self.xxx() 调用，
+    # 故写成实例方法（而非 staticmethod），这样 Mixin 的声明能与之正常对齐。
+    def _is_admin(self) -> bool:
         return firewall.is_admin()
 
-    @staticmethod
-    def _locator():
+    def _locator(self):
         return get_locator()
 
     # ═══════════════════════════════════════════════
@@ -455,10 +455,10 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             QMessageBox.information(self, "已封禁", f"{rec.ip} 已处于封禁状态（记录 #{exists.id}）。")
             return
 
-        dlg = BanDurationDialog(rec.ip, score, reason, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        dur_dlg = BanDurationDialog(rec.ip, score, reason, self)
+        if dur_dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self._do_ban(rec.ip, score, reason, dlg.duration_sec())
+        self._do_ban(rec.ip, score, reason, dur_dlg.duration_sec())
 
     def _do_ban(self, ip: str, score: int, reason: str, duration_sec: int) -> None:
         """后台线程执行真实封禁（防火墙命令可能耗时数秒）"""
@@ -476,7 +476,9 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
     def _restart_as_admin(self) -> None:
         ok, err = firewall.open_admin_restart()
         if ok:
-            QApplication.instance().quit()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
         else:
             QMessageBox.warning(self, "提权失败",
                                 f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
@@ -533,4 +535,6 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self._really_quit = True
         self._shutdown()
         self.tray.hide()
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
