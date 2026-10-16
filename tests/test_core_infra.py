@@ -1,4 +1,5 @@
 """设置缓存、令牌桶、schema 迁移的测试"""
+
 import pytest
 
 from core import settings as cfg
@@ -7,6 +8,7 @@ from core.migrations import SCHEMA_VERSION, get_version, migrate
 from core.ratelimit import TokenBucket
 
 # ═══════════════════ 设置缓存 ═══════════════════
+
 
 def test_settings_cache_roundtrip():
     init_db()
@@ -59,6 +61,7 @@ def test_missing_key_default_is_not_cached_as_value():
 
 # ═══════════════════ 令牌桶 ═══════════════════
 
+
 def test_token_bucket_limits_burst():
     b = TokenBucket(rate=10, burst=5)
     allowed = sum(1 for _ in range(20) if b.allow("ip1"))
@@ -71,7 +74,8 @@ def test_token_bucket_refills():
     assert b.allow("k") and b.allow("k")
     assert not b.allow("k")
     import time
-    time.sleep(0.05)          # 1000/s → 50ms 补 50 个令牌，远超桶容量
+
+    time.sleep(0.05)  # 1000/s → 50ms 补 50 个令牌，远超桶容量
     assert b.allow("k")
 
 
@@ -91,8 +95,10 @@ def test_token_bucket_configurable_and_bounded():
 
 # ═══════════════════ schema 迁移 ═══════════════════
 
+
 def test_migration_sets_user_version():
     from core.database import _connect
+
     init_db()
     conn = _connect()
     try:
@@ -103,6 +109,7 @@ def test_migration_sets_user_version():
 
 def test_migration_is_idempotent():
     from core.database import _connect
+
     init_db()
     conn = _connect()
     try:
@@ -115,6 +122,7 @@ def test_migration_is_idempotent():
 def test_migration_adds_new_column():
     """v2 迁移新增 ban_list.unblocked_by，验证加字段真的生效"""
     from core.database import _connect
+
     init_db()
     conn = _connect()
     try:
@@ -126,6 +134,7 @@ def test_migration_adds_new_column():
 
 def test_migration_refuses_future_version():
     from core.database import _connect
+
     init_db()
     conn = _connect()
     try:
@@ -141,6 +150,7 @@ def test_legacy_insecure_settings_are_fixed():
     """老库「监听 0.0.0.0 且 Key 为空」必须被收敛回 127.0.0.1"""
     import core.database as db
     from core.database import _connect, _fix_insecure_legacy_settings
+
     init_db()
     conn = _connect()
     try:
@@ -149,8 +159,9 @@ def test_legacy_insecure_settings_are_fixed():
         conn.execute("DELETE FROM settings WHERE key='_security_migrated_v110'")
         conn.commit()
         _fix_insecure_legacy_settings(conn)
-        host = conn.execute(
-            "SELECT value FROM settings WHERE key='listen_host'").fetchone()["value"]
+        host = conn.execute("SELECT value FROM settings WHERE key='listen_host'").fetchone()[
+            "value"
+        ]
         assert host == "127.0.0.1"
     finally:
         conn.close()
@@ -160,6 +171,7 @@ def test_legacy_insecure_settings_are_fixed():
 def test_update_ban_rejects_unknown_columns():
     """动态列名必须走白名单"""
     from core.database import update_ban
+
     init_db()
     with pytest.raises(ValueError):
         update_ban(1, **{"status = 'x', ip": "1.2.3.4"})

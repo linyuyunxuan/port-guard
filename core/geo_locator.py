@@ -10,6 +10,7 @@ PortGuard — IP 归属地查询（基于 vendored 的 ip2region Python 客户�
   原子替换旧 searcher，无需重启进程
 - 任何异常都兜底为「未知」，绝不把异常抛给 HTTP 层
 """
+
 import ipaddress
 import os
 import threading
@@ -29,13 +30,16 @@ log = get_logger(__name__)
 def get_int_setting_safe(key: str, default: int) -> int:
     try:
         from core import settings as cfg
+
         return cfg.get_int(key, default)
     except Exception:
         return default
 
 
 class GeoLocator:
-    def __init__(self, v4_path: str | None = None, v6_path: str | None = None, cache_size: int = 20000):
+    def __init__(
+        self, v4_path: str | None = None, v6_path: str | None = None, cache_size: int = 20000
+    ):
         self._lock = threading.Lock()
         self._reload_lock = threading.Lock()
         self._cache: OrderedDict[str, str] = OrderedDict()
@@ -46,7 +50,7 @@ class GeoLocator:
         self._v6_path = v6_path or v6_xdb_path()
         self._load_error = ""
         self._loaded_at = 0.0
-        self.generation = 0          # 换库代数，用于 UI 提示
+        self.generation = 0  # 换库代数，用于 UI 提示
         self.stats = {"hit": 0, "miss": 0, "error": 0}
         self.load()
 
@@ -72,9 +76,13 @@ class GeoLocator:
         self._load_error = " | ".join(errs)
         if ok:
             self._loaded_at = time.time()
-            log.info("定位库加载完成：v4=%s（%.1f MB） v6=%s（%.1f MB）",
-                     os.path.basename(self._v4_path), _mb(self._v4_path),
-                     os.path.basename(self._v6_path), _mb(self._v6_path))
+            log.info(
+                "定位库加载完成：v4=%s（%.1f MB） v6=%s（%.1f MB）",
+                os.path.basename(self._v4_path),
+                _mb(self._v4_path),
+                os.path.basename(self._v6_path),
+                _mb(self._v6_path),
+            )
         return ok
 
     def reload(self, v4_path: str | None = None, v6_path: str | None = None) -> Tuple[bool, str]:
@@ -114,8 +122,12 @@ class GeoLocator:
             self._loaded_at = time.time()
             self.generation += 1
             self.cache_clear()
-            log.info("定位库热换完成（第 %d 代）：v4=%.1fMB v6=%.1fMB",
-                     self.generation, _mb(self._v4_path), _mb(self._v6_path))
+            log.info(
+                "定位库热换完成（第 %d 代）：v4=%.1fMB v6=%.1fMB",
+                self.generation,
+                _mb(self._v4_path),
+                _mb(self._v6_path),
+            )
             return True, ""
 
     @staticmethod
@@ -176,9 +188,15 @@ class GeoLocator:
         parts = region.split("|")
         parts += [""] * (5 - len(parts))
         country, province, city, isp, iso = parts[:5]
-        return GeoInfo(ip=ip, country=country.strip(), province=province.strip(),
-                       city=city.strip(), isp=isp.strip(), iso=iso.strip().upper(),
-                       found=True)
+        return GeoInfo(
+            ip=ip,
+            country=country.strip(),
+            province=province.strip(),
+            city=city.strip(),
+            isp=isp.strip(),
+            iso=iso.strip().upper(),
+            found=True,
+        )
 
     @staticmethod
     def is_china(geo: Optional[GeoInfo]) -> bool:
@@ -210,8 +228,7 @@ class GeoLocator:
 
     def cache_info(self) -> dict:
         with self._lock:
-            return {"size": len(self._cache), "capacity": self._cache_size,
-                    **self.stats}
+            return {"size": len(self._cache), "capacity": self._cache_size, **self.stats}
 
     def library_info(self) -> dict:
         """当前生效的库信息（含文件指纹与同步清单），供 UI 展示"""
@@ -223,6 +240,7 @@ class GeoLocator:
         }
         try:
             from core.xdb_updater import get_manifest
+
             info["manifest"] = get_manifest()
         except Exception:
             info["manifest"] = {}
@@ -237,8 +255,7 @@ def _mb(path: str) -> float:
 
 
 def _file_info(path: str) -> dict:
-    d = {"path": path, "name": os.path.basename(path or ""), "size": 0,
-         "mtime": 0, "exists": False}
+    d = {"path": path, "name": os.path.basename(path or ""), "size": 0, "mtime": 0, "exists": False}
     try:
         st = os.stat(path)
         d.update(size=st.st_size, mtime=int(st.st_mtime * 1000), exists=True)

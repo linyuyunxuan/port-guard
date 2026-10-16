@@ -12,6 +12,7 @@ auto_ban_threshold），实测 17.8 ms/条 的无谓开销；而设置几乎从�
 
 注意：`core.database` 只保留原始读写，业务层统一走本模块。
 """
+
 import threading
 from typing import Dict
 
@@ -91,6 +92,7 @@ def set(key: str, value, persist: bool = True) -> None:
             database.set_setting(key, sv)
         except Exception:
             from core.logger import get_logger
+
             get_logger(__name__).exception("写入设置失败 key=%s", key)
 
 

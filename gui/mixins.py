@@ -11,6 +11,7 @@ PortGuard — 主窗口的行为 Mixin
 - app/*.py：不依赖 Qt 的业务编排（可单测）
 - gui/main_window.py：只剩界面组装与信号连线
 """
+
 import contextlib
 from typing import TYPE_CHECKING
 
@@ -130,7 +131,8 @@ class EventPumpMixin(_HostBase):
                 self._set_status(
                     f"风险事件：{rec.ip} · {LEVEL_LABEL.get(res.level, res.level)} · "
                     f"{res.score} 分 · {rec.geo.region_short if rec.geo else '未知'}",
-                    C.warning)
+                    C.warning,
+                )
             # 页面不可见时不刷新（原实现每次事件都重载整表）
             if self.stack.currentIndex() == 1:
                 self.page_events.refresh()
@@ -187,7 +189,8 @@ class EventPumpMixin(_HostBase):
         try:
             loc = self._locator()
             self.lbl_geo.setText(
-                f"定位库：已加载 v{loc.generation}（缓存 {loc.cache_info().get('size', 0)}）")
+                f"定位库：已加载 v{loc.generation}（缓存 {loc.cache_info().get('size', 0)}）"
+            )
             self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:12px;")
         except Exception:
             log.exception("刷新定位库状态失败")
@@ -195,6 +198,7 @@ class EventPumpMixin(_HostBase):
     # ── 统计 ──
     def _refresh_stats(self, force: bool = False) -> None:
         import time
+
         now = time.time()
         if not force and now - self._last_stats < 1.5:
             return
@@ -206,8 +210,9 @@ class EventPumpMixin(_HostBase):
         except Exception:
             log.exception("统计刷新失败")
             total = risk = bans = unhandled = 0
-        self.page_monitor.set_stats(total, risk, bans,
-                                    report_server.is_running(), report_server.get_port())
+        self.page_monitor.set_stats(
+            total, risk, bans, report_server.is_running(), report_server.get_port()
+        )
         self.lbl_ban_count.setText(f"已封禁 {bans}")
         if unhandled:
             self.lbl_status.setText(f"有 {unhandled} 条风险事件待处理")
@@ -284,6 +289,7 @@ class ServerCtlMixin(_HostBase):
         if not ok:
             self._set_status(msg.splitlines()[0], C.danger)
             from PySide6.QtWidgets import QMessageBox
+
             QMessageBox.warning(self, "启动失败", msg)
         else:
             color = C.success if report_server.is_running() else C.text_secondary
@@ -291,11 +297,14 @@ class ServerCtlMixin(_HostBase):
             self._set_status(first, color)
             if report_server.get_generated_key():
                 from PySide6.QtWidgets import QMessageBox
+
                 QMessageBox.information(
-                    self, "已启用局域网监听",
+                    self,
+                    "已启用局域网监听",
                     msg + "\n\n安全提示：监听非本机地址时必须设置 API Key，"
-                          "否则局域网内任意主机都能伪造上报记录，"
-                          "进而污染风险判定甚至触发误封。")
+                    "否则局域网内任意主机都能伪造上报记录，"
+                    "进而污染风险判定甚至触发误封。",
+                )
         self._update_server_labels()
 
     def _update_server_labels(self) -> None:

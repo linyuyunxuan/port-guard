@@ -1,7 +1,6 @@
 name: CI
 
-# 门禁目标：ruff 全绿 + mypy 全绿 + pytest 全绿。
-# ruff format 暂只检查不拦（存量格式未统一，见 pyproject.toml 说明）。
+# 门禁目标：ruff check + ruff format + mypy + pytest 四项全绿。
 
 on:
   push:
@@ -52,7 +51,6 @@ jobs:
 
       - name: 格式检查（ruff format）
         run: ruff format --check .
-        continue-on-error: true   # 格式化暂不拦，先让存量代码逐步对齐
 
       - name: 类型检查（mypy）
         run: mypy .

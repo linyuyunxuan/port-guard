@@ -6,6 +6,7 @@ PortGuard — 主窗口
 - gui/mixins.py   事件泵 / 统计 / 服务启停（Qt 胶水）
 - app/*.py        封禁编排 / 维护 / 服务控制 / 离线库同步（不依赖 Qt，可单测）
 """
+
 import threading
 
 from PySide6.QtCore import Qt, QTimer
@@ -74,10 +75,16 @@ def _make_icon(color: str | None = None, size: int = 64) -> QIcon:
     p.setPen(Qt.PenStyle.NoPen)
     from PySide6.QtCore import QPointF
     from PySide6.QtGui import QPolygonF
+
     w = size
-    pts = [QPointF(w * 0.5, w * 0.06), QPointF(w * 0.90, w * 0.22),
-           QPointF(w * 0.90, w * 0.55), QPointF(w * 0.5, w * 0.95),
-           QPointF(w * 0.10, w * 0.55), QPointF(w * 0.10, w * 0.22)]
+    pts = [
+        QPointF(w * 0.5, w * 0.06),
+        QPointF(w * 0.90, w * 0.22),
+        QPointF(w * 0.90, w * 0.55),
+        QPointF(w * 0.5, w * 0.95),
+        QPointF(w * 0.10, w * 0.55),
+        QPointF(w * 0.10, w * 0.22),
+    ]
     p.drawPolygon(QPolygonF(pts))
     p.setPen(QColor("#FFFFFF"))
     f = QFont("Segoe UI Symbol")
@@ -118,8 +125,9 @@ class BanDurationDialog(QDialog):
         note.setWordWrap(True)
         form.addRow(note)
 
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
-                                | QDialogButtonBox.StandardButton.Cancel)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         btns.button(QDialogButtonBox.StandardButton.Ok).setText("确认封禁")
         btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         btns.accepted.connect(self.accept)
@@ -197,8 +205,14 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self.page_rules = RulesPage()
         self.page_iplookup = IpLookupPage()
         self.page_settings = SettingsPage()
-        for p in (self.page_monitor, self.page_events, self.page_bans,
-                  self.page_rules, self.page_iplookup, self.page_settings):
+        for p in (
+            self.page_monitor,
+            self.page_events,
+            self.page_bans,
+            self.page_rules,
+            self.page_iplookup,
+            self.page_settings,
+        ):
             self.stack.addWidget(p)
 
         sb = QStatusBar()
@@ -256,7 +270,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
 
         self.lbl_ban_count = QLabel("已封禁 0")
         self.lbl_ban_count.setStyleSheet(
-            f"color:{C.danger};font-size:12px;font-weight:600;padding:10px 16px 2px 16px;")
+            f"color:{C.danger};font-size:12px;font-weight:600;padding:10px 16px 2px 16px;"
+        )
         sl.addWidget(self.lbl_ban_count)
 
         ver = QLabel(f"v{APP_VERSION} · ip2region")
@@ -301,8 +316,10 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         menu.addAction(a_quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(
-            lambda r: self._show_window()
-            if r == QSystemTrayIcon.ActivationReason.DoubleClick else None)
+            lambda r: (
+                self._show_window() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None
+            )
+        )
         self.tray.show()
 
     def _show_window(self) -> None:
@@ -335,17 +352,23 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
 
     def _add_blacklist(self, ip: str) -> None:
         if is_never_ban(ip):
-            QMessageBox.warning(self, "无法加入", f"{ip} 属于内网 / 回环 / 保留地址，不能加入黑名单。")
+            QMessageBox.warning(
+                self, "无法加入", f"{ip} 属于内网 / 回环 / 保留地址，不能加入黑名单。"
+            )
             return
         eng = get_engine()
         if ip in eng.blacklist:
             QMessageBox.information(self, "已存在", f"{ip} 已在黑名单中。")
             return
-        if QMessageBox.question(
-                self, "加入黑名单",
+        if (
+            QMessageBox.question(
+                self,
+                "加入黑名单",
                 f"将 {ip} 加入黑名单，之后所有来自该 IP 的访问都会判为严重风险。\n\n继续？",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         try:
             eng.blacklist.add(ip)
@@ -365,8 +388,10 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
 
     def _open_logs_dir(self) -> None:
         import os
+
         try:
             from core.logger import logs_dir
+
             d = logs_dir()
             os.startfile(d)  # noqa: S606  Windows 专属
         except Exception as e:
@@ -389,8 +414,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         def work():
             try:
                 loc = get_locator()
-                self._geo_info = (loc.available, loc.load_error, loc.cache_info(),
-                                  loc.generation)
+                self._geo_info = (loc.available, loc.load_error, loc.cache_info(), loc.generation)
             except Exception as e:
                 log.exception("加载定位库失败")
                 self._geo_info = (False, str(e), {}, 0)
@@ -413,8 +437,9 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         else:
             self.lbl_geo.setText(f"定位库：不可用（{err}）")
             self.lbl_geo.setStyleSheet(f"color:{C.danger};font-size:12px;")
-            QMessageBox.warning(self, "定位库加载失败",
-                                f"IP 归属地库加载失败，归属地将显示为未知。\n\n{err}")
+            QMessageBox.warning(
+                self, "定位库加载失败", f"IP 归属地库加载失败，归属地将显示为未知。\n\n{err}"
+            )
 
     # ═══════════════════════════════════════════════
     #  封禁
@@ -438,11 +463,15 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             return
 
         if not firewall.is_admin():
-            if QMessageBox.question(
-                    self, "权限不足",
+            if (
+                QMessageBox.question(
+                    self,
+                    "权限不足",
                     "封禁需要管理员权限。\n\n是否以管理员身份重启程序？",
-                    QMessageBox.StandardButton.Yes
-                    | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                == QMessageBox.StandardButton.Yes
+            ):
                 self._restart_as_admin()
             return
 
@@ -452,7 +481,9 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             log.exception("查询已有封禁失败 ip=%s", rec.ip)
             exists = None
         if exists:
-            QMessageBox.information(self, "已封禁", f"{rec.ip} 已处于封禁状态（记录 #{exists.id}）。")
+            QMessageBox.information(
+                self, "已封禁", f"{rec.ip} 已处于封禁状态（记录 #{exists.id}）。"
+            )
             return
 
         dur_dlg = BanDurationDialog(rec.ip, score, reason, self)
@@ -468,8 +499,16 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             ban_id, err = ban_service.execute(ip, score, reason, duration_sec)
             if ban_id is None:
                 # 校验失败等前置错误不会走 ban_service 的事件投递，这里补一条
-                bus.emit_ban({"ip": ip, "ok": False, "rule_name": "",
-                              "error": err, "ban_id": None, "source": "manual"})
+                bus.emit_ban(
+                    {
+                        "ip": ip,
+                        "ok": False,
+                        "rule_name": "",
+                        "error": err,
+                        "ban_id": None,
+                        "source": "manual",
+                    }
+                )
 
         threading.Thread(target=work, daemon=True, name=f"ban-{ip}").start()
 
@@ -480,8 +519,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             if app is not None:
                 app.quit()
         else:
-            QMessageBox.warning(self, "提权失败",
-                                f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
+            QMessageBox.warning(self, "提权失败", f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
 
     # ═══════════════════════════════════════════════
     #  安全提示
@@ -493,11 +531,13 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         key = (cfg.get("api_key", "") or "").strip()
         if host not in ("127.0.0.1", "localhost", "::1") and not key:
             QMessageBox.warning(
-                self, "安全提示",
+                self,
+                "安全提示",
                 f"当前监听地址为 {host}（非本机），但没有设置 API Key。\n\n"
                 f"局域网内任意主机都能伪造上报记录，进而污染风险判定、"
                 f"甚至在你开启自动封禁后封掉任意 IP。\n\n"
-                f"请在「设置 → 上报接收服务」里设置 API Key，或把监听地址改回 127.0.0.1。")
+                f"请在「设置 → 上报接收服务」里设置 API Key，或把监听地址改回 127.0.0.1。",
+            )
 
         if not firewall.is_admin():
             self._set_status("提示：以管理员身份运行才能执行封禁", C.warning)
@@ -509,13 +549,19 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
     # ═══════════════════════════════════════════════
 
     def closeEvent(self, event) -> None:
-        if (self.tray is not None and self.tray.isVisible()
-                and not getattr(self, "_really_quit", False)):
+        if (
+            self.tray is not None
+            and self.tray.isVisible()
+            and not getattr(self, "_really_quit", False)
+        ):
             event.ignore()
             self.hide()
-            self.tray.showMessage("PortGuard 仍在运行",
-                                  "程序已最小化到系统托盘，接收服务继续工作。",
-                                  QSystemTrayIcon.MessageIcon.Information, 3000)
+            self.tray.showMessage(
+                "PortGuard 仍在运行",
+                "程序已最小化到系统托盘，接收服务继续工作。",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
             return
         self._shutdown()
         event.accept()
@@ -527,6 +573,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             log.exception("停止服务失败")
         try:
             from core.db_writer import stop_writer
+
             stop_writer(timeout=3.0)
         except Exception:
             log.exception("停止批量写入器失败")

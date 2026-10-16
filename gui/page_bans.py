@@ -1,4 +1,5 @@
 """PortGuard — 封禁管理页"""
+
 import datetime
 
 from PySide6.QtCore import Qt, Signal
@@ -40,8 +41,19 @@ from gui.widgets import WarnBanner
 
 log = get_logger(__name__)
 
-BAN_HEADERS = ["ID", "IP", "防火墙规则名", "来源", "原因", "评分",
-               "状态", "时长", "到期时间", "创建时间", "操作"]
+BAN_HEADERS = [
+    "ID",
+    "IP",
+    "防火墙规则名",
+    "来源",
+    "原因",
+    "评分",
+    "状态",
+    "时长",
+    "到期时间",
+    "创建时间",
+    "操作",
+]
 SUG_HEADERS = ["时间", "IP", "归属地", "端口", "评分", "等级", "原因", "操作"]
 
 
@@ -73,8 +85,9 @@ class ManualBanDialog(QDialog):
         tip.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
         form.addRow(tip)
 
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
-                                | QDialogButtonBox.StandardButton.Cancel)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         btns.button(QDialogButtonBox.StandardButton.Ok).setText("确认封禁")
         btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         btns.accepted.connect(self.accept)
@@ -92,8 +105,9 @@ class ManualBanDialog(QDialog):
         try:
             normalize_ip(raw)
         except InvalidIP as e:
-            QMessageBox.warning(self, "IP 格式错误",
-                                f"{e}\n\n请输入形如 203.0.113.10 或 2408:8000::1 的地址。")
+            QMessageBox.warning(
+                self, "IP 格式错误", f"{e}\n\n请输入形如 203.0.113.10 或 2408:8000::1 的地址。"
+            )
             self.ip.setFocus()
             self.ip.selectAll()
             return
@@ -101,13 +115,16 @@ class ManualBanDialog(QDialog):
 
     def values(self):
         mins = self.duration.value()
-        return (self.ip.text().strip(),
-                self.reason.text().strip() or "手动封禁",
-                0 if mins == 0 else mins * 60)
+        return (
+            self.ip.text().strip(),
+            self.reason.text().strip() or "手动封禁",
+            0 if mins == 0 else mins * 60,
+        )
 
 
 class BansPage(QWidget):
     """封禁建议 + 封禁列表"""
+
     ask_ban = Signal(str, int, str)
     request_refresh_stats = Signal()
 
@@ -138,7 +155,8 @@ class BansPage(QWidget):
         if not firewall.is_admin():
             self.banner.set_text(
                 "当前以普通权限运行，无法修改 Windows 防火墙。"
-                "监控与规则判定正常，但「确认封禁」不会生效。")
+                "监控与规则判定正常，但「确认封禁」不会生效。"
+            )
         root.addWidget(self.banner)
 
         # 待确认建议
@@ -221,8 +239,12 @@ class BansPage(QWidget):
 
     # ── 数据 ──
     def _status_filter(self) -> str:
-        m = {"已封禁": STATUS_ACTIVE, "已解封": STATUS_UNBANNED,
-             "失败": STATUS_FAILED, "处理中": STATUS_PENDING}
+        m = {
+            "已封禁": STATUS_ACTIVE,
+            "已解封": STATUS_UNBANNED,
+            "失败": STATUS_FAILED,
+            "处理中": STATUS_PENDING,
+        }
         return m.get(self.status_filter.currentText(), "")
 
     def refresh(self) -> None:
@@ -230,8 +252,11 @@ class BansPage(QWidget):
         self._load_bans()
 
     def _load_suggestions(self) -> None:
-        rows = [r for r in query_risk_events(limit=200, handled=0)
-                if r.get("risk_level") in (LEVEL_HIGH, LEVEL_CRITICAL)]
+        rows = [
+            r
+            for r in query_risk_events(limit=200, handled=0)
+            if r.get("risk_level") in (LEVEL_HIGH, LEVEL_CRITICAL)
+        ]
         self.sug_table.setRowCount(0)
         self.sug_table.setRowCount(len(rows))
         self.grp_sug.setTitle(f"待确认的封禁建议（{len(rows)}）")
@@ -241,8 +266,9 @@ class BansPage(QWidget):
 
         for i, r in enumerate(rows):
             ts = r.get("event_ts")
-            time_str = (datetime.datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M:%S")
-                        if ts else "-")
+            time_str = (
+                datetime.datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M:%S") if ts else "-"
+            )
             geo = r.get("geo")
             level = r.get("risk_level", "normal")
             reason = r.get("summary") or "命中风险规则"
@@ -293,6 +319,7 @@ class BansPage(QWidget):
         self.table.setRowCount(0)
         self.table.setRowCount(len(rows))
         for i, b in enumerate(rows):
+
             def mk(text, color=None, align=None):
                 it = QTableWidgetItem(str(text))
                 if color:
@@ -302,8 +329,10 @@ class BansPage(QWidget):
                 return it
 
             status_color = {
-                STATUS_ACTIVE: C.danger, STATUS_UNBANNED: C.text_muted,
-                STATUS_FAILED: C.warning, STATUS_PENDING: C.info,
+                STATUS_ACTIVE: C.danger,
+                STATUS_UNBANNED: C.text_muted,
+                STATUS_FAILED: C.warning,
+                STATUS_PENDING: C.info,
             }.get(b.status, C.text_secondary)
 
             self.table.setItem(i, 0, mk(b.id, align=Qt.AlignmentFlag.AlignCenter))
@@ -312,8 +341,7 @@ class BansPage(QWidget):
             self.table.setItem(i, 3, mk(b.source_label, align=Qt.AlignmentFlag.AlignCenter))
             self.table.setItem(i, 4, mk(b.reason or "-"))
             self.table.setItem(i, 5, mk(b.risk_score, align=Qt.AlignmentFlag.AlignCenter))
-            self.table.setItem(i, 6, mk(b.status_label, status_color,
-                                        Qt.AlignmentFlag.AlignCenter))
+            self.table.setItem(i, 6, mk(b.status_label, status_color, Qt.AlignmentFlag.AlignCenter))
             self.table.setItem(i, 7, mk(b.duration_label, align=Qt.AlignmentFlag.AlignCenter))
             self.table.setItem(i, 8, mk(b.expire_label, align=Qt.AlignmentFlag.AlignCenter))
             self.table.setItem(i, 9, mk(b.created_at or "-"))
@@ -356,23 +384,36 @@ class BansPage(QWidget):
 
     def _delete(self, b) -> None:
         from core.database import delete_ban_record
-        if QMessageBox.question(self, "删除记录",
-                                f"仅从数据库删除封禁记录 #{b.id}（IP {b.ip}），"
-                                f"不会影响已生效的防火墙规则。\n\n确认删除？",
-                                QMessageBox.StandardButton.Yes
-                                | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+
+        if (
+            QMessageBox.question(
+                self,
+                "删除记录",
+                f"仅从数据库删除封禁记录 #{b.id}（IP {b.ip}），"
+                f"不会影响已生效的防火墙规则。\n\n确认删除？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         delete_ban_record(b.id)
         self.refresh()
 
     def _unban_all(self) -> None:
         if not firewall.is_admin():
-            QMessageBox.warning(self, "权限不足", "批量解封需要管理员权限，请以管理员身份重启程序。")
+            QMessageBox.warning(
+                self, "权限不足", "批量解封需要管理员权限，请以管理员身份重启程序。"
+            )
             return
-        if QMessageBox.question(self, "一键全部解封",
-                                "将删除所有以 PortGuard_Block_ 开头的防火墙规则，并把这些封禁记录标记为已解封。\n\n确认继续？",
-                                QMessageBox.StandardButton.Yes
-                                | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "一键全部解封",
+                "将删除所有以 PortGuard_Block_ 开头的防火墙规则，并把这些封禁记录标记为已解封。\n\n确认继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         ok, n, err = ban_service.unban_all()
         if not ok:
@@ -385,9 +426,12 @@ class BansPage(QWidget):
     def _sync(self) -> None:
         """与防火墙对账：把已不存在的规则对应的记录标记为已解封"""
         if not firewall.is_admin():
-            QMessageBox.information(self, "提示",
-                                    "对账需要查询防火墙规则，请以管理员身份运行以获取完整信息。\n"
-                                    "普通权限下仍会尝试按规则名核对。")
+            QMessageBox.information(
+                self,
+                "提示",
+                "对账需要查询防火墙规则，请以管理员身份运行以获取完整信息。\n"
+                "普通权限下仍会尝试按规则名核对。",
+            )
         try:
             existing = firewall.list_rule_names()
         except Exception as e:
@@ -396,22 +440,29 @@ class BansPage(QWidget):
             return
         fixed = ban_service.reconcile(existing)
         self.refresh()
-        QMessageBox.information(self, "对账完成",
-                                f"防火墙中现存 PortGuard 规则：{len(existing)} 条\n"
-                                f"已修正 {fixed} 条失效记录。")
+        QMessageBox.information(
+            self,
+            "对账完成",
+            f"防火墙中现存 PortGuard 规则：{len(existing)} 条\n已修正 {fixed} 条失效记录。",
+        )
 
     def _restart_as_admin(self) -> None:
-        if QMessageBox.question(self, "以管理员身份重启",
-                                "将重新启动程序并请求管理员权限。\n\n继续？",
-                                QMessageBox.StandardButton.Yes
-                                | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "以管理员身份重启",
+                "将重新启动程序并请求管理员权限。\n\n继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         ok, err = firewall.open_admin_restart()
         if not ok:
-            QMessageBox.warning(self, "提权失败",
-                                f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
+            QMessageBox.warning(self, "提权失败", f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
         else:
             from PySide6.QtWidgets import QApplication
+
             app = QApplication.instance()
             if app is not None:
                 app.quit()

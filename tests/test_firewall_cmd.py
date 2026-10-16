@@ -5,6 +5,7 @@
 做法是把 `_powershell` / `_run` 换成记录器，既不真的动系统防火墙，
 又能看到到底拼接出了什么命令。
 """
+
 import re
 
 import pytest
@@ -14,7 +15,7 @@ from core.validators import ps_quote
 
 EVIL_IPS = [
     '1.2.3.4"; Start-Process calc; #',
-    '$(Get-Content C:\\Windows\\win.ini)',
+    "$(Get-Content C:\\Windows\\win.ini)",
     "1.2.3.4' ; Remove-Item C:\\ -Recurse",
     "1.2.3.4`nStart-Process calc",
     "1.2.3.4; shutdown -s -t 0",
@@ -60,13 +61,16 @@ def test_unblock_ip_rejects_injection(spy, evil):
     assert spy == [], f"非法 IP 不应触发任何命令，却产生了 {spy}"
 
 
-@pytest.mark.parametrize("evil", [
-    'PortGuard_Block_x"; Start-Process calc; #',
-    "PortGuard_Block_x'; calc; #",
-    'PortGuard_Block_x$(calc)',
-    "SomeOtherRule",
-    "PortGuard_Block_x`ncalc",
-])
+@pytest.mark.parametrize(
+    "evil",
+    [
+        'PortGuard_Block_x"; Start-Process calc; #',
+        "PortGuard_Block_x'; calc; #",
+        "PortGuard_Block_x$(calc)",
+        "SomeOtherRule",
+        "PortGuard_Block_x`ncalc",
+    ],
+)
 def test_unblock_by_name_rejects_bad_names(spy, evil):
     ok, _err = firewall.unblock_by_name(evil)
     assert ok is False
@@ -118,12 +122,15 @@ def _ps_arg(script: str, flag: str) -> str:
     return m.group(1).replace("''", "'")
 
 
-@pytest.mark.parametrize("note", [
-    '"; Start-Process calc; #',
-    "'; Start-Process calc; #",
-    "$(Get-Content C:\\Windows\\win.ini)",
-    "`nStart-Process calc",
-])
+@pytest.mark.parametrize(
+    "note",
+    [
+        '"; Start-Process calc; #',
+        "'; Start-Process calc; #",
+        "$(Get-Content C:\\Windows\\win.ini)",
+        "`nStart-Process calc",
+    ],
+)
 def test_note_is_quoted_not_interpolated(spy, note):
     """封禁原因里的引号/子表达式必须被单引号字面量吃掉，不能逃到参数之外"""
     ok, _n, err = firewall.block_ip("203.0.113.10", note=note)

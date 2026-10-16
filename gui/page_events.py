@@ -1,4 +1,5 @@
 """PortGuard — 风险事件页"""
+
 import datetime
 from typing import Dict, List
 
@@ -28,8 +29,19 @@ from core.models import ms_to_str
 from core.rules_meta import rule_label
 from gui.theme import LEVEL_BG, LEVEL_COLORS, C
 
-HEADERS = ["时间", "来源 IP", "归属地", "端口", "路径", "评分", "等级",
-           "命中规则", "摘要", "状态", "操作"]
+HEADERS = [
+    "时间",
+    "来源 IP",
+    "归属地",
+    "端口",
+    "路径",
+    "评分",
+    "等级",
+    "命中规则",
+    "摘要",
+    "状态",
+    "操作",
+]
 
 HANDLED_LABEL = {0: "未处理", 1: "已确认", 2: "已忽略"}
 
@@ -61,9 +73,12 @@ class EventDetailDialog(QDialog):
             row.get("summary") or "-",
         ]
         if geo and geo.found:
-            lines += ["", "归属地明细：",
-                      f"  国家：{geo.country}  省份：{geo.province}",
-                      f"  城市：{geo.city}  ISP：{geo.isp}  国家码：{geo.iso}"]
+            lines += [
+                "",
+                "归属地明细：",
+                f"  国家：{geo.country}  省份：{geo.province}",
+                f"  城市：{geo.city}  ISP：{geo.isp}  国家码：{geo.iso}",
+            ]
         txt.setPlainText("\n".join(lines))
         lay.addWidget(txt)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -74,6 +89,7 @@ class EventDetailDialog(QDialog):
 
 class EventsPage(QWidget):
     """风险事件列表"""
+
     ask_ban = Signal(str, int, str)
 
     def __init__(self, parent=None):
@@ -164,9 +180,12 @@ class EventsPage(QWidget):
             limit = int(self.limit.currentText().replace("最近 ", "").replace(" 条", ""))
         except Exception:
             limit = 200
-        rows = query_risk_events(limit=limit, level=self._level_filter(),
-                                 handled=self._handled_filter(),
-                                 keyword=self.search.text().strip())
+        rows = query_risk_events(
+            limit=limit,
+            level=self._level_filter(),
+            handled=self._handled_filter(),
+            keyword=self.search.text().strip(),
+        )
         self._rows = rows
         self._render(rows)
         self.lbl_info.setText(f"共 {len(rows)} 条")
@@ -195,26 +214,29 @@ class EventsPage(QWidget):
                 return it
 
             ts = r.get("event_ts")
-            time_str = (datetime.datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M:%S")
-                        if ts else "-")
+            time_str = (
+                datetime.datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M:%S") if ts else "-"
+            )
             matched = "、".join(rule_label(x) for x in r.get("matched_rules", [])) or "-"
 
             self.table.setItem(i, 0, mk(time_str))
             self.table.setItem(i, 1, mk(r.get("ip", ""), C.text_link))
             self.table.setItem(i, 2, mk(geo.region_short if geo else "未知"))
-            self.table.setItem(i, 3, mk(r.get("local_port") or "-",
-                                        align=Qt.AlignmentFlag.AlignCenter))
+            self.table.setItem(
+                i, 3, mk(r.get("local_port") or "-", align=Qt.AlignmentFlag.AlignCenter)
+            )
             self.table.setItem(i, 4, mk(r.get("path") or "/"))
-            self.table.setItem(i, 5, mk(r.get("risk_score", 0),
-                                        align=Qt.AlignmentFlag.AlignCenter))
-            self.table.setItem(i, 6, mk(LEVEL_LABEL.get(level, level), color,
-                                        Qt.AlignmentFlag.AlignCenter, True))
+            self.table.setItem(i, 5, mk(r.get("risk_score", 0), align=Qt.AlignmentFlag.AlignCenter))
+            self.table.setItem(
+                i, 6, mk(LEVEL_LABEL.get(level, level), color, Qt.AlignmentFlag.AlignCenter, True)
+            )
             self.table.setItem(i, 7, mk(matched))
             self.table.setItem(i, 8, mk(r.get("summary") or "-"))
             handled = r.get("handled", 0)
             hcolor = {0: C.warning, 1: C.success, 2: C.text_muted}.get(handled, C.text_secondary)
-            self.table.setItem(i, 9, mk(HANDLED_LABEL.get(handled, "-"), hcolor,
-                                        Qt.AlignmentFlag.AlignCenter))
+            self.table.setItem(
+                i, 9, mk(HANDLED_LABEL.get(handled, "-"), hcolor, Qt.AlignmentFlag.AlignCenter)
+            )
 
             self.table.setCellWidget(i, 10, self._row_actions(i, r))
 
@@ -234,7 +256,8 @@ class EventsPage(QWidget):
         b_ban.setFixedHeight(24)
         b_ban.setStyleSheet(
             f"QPushButton{{background:{C.danger};color:#fff;border:none;border-radius:4px;"
-            f"padding:2px 10px;font-size:12px;}}QPushButton:hover{{background:#DC2626;}}")
+            f"padding:2px 10px;font-size:12px;}}QPushButton:hover{{background:#DC2626;}}"
+        )
         b_ban.setCursor(Qt.CursorShape.PointingHandCursor)
         b_ban.clicked.connect(lambda: self.ask_ban.emit(ip, score, reason))
 
@@ -242,7 +265,8 @@ class EventsPage(QWidget):
         b_ok.setFixedHeight(24)
         b_ok.setStyleSheet(
             f"QPushButton{{background:{C.success};color:#fff;border:none;border-radius:4px;"
-            f"padding:2px 10px;font-size:12px;}}QPushButton:hover{{background:#0EA271;}}")
+            f"padding:2px 10px;font-size:12px;}}QPushButton:hover{{background:#0EA271;}}"
+        )
         b_ok.setCursor(Qt.CursorShape.PointingHandCursor)
         b_ok.clicked.connect(lambda: self._set_handled(r, 1))
 
@@ -251,7 +275,8 @@ class EventsPage(QWidget):
         b_ig.setStyleSheet(
             f"QPushButton{{background:transparent;color:{C.text_secondary};"
             f"border:1px solid {C.border};border-radius:4px;padding:2px 10px;font-size:12px;}}"
-            f"QPushButton:hover{{border-color:{C.text_muted};}}")
+            f"QPushButton:hover{{border-color:{C.text_muted};}}"
+        )
         b_ig.setCursor(Qt.CursorShape.PointingHandCursor)
         b_ig.clicked.connect(lambda: self._set_handled(r, 2))
 

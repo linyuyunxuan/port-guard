@@ -5,6 +5,7 @@ PortGuard — 轻量令牌桶限流
 - 默认按「来源 IP」限流；也可按固定 key 做全局限流
 - 桶数量超过阈值时按「最后访问时间」淘汰，防止被大量伪造 IP 打爆内存
 """
+
 import threading
 import time
 from typing import Dict, Tuple
@@ -17,10 +18,11 @@ log = get_logger(__name__)
 class TokenBucket:
     """按 key 限流的令牌桶"""
 
-    def __init__(self, rate: float = 200.0, burst: int = 500,
-                 max_keys: int = 10000, ttl: float = 120.0):
-        self._rate = max(0.1, float(rate))       # 每秒补充令牌数
-        self._burst = max(1, int(burst))         # 桶容量
+    def __init__(
+        self, rate: float = 200.0, burst: int = 500, max_keys: int = 10000, ttl: float = 120.0
+    ):
+        self._rate = max(0.1, float(rate))  # 每秒补充令牌数
+        self._burst = max(1, int(burst))  # 桶容量
         self._max_keys = max(100, int(max_keys))
         self._ttl = max(10.0, float(ttl))
         self._buckets: Dict[str, Tuple[float, float]] = {}
@@ -75,5 +77,9 @@ class TokenBucket:
 
     def stats(self) -> dict:
         with self._lock:
-            return {"keys": len(self._buckets), "rejected": self.rejected,
-                    "rate": self._rate, "burst": self._burst}
+            return {
+                "keys": len(self._buckets),
+                "rejected": self.rejected,
+                "rate": self._rate,
+                "burst": self._burst,
+            }

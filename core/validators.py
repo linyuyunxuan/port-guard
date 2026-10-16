@@ -18,6 +18,7 @@ PowerShell 命令，输入
 
 为什么不用 `-EncodedCommand`：它只解决编码问题，不解决拼接问题。
 """
+
 import ipaddress
 import re
 from typing import Any, Optional
@@ -47,6 +48,7 @@ class InvalidURL(ValueError):
 # ═══════════════════════════════════════════════════════════
 #  IP
 # ═══════════════════════════════════════════════════════════
+
 
 def normalize_ip(raw: Any, allow_network: bool = False) -> str:
     """
@@ -104,6 +106,7 @@ def is_valid_ip(raw: Any, allow_network: bool = False) -> bool:
 #  PowerShell / 命令行转义
 # ═══════════════════════════════════════════════════════════
 
+
 def ps_quote(value: Any) -> str:
     """
     把值安全嵌入 PowerShell **单引号**字面量。
@@ -138,6 +141,7 @@ def normalize_rule_name(raw: Any, prefix: str = "") -> str:
 #  通用文本
 # ═══════════════════════════════════════════════════════════
 
+
 def safe_text(value: Any, maxlen: int = 200, default: str = "") -> str:
     """
     清洗「会进命令行参数或落库」的自由文本（如封禁原因 note）。
@@ -166,8 +170,8 @@ def clamp_int(value: Any, low: int, high: int, default: int) -> int:
 #  URL（用于离线库在线同步）
 # ═══════════════════════════════════════════════════════════
 
-def safe_https_url(raw: Any, allowed_hosts: Optional[list] = None,
-                   max_len: int = 500) -> str:
+
+def safe_https_url(raw: Any, allowed_hosts: Optional[list] = None, max_len: int = 500) -> str:
     """
     校验下载源 URL：必须 https、有主机名、无内嵌凭据。
     allowed_hosts 非空时强制主机白名单（防 SSRF / 被改成内网地址）。

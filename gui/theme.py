@@ -3,64 +3,65 @@ PortGuard 全局主题 — 深色科技风
 保留 #0E8FD9 医药蓝作为品牌主色；深色底更突出红/琥珀告警色。
 API 与 sql-api-manager 的 theme.py 保持一致（Color / C / GLOBAL_STYLE）。
 """
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:                      # 仅用于类型标注，运行时不需要 Qt
+if TYPE_CHECKING:  # 仅用于类型标注，运行时不需要 Qt
     from PySide6.QtWidgets import QFrame, QLabel
 
 
 @dataclass(frozen=True)
 class Color:
-    primary:          str = "#0E8FD9"   # 医药蓝
-    primary_hover:    str = "#0C7CBE"
-    primary_light:    str = "#123C57"
-    primary_soft:     str = "#0F2C42"
-    success:          str = "#10B981"
-    success_light:    str = "#0C3A2E"
-    danger:           str = "#EF4444"
-    danger_light:     str = "#3B1517"
-    warning:          str = "#F59E0B"
-    warning_light:    str = "#3A2A0C"
-    critical:         str = "#DC2626"
-    critical_light:   str = "#401012"
-    info:             str = "#38BDF8"
-    info_light:       str = "#0C2E42"
+    primary: str = "#0E8FD9"  # 医药蓝
+    primary_hover: str = "#0C7CBE"
+    primary_light: str = "#123C57"
+    primary_soft: str = "#0F2C42"
+    success: str = "#10B981"
+    success_light: str = "#0C3A2E"
+    danger: str = "#EF4444"
+    danger_light: str = "#3B1517"
+    warning: str = "#F59E0B"
+    warning_light: str = "#3A2A0C"
+    critical: str = "#DC2626"
+    critical_light: str = "#401012"
+    info: str = "#38BDF8"
+    info_light: str = "#0C2E42"
 
-    bg_body:          str = "#0F172A"
-    bg_card:          str = "#1E293B"
-    bg_card_alt:      str = "#233145"
-    bg_sidebar:       str = "#0B1220"
+    bg_body: str = "#0F172A"
+    bg_card: str = "#1E293B"
+    bg_card_alt: str = "#233145"
+    bg_sidebar: str = "#0B1220"
     bg_sidebar_hover: str = "#16233A"
     bg_sidebar_active: str = "#0E8FD9"
 
-    border:           str = "#334155"
-    border_light:     str = "#26364D"
+    border: str = "#334155"
+    border_light: str = "#26364D"
 
-    text_primary:     str = "#E2E8F0"
-    text_secondary:   str = "#94A3B8"
-    text_muted:       str = "#64748B"
-    text_on_dark:     str = "#F8FAFC"
-    text_link:        str = "#38BDF8"
+    text_primary: str = "#E2E8F0"
+    text_secondary: str = "#94A3B8"
+    text_muted: str = "#64748B"
+    text_on_dark: str = "#F8FAFC"
+    text_link: str = "#38BDF8"
 
 
 C = Color()
 
 # 风险等级 -> 文字颜色
 LEVEL_COLORS = {
-    "normal":   C.text_secondary,
-    "low":      C.info,
-    "medium":   C.warning,
-    "high":     C.danger,
+    "normal": C.text_secondary,
+    "low": C.info,
+    "medium": C.warning,
+    "high": C.danger,
     "critical": C.critical,
 }
 
 # 风险等级 -> 行背景（极淡，保持可读）
 LEVEL_BG = {
-    "normal":   None,
-    "low":      None,
-    "medium":   C.warning_light,
-    "high":     C.danger_light,
+    "normal": None,
+    "low": None,
+    "medium": C.warning_light,
+    "high": C.danger_light,
     "critical": C.critical_light,
 }
 
@@ -457,11 +458,13 @@ QProgressBar::chunk {{ background-color: {C.primary}; border-radius: 5px; }}
 def card_widget(child=None) -> "QFrame":
     """把内容包装成卡片"""
     from PySide6.QtWidgets import QFrame, QVBoxLayout
+
     card = QFrame()
     card.setObjectName("stat_card")
     card.setStyleSheet(
         f"#stat_card{{background:{C.bg_card};border:1px solid {C.border};border-radius:10px;}}"
-        f"#stat_card:hover{{border-color:{C.primary};}}")
+        f"#stat_card:hover{{border-color:{C.primary};}}"
+    )
     layout = QVBoxLayout(card)
     layout.setContentsMargins(14, 14, 14, 14)
     layout.setSpacing(6)
@@ -473,6 +476,7 @@ def card_widget(child=None) -> "QFrame":
 def section_header(text: str) -> "QLabel":
     from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QLabel
+
     lbl = QLabel(text)
     f = QFont()
     f.setPointSize(10)
@@ -488,6 +492,7 @@ def section_header(text: str) -> "QLabel":
 #  统一到常量后只改这里。
 # ═══════════════════════════════════════════════════════════
 
+
 def small_button_style(kind: str = "outline") -> str:
     """
     kind: danger | success | primary | outline
@@ -495,17 +500,25 @@ def small_button_style(kind: str = "outline") -> str:
     """
     base = "border-radius:4px;padding:2px 10px;font-size:12px;"
     if kind == "danger":
-        return (f"QPushButton{{background:{C.danger};color:#fff;border:none;{base}}}"
-                f"QPushButton:hover{{background:#DC2626;}}"
-                f"QPushButton:disabled{{background:{C.border};color:{C.text_muted};}}")
+        return (
+            f"QPushButton{{background:{C.danger};color:#fff;border:none;{base}}}"
+            f"QPushButton:hover{{background:#DC2626;}}"
+            f"QPushButton:disabled{{background:{C.border};color:{C.text_muted};}}"
+        )
     if kind == "success":
-        return (f"QPushButton{{background:{C.success};color:#fff;border:none;{base}}}"
-                f"QPushButton:hover{{background:#0EA271;}}"
-                f"QPushButton:disabled{{background:{C.border};color:{C.text_muted};}}")
+        return (
+            f"QPushButton{{background:{C.success};color:#fff;border:none;{base}}}"
+            f"QPushButton:hover{{background:#0EA271;}}"
+            f"QPushButton:disabled{{background:{C.border};color:{C.text_muted};}}"
+        )
     if kind == "primary":
-        return (f"QPushButton{{background:{C.primary};color:#fff;border:none;{base}}}"
-                f"QPushButton:hover{{background:{C.primary_hover};}}")
-    return (f"QPushButton{{background:transparent;color:{C.text_secondary};"
-            f"border:1px solid {C.border};{base}}}"
-            f"QPushButton:hover{{border-color:{C.primary};color:{C.primary};}}"
-            f"QPushButton:disabled{{color:{C.text_muted};border-color:{C.border_light};}}")
+        return (
+            f"QPushButton{{background:{C.primary};color:#fff;border:none;{base}}}"
+            f"QPushButton:hover{{background:{C.primary_hover};}}"
+        )
+    return (
+        f"QPushButton{{background:transparent;color:{C.text_secondary};"
+        f"border:1px solid {C.border};{base}}}"
+        f"QPushButton:hover{{border-color:{C.primary};color:{C.primary};}}"
+        f"QPushButton:disabled{{color:{C.text_muted};border-color:{C.border_light};}}"
+    )

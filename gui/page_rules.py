@@ -1,4 +1,5 @@
 """PortGuard — 规则配置页"""
+
 from typing import Dict, List, Tuple
 
 from PySide6.QtCore import Signal
@@ -41,6 +42,7 @@ ACTION_ITEMS = [("suggest_ban", "生成封禁建议"), ("alert", "仅告警")]
 
 class RuleCard(QFrame):
     """单条规则配置卡片"""
+
     def __init__(self, rule_id: str, cfg: Dict, parent=None):
         super().__init__(parent)
         self.rule_id = rule_id
@@ -48,7 +50,8 @@ class RuleCard(QFrame):
         self._fields: Dict[str, Tuple[QWidget, str]] = {}
         self.setObjectName("stat_card")
         self.setStyleSheet(
-            f"#stat_card{{background:{C.bg_card};border:1px solid {C.border};border-radius:10px;}}")
+            f"#stat_card{{background:{C.bg_card};border:1px solid {C.border};border-radius:10px;}}"
+        )
         self._build()
 
     def _build(self) -> None:
@@ -103,7 +106,8 @@ class RuleCard(QFrame):
         self.cb_action.addItems([x[1] for x in ACTION_ITEMS])
         try:
             self.cb_action.setCurrentIndex(
-                [x[0] for x in ACTION_ITEMS].index(self.cfg.get("action", "alert")))
+                [x[0] for x in ACTION_ITEMS].index(self.cfg.get("action", "alert"))
+            )
         except ValueError:
             self.cb_action.setCurrentIndex(1)
         self.cb_action.setFixedWidth(140)
@@ -244,8 +248,10 @@ class RulesPage(QWidget):
         lay.setContentsMargins(8, 12, 8, 8)
         lay.setSpacing(10)
 
-        tip = QLabel("每行一条，支持单个 IP 或 CIDR 网段（如 203.0.113.0/24）。"
-                     "白名单优先于一切规则，命中即豁免且永不封禁。")
+        tip = QLabel(
+            "每行一条，支持单个 IP 或 CIDR 网段（如 203.0.113.0/24）。"
+            "白名单优先于一切规则，命中即豁免且永不封禁。"
+        )
         tip.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
         tip.setWordWrap(True)
         lay.addWidget(tip)
@@ -325,15 +331,27 @@ class RulesPage(QWidget):
     def _save_lists(self) -> None:
         eng = get_engine()
         from core.rule_engine import _IPSet
+
         black = _IPSet(_lines(self.txt_black.toPlainText()))
         white = _IPSet(_lines(self.txt_white.toPlainText()))
         # 校验非法项
-        bad_b = [x for x in _lines(self.txt_black.toPlainText()) if x not in black.entries() and not _valid(x)]
-        bad_w = [x for x in _lines(self.txt_white.toPlainText()) if x not in white.entries() and not _valid(x)]
+        bad_b = [
+            x
+            for x in _lines(self.txt_black.toPlainText())
+            if x not in black.entries() and not _valid(x)
+        ]
+        bad_w = [
+            x
+            for x in _lines(self.txt_white.toPlainText())
+            if x not in white.entries() and not _valid(x)
+        ]
         bad = bad_b + bad_w
         if bad:
-            QMessageBox.warning(self, "存在非法条目",
-                                "以下条目不是合法 IP 或 CIDR，已忽略：\n" + "\n".join(bad[:20]))
+            QMessageBox.warning(
+                self,
+                "存在非法条目",
+                "以下条目不是合法 IP 或 CIDR，已忽略：\n" + "\n".join(bad[:20]),
+            )
         eng.blacklist = black
         eng.whitelist = white
         try:
@@ -342,8 +360,9 @@ class RulesPage(QWidget):
             QMessageBox.warning(self, "保存失败", str(e))
             return
         self.rules_saved.emit()
-        QMessageBox.information(self, "已保存",
-                                f"黑名单 {len(black)} 条，白名单 {len(white)} 条，已即时生效。")
+        QMessageBox.information(
+            self, "已保存", f"黑名单 {len(black)} 条，白名单 {len(white)} 条，已即时生效。"
+        )
 
 
 def _lines(text: str) -> List[str]:
@@ -352,6 +371,7 @@ def _lines(text: str) -> List[str]:
 
 def _valid(entry: str) -> bool:
     import ipaddress
+
     try:
         if "/" in entry:
             ipaddress.ip_network(entry, strict=False)

@@ -1,4 +1,5 @@
 """规则引擎测试"""
+
 import pytest
 
 from core.database import init_db
@@ -15,21 +16,35 @@ def engine(isolated_env):
         "version": 1,
         "rules": {
             "blacklist": {"enabled": True, "score": 100, "level": "critical"},
-            "port_scan": {"enabled": True, "score": 80, "window_sec": 30,
-                          "distinct_ports": 15},
-            "sensitive_path_login": {"enabled": True, "score": 70, "window_sec": 60,
-                                     "threshold": 10, "paths": ["/admin", "/login"],
-                                     "status": [401, 403]},
-            "foreign_sensitive_port": {"enabled": True, "score": 65,
-                                       "ports": [3389, 22, 1433]},
-            "rate_limit": {"enabled": True, "score": 60, "window_sec": 10,
-                           "threshold": 50},
-            "scanner_ua": {"enabled": True, "score": 45,
-                           "patterns": ["sqlmap", "nmap", "nikto"], "empty_ua": True},
-            "error_storm": {"enabled": True, "score": 40, "window_sec": 60,
-                            "min_samples": 20, "error_ratio": 0.7},
-            "suspicious_method": {"enabled": True, "score": 30,
-                                  "methods": ["TRACE", "PROPFIND", "PUT"]},
+            "port_scan": {"enabled": True, "score": 80, "window_sec": 30, "distinct_ports": 15},
+            "sensitive_path_login": {
+                "enabled": True,
+                "score": 70,
+                "window_sec": 60,
+                "threshold": 10,
+                "paths": ["/admin", "/login"],
+                "status": [401, 403],
+            },
+            "foreign_sensitive_port": {"enabled": True, "score": 65, "ports": [3389, 22, 1433]},
+            "rate_limit": {"enabled": True, "score": 60, "window_sec": 10, "threshold": 50},
+            "scanner_ua": {
+                "enabled": True,
+                "score": 45,
+                "patterns": ["sqlmap", "nmap", "nikto"],
+                "empty_ua": True,
+            },
+            "error_storm": {
+                "enabled": True,
+                "score": 40,
+                "window_sec": 60,
+                "min_samples": 20,
+                "error_ratio": 0.7,
+            },
+            "suspicious_method": {
+                "enabled": True,
+                "score": 30,
+                "methods": ["TRACE", "PROPFIND", "PUT"],
+            },
             "large_body": {"enabled": True, "score": 25, "min_bytes": 5 * 1024 * 1024},
         },
     }
@@ -116,8 +131,15 @@ def test_suspicious_method_and_large_body(engine):
 
 def test_score_capped_at_100(engine):
     engine.blacklist.add("203.0.113.10")
-    r = engine.evaluate(_rec(user_agent="sqlmap", method="TRACE",
-                             size=9 * 1024 * 1024, path="/admin", status_code=401))
+    r = engine.evaluate(
+        _rec(
+            user_agent="sqlmap",
+            method="TRACE",
+            size=9 * 1024 * 1024,
+            path="/admin",
+            status_code=401,
+        )
+    )
     assert r.score == 100
 
 
@@ -130,8 +152,17 @@ def test_level_thresholds():
 
 
 def test_never_ban_networks():
-    for ip in ("127.0.0.1", "10.1.2.3", "192.168.0.1", "172.16.5.5",
-               "169.254.1.1", "224.0.0.1", "::1", "fe80::1", "fc00::1"):
+    for ip in (
+        "127.0.0.1",
+        "10.1.2.3",
+        "192.168.0.1",
+        "172.16.5.5",
+        "169.254.1.1",
+        "224.0.0.1",
+        "::1",
+        "fe80::1",
+        "fc00::1",
+    ):
         assert is_never_ban(ip) is True, ip
     for ip in ("8.8.8.8", "203.0.113.10", "2408:8000::1"):
         assert is_never_ban(ip) is False, ip

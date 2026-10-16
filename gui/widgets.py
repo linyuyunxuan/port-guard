@@ -1,4 +1,5 @@
 """PortGuard — 可复用控件"""
+
 from PySide6.QtCore import (
     Property,
     QEasingCurve,
@@ -25,6 +26,7 @@ from gui.theme import LEVEL_COLORS, C
 
 class ToggleSwitch(QWidget):
     """简洁的开关控件（替代 QCheckBox 用于"启用/自动模式"）"""
+
     toggled = Signal(bool)
 
     def __init__(self, checked: bool = False, parent=None, width: int = 44, height: int = 24):
@@ -94,11 +96,13 @@ class ToggleSwitch(QWidget):
 
 class StatCard(QFrame):
     """统计卡片：大数字 + 说明文字"""
+
     def __init__(self, label: str, value: str = "0", color: str | None = None, parent=None):
         super().__init__(parent)
         self.setObjectName("stat_card")
         self.setStyleSheet(
-            f"#stat_card{{background:{C.bg_card};border:1px solid {C.border};border-radius:10px;}}")
+            f"#stat_card{{background:{C.bg_card};border:1px solid {C.border};border-radius:10px;}}"
+        )
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(2)
@@ -106,7 +110,8 @@ class StatCard(QFrame):
         self.value_lbl = QLabel(value)
         self.value_lbl.setObjectName("stat_value")
         self.value_lbl.setStyleSheet(
-            f"font-size:25px;font-weight:700;color:{color or C.text_on_dark};")
+            f"font-size:25px;font-weight:700;color:{color or C.text_on_dark};"
+        )
 
         self.label_lbl = QLabel(label)
         self.label_lbl.setStyleSheet(f"font-size:12px;color:{C.text_secondary};")
@@ -125,6 +130,7 @@ class StatCard(QFrame):
 
 class RiskBadge(QLabel):
     """风险等级徽章"""
+
     def __init__(self, level: str = "normal", text: str | None = None, parent=None):
         super().__init__(parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -132,16 +138,19 @@ class RiskBadge(QLabel):
 
     def set_level(self, level: str, text: str | None = None) -> None:
         from core.config import LEVEL_LABEL
+
         color = LEVEL_COLORS.get(level, C.text_secondary)
         label = text if text is not None else LEVEL_LABEL.get(level, level)
         self.setText(label)
         self.setStyleSheet(
             f"color:{color};border:1px solid {color};border-radius:8px;"
-            f"padding:1px 8px;font-size:11px;font-weight:600;background:transparent;")
+            f"padding:1px 8px;font-size:11px;font-weight:600;background:transparent;"
+        )
 
 
 class Badge(QLabel):
     """通用小标签"""
+
     def __init__(self, text: str = "", color: str | None = None, parent=None):
         super().__init__(text, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -150,18 +159,23 @@ class Badge(QLabel):
     def set_color(self, color: str) -> None:
         self.setStyleSheet(
             f"color:{color};border:1px solid {color};border-radius:8px;"
-            f"padding:1px 8px;font-size:11px;background:transparent;")
+            f"padding:1px 8px;font-size:11px;background:transparent;"
+        )
 
 
 class WarnBanner(QFrame):
     """页面顶部警示条"""
+
     action_clicked = Signal()
 
-    def __init__(self, text: str = "", action_text: str = "", color: str | None = None, parent=None):
+    def __init__(
+        self, text: str = "", action_text: str = "", color: str | None = None, parent=None
+    ):
         super().__init__(parent)
         color = color or C.warning
         self.setStyleSheet(
-            f"QFrame{{background:{C.warning_light};border:1px solid {color};border-radius:8px;}}")
+            f"QFrame{{background:{C.warning_light};border:1px solid {color};border-radius:8px;}}"
+        )
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(10)
@@ -181,7 +195,8 @@ class WarnBanner(QFrame):
             self.btn.setObjectName("btn_warning")
             self.btn.setStyleSheet(
                 f"QPushButton{{background:{color};color:#1a1408;border:none;border-radius:5px;"
-                f"padding:4px 12px;font-size:12px;font-weight:600;}}")
+                f"padding:4px 12px;font-size:12px;font-weight:600;}}"
+            )
             self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.btn.clicked.connect(self.action_clicked.emit)
             lay.addWidget(self.btn)
@@ -192,6 +207,7 @@ class WarnBanner(QFrame):
 
 class EmptyHint(QLabel):
     """空态提示"""
+
     def __init__(self, text: str = "暂无数据", parent=None):
         super().__init__(text, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -200,7 +216,10 @@ class EmptyHint(QLabel):
 
 # ── 表格辅助 ──
 
-def make_item(text: str, color: str | None = None, align=None, bold: bool = False) -> QTableWidgetItem:
+
+def make_item(
+    text: str, color: str | None = None, align=None, bold: bool = False
+) -> QTableWidgetItem:
     it = QTableWidgetItem(str(text if text is not None else ""))
     if color:
         it.setForeground(QColor(color))

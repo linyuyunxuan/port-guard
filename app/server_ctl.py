@@ -4,6 +4,7 @@ PortGuard — 上报服务启停编排（不依赖 Qt）
 把「读设置 → 解析监听地址 → 处理 Key → 启停 → 组装提示文案」集中在这里，
 界面层只负责把 message 丢到状态栏。
 """
+
 from typing import Dict, Optional, Tuple
 
 from core import report_server
@@ -16,8 +17,11 @@ log = get_logger(__name__)
 
 def state() -> Dict:
     """当前服务状态快照（供 UI 渲染）"""
-    host = report_server.get_host() if report_server.is_running() else \
-        (cfg.get("listen_host", "127.0.0.1") or "127.0.0.1")
+    host = (
+        report_server.get_host()
+        if report_server.is_running()
+        else (cfg.get("listen_host", "127.0.0.1") or "127.0.0.1")
+    )
     return {
         "running": report_server.is_running(),
         "host": host,
@@ -70,11 +74,15 @@ def toggle(start_it: Optional[bool] = None) -> Tuple[bool, str]:
 def endpoint_text() -> str:
     """给设置页展示的上报地址（未运行时按配置预览）"""
     host = cfg.get("listen_host", "127.0.0.1") or "127.0.0.1"
-    port = report_server.get_port() if report_server.is_running() \
+    port = (
+        report_server.get_port()
+        if report_server.is_running()
         else cfg.get_int("listen_port", DEFAULT_LISTEN_PORT)
+    )
     shown = "127.0.0.1" if host in LOOPBACK_HOSTS else host
-    return (f"POST http://{shown}:{port}/api/v1/access/report\n"
-            f"GET  http://{shown}:{port}/api/v1/health")
+    return (
+        f"POST http://{shown}:{port}/api/v1/access/report\nGET  http://{shown}:{port}/api/v1/health"
+    )
 
 
 def should_autostart() -> bool:

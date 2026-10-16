@@ -2,6 +2,7 @@
 PortGuard — 领域模型
 所有对象均为轻量 dataclass，可安全地在后台线程中创建后投递给 UI 线程。
 """
+
 import datetime
 import json
 import time
@@ -56,6 +57,7 @@ def parse_timestamp(value: Any) -> int:
 #  IP 归属地
 # ═══════════════════════════════════════════════════════════
 
+
 @dataclass
 class GeoInfo:
     ip: str = ""
@@ -106,6 +108,7 @@ class GeoInfo:
 #  访问记录
 # ═══════════════════════════════════════════════════════════
 
+
 @dataclass
 class AccessRecord:
     ip: str = ""
@@ -116,7 +119,7 @@ class AccessRecord:
     path: str = ""
     status_code: Optional[int] = None
     user_agent: str = ""
-    size: int = 0                       # 对外 JSON 字段名为 bytes
+    size: int = 0  # 对外 JSON 字段名为 bytes
     host: str = ""
     server_name: str = ""
     tags: Dict[str, Any] = field(default_factory=dict)
@@ -173,12 +176,14 @@ class AccessRecord:
     @property
     def matched_str(self) -> str:
         from core.rules_meta import rule_label
+
         return "、".join(rule_label(r) for r in self.matched_rules)
 
 
 # ═══════════════════════════════════════════════════════════
 #  风险判定结果
 # ═══════════════════════════════════════════════════════════
+
 
 @dataclass
 class RiskResult:
@@ -232,8 +237,8 @@ class BanRecord:
     risk_score: int = 0
     source: str = "manual"
     status: str = STATUS_ACTIVE
-    duration_sec: Optional[int] = None      # None = 永久
-    expire_at: Optional[int] = None         # epoch 毫秒
+    duration_sec: Optional[int] = None  # None = 永久
+    expire_at: Optional[int] = None  # epoch 毫秒
     created_at: str = ""
     updated_at: str = ""
     error_msg: str = ""

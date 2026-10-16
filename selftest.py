@@ -9,6 +9,7 @@ PortGuard 端到端自检（离屏运行，不需要显示器）
 注意：本脚本会写入真实 data/ 目录（数据库、日志），但**不会**创建任何防火墙
 规则 —— 封禁只跑到 prepare() 的校验阶段就停。
 """
+
 import json
 import os
 import sys
@@ -53,15 +54,17 @@ _backup = {k: cfg.get(k) for k in ("auto_mode", "alert_popup_level", "alert_soun
 cfg.set("auto_mode", "0")
 cfg.set("alert_popup_level", "none")
 cfg.set("alert_sound", "0")
-check("自检已切到无副作用模式（不自动封禁）", cfg.get("auto_mode") == "0",
-      f"原值 auto_mode={_backup['auto_mode']!r}，结束后会还原")
+check(
+    "自检已切到无副作用模式（不自动封禁）",
+    cfg.get("auto_mode") == "0",
+    f"原值 auto_mode={_backup['auto_mode']!r}，结束后会还原",
+)
 
 # ── 2. 设置缓存 ──
 n_before = len(cfg.snapshot())
 for _ in range(200):
     cfg.get_int("rate_limit_per_sec", 300)
-check("设置缓存预热且热点读取不回源", len(cfg.snapshot()) == n_before,
-      f"{n_before} 项")
+check("设置缓存预热且热点读取不回源", len(cfg.snapshot()) == n_before, f"{n_before} 项")
 
 # ── 3. 离线定位库 ──
 loc = get_locator()
@@ -69,16 +72,20 @@ check("定位库加载", loc.available, loc.load_error or "")
 geo_cn = loc.lookup("113.118.113.77")
 check("国内 IP 定位", geo_cn.found and geo_cn.is_china, geo_cn.display)
 lib = loc.library_info()
-check("离线库文件信息（v4/v6 均存在）",
-      lib["v4"]["exists"] and lib["v6"]["exists"],
-      f"v4={lib['v4']['size'] / 1048576:.1f}MB v6={lib['v6']['size'] / 1048576:.1f}MB "
-      f"gen={lib['generation']}")
+check(
+    "离线库文件信息（v4/v6 均存在）",
+    lib["v4"]["exists"] and lib["v6"]["exists"],
+    f"v4={lib['v4']['size'] / 1048576:.1f}MB v6={lib['v6']['size'] / 1048576:.1f}MB "
+    f"gen={lib['generation']}",
+)
 
 # 在线同步状态（只读，不触发下载）
 st = xdb_updater.status_summary()
-check("离线库在线同步模块可用",
-      set(st["files"].keys()) == {"ip2region_v4.xdb", "ip2region_v6.xdb"},
-      f"auto_sync={st['auto_sync']} interval={st['interval_hours']}h")
+check(
+    "离线库在线同步模块可用",
+    set(st["files"].keys()) == {"ip2region_v4.xdb", "ip2region_v6.xdb"},
+    f"auto_sync={st['auto_sync']} interval={st['interval_hours']}h",
+)
 
 # ── 4. 上报处理 + 批量落库 ──
 from core.report_server import _process
@@ -86,24 +93,51 @@ from core.report_server import _process
 n_acc_before = len(query_access_logs(1000))
 
 t0 = time.perf_counter()
-r1 = _process({"ip": "113.118.113.77", "local_port": 3000, "protocol": "http",
-               "method": "GET", "path": "/api/products", "status_code": 200,
-               "user_agent": "Mozilla/5.0 (Windows NT 10.0)", "bytes": 1024},
-              "113.118.113.77")
-check("正常访问判定", r1["risk_level"] == "normal" and r1["suggest_ban"] is False,
-      f"score={r1['risk_score']} geo={r1['geo']}")
+r1 = _process(
+    {
+        "ip": "113.118.113.77",
+        "local_port": 3000,
+        "protocol": "http",
+        "method": "GET",
+        "path": "/api/products",
+        "status_code": 200,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+        "bytes": 1024,
+    },
+    "113.118.113.77",
+)
+check(
+    "正常访问判定",
+    r1["risk_level"] == "normal" and r1["suggest_ban"] is False,
+    f"score={r1['risk_score']} geo={r1['geo']}",
+)
 
-r2 = _process({"ip": "45.33.32.156", "local_port": 8080, "protocol": "http",
-               "method": "POST", "path": "/admin/login", "status_code": 401,
-               "user_agent": "sqlmap/1.7", "bytes": 512}, "45.33.32.156")
-check("恶意访问判定（单次只告警，不封禁）",
-      r2["risk_score"] >= 45 and "scanner_ua" in r2["matched_rules"],
-      f"score={r2['risk_score']} level={r2['risk_level']} rules={r2['matched_rules']}")
+r2 = _process(
+    {
+        "ip": "45.33.32.156",
+        "local_port": 8080,
+        "protocol": "http",
+        "method": "POST",
+        "path": "/admin/login",
+        "status_code": 401,
+        "user_agent": "sqlmap/1.7",
+        "bytes": 512,
+    },
+    "45.33.32.156",
+)
+check(
+    "恶意访问判定（单次只告警，不封禁）",
+    r2["risk_score"] >= 45 and "scanner_ua" in r2["matched_rules"],
+    f"score={r2['risk_score']} level={r2['risk_level']} rules={r2['matched_rules']}",
+)
 
 check("批量写入排空", db_writer.get_writer().flush(timeout=5))
 n_acc_after = len(query_access_logs(1000))
-check("上报已落库（批量写入器）", n_acc_after >= n_acc_before + 2,
-      f"{n_acc_before} → {n_acc_after}，写入器 {db_writer.get_writer().stats()}")
+check(
+    "上报已落库（批量写入器）",
+    n_acc_after >= n_acc_before + 2,
+    f"{n_acc_before} → {n_acc_after}，写入器 {db_writer.get_writer().stats()}",
+)
 
 # ── 5. 主窗口与各页面 ──
 from gui.main_window import MainWindow
@@ -118,30 +152,42 @@ check("实时监控表收到记录", rows >= 2, f"行数={rows}")
 
 win.page_events.refresh()
 win.page_bans.refresh()
-check("风险事件页", win.page_events.table.rowCount() >= 1,
-      f"行数={win.page_events.table.rowCount()}")
-check("封禁建议页", win.page_bans.sug_table.rowCount() >= 1,
-      f"行数={win.page_bans.sug_table.rowCount()}")
+check(
+    "风险事件页", win.page_events.table.rowCount() >= 1, f"行数={win.page_events.table.rowCount()}"
+)
+check(
+    "封禁建议页",
+    win.page_bans.sug_table.rowCount() >= 1,
+    f"行数={win.page_bans.sug_table.rowCount()}",
+)
 
 win.page_iplookup.lookup_and_show("8.8.8.8")
-check("IP 查询页", bool(win.page_iplookup.single_result.text()),
-      win.page_iplookup.single_result.text())
+check(
+    "IP 查询页",
+    bool(win.page_iplookup.single_result.text()),
+    win.page_iplookup.single_result.text(),
+)
 
 check("规则页卡片数", len(win.page_rules._cards) == 9, str(len(win.page_rules._cards)))
 win.page_rules.reload()
 
 win._refresh_stats(force=True)
-check("统计卡片刷新",
-      win.page_monitor.card_total.value_lbl.text() != "",
-      f"今日访问={win.page_monitor.card_total.value_lbl.text()} "
-      f"今日风险={win.page_monitor.card_risk.value_lbl.text()}")
+check(
+    "统计卡片刷新",
+    win.page_monitor.card_total.value_lbl.text() != "",
+    f"今日访问={win.page_monitor.card_total.value_lbl.text()} "
+    f"今日风险={win.page_monitor.card_risk.value_lbl.text()}",
+)
 
 # 设置页（本次新增：局域网开关 / 离线库在线同步组）
-check("设置页-监听端口", win.page_settings.sp_port.value() > 0,
-      str(win.page_settings.sp_port.value()))
-check("设置页-离线库同步组已就绪",
-      hasattr(win.page_settings, "btn_xdb_check") and hasattr(win.page_settings, "tg_xdb_auto"),
-      f"自动同步={win.page_settings.tg_xdb_auto.isChecked()}")
+check(
+    "设置页-监听端口", win.page_settings.sp_port.value() > 0, str(win.page_settings.sp_port.value())
+)
+check(
+    "设置页-离线库同步组已就绪",
+    hasattr(win.page_settings, "btn_xdb_check") and hasattr(win.page_settings, "tg_xdb_auto"),
+    f"自动同步={win.page_settings.tg_xdb_auto.isChecked()}",
+)
 # 过滤与搜索（验证重建视图不丢原始数据）
 win.page_monitor.scope.setCurrentText("有风险")
 app.processEvents()
@@ -153,8 +199,11 @@ n_search = win.page_monitor.model.rowCount()
 check("搜索过滤", n_search == 1, f"搜索 '113.118' 命中 {n_search} 行（有风险视图 {n_risk} 行）")
 win.page_monitor.search.setText("")
 app.processEvents()
-check("清空搜索不丢数据", win.page_monitor.model.rowCount() == rows,
-      f"行数={win.page_monitor.model.rowCount()}")
+check(
+    "清空搜索不丢数据",
+    win.page_monitor.model.rowCount() == rows,
+    f"行数={win.page_monitor.model.rowCount()}",
+)
 
 # ── 6. 封禁校验（只校验，不真的动防火墙）──
 from app import ban_service
@@ -173,17 +222,22 @@ except ban_service.BanError as e:
 
 rec = ban_service.prepare("203.0.113.10", score=95, reason="自检", duration_sec=600)
 # prepare() 只做校验并构造记录：状态是 pending，rule_name 要等 execute() 真正建规则时生成
-check("合法 IP 通过校验", rec.ip == "203.0.113.10"
-      and rec.status == STATUS_PENDING and rec.duration_sec == 600,
-      f"score={rec.risk_score} duration={rec.duration_sec}s status={rec.status}")
+check(
+    "合法 IP 通过校验",
+    rec.ip == "203.0.113.10" and rec.status == STATUS_PENDING and rec.duration_sec == 600,
+    f"score={rec.risk_score} duration={rec.duration_sec}s status={rec.status}",
+)
 
 # ── 7. 真实 HTTP 服务 ──
 PORT = 18099
 # 真实库里可能已经设了 API Key，测接口时带上，避免自检把鉴权当失败
 API_KEY = cfg.get("api_key", "")
-check("启动接收服务", report_server.start_server(PORT, API_KEY),
-      f"running={report_server.is_running()} port={report_server.get_port()} "
-      f"key={'已启用' if API_KEY else '未启用'}")
+check(
+    "启动接收服务",
+    report_server.start_server(PORT, API_KEY),
+    f"running={report_server.is_running()} port={report_server.get_port()} "
+    f"key={'已启用' if API_KEY else '未启用'}",
+)
 time.sleep(1.2)
 
 # 本机 curl/urllib 默认走系统代理，测本地端口必须绕开代理
@@ -216,16 +270,24 @@ try:
     code, body = http("/api/v1/version")
     check("GET /api/v1/version", code == 200 and APP_VERSION in body, body[:140])
 
-    code, body = http("/api/v1/access/report",
-                      {"ip": "8.8.8.8", "local_port": 3389, "method": "GET",
-                       "path": "/", "status_code": 200, "user_agent": "curl/8.0"})
-    check("POST /api/v1/access/report", code == 200 and '"success":true' in body,
-          body[:200])
+    code, body = http(
+        "/api/v1/access/report",
+        {
+            "ip": "8.8.8.8",
+            "local_port": 3389,
+            "method": "GET",
+            "path": "/",
+            "status_code": 200,
+            "user_agent": "curl/8.0",
+        },
+    )
+    check("POST /api/v1/access/report", code == 200 and '"success":true' in body, body[:200])
 
     # 注入 payload 必须在 HTTP 层被 400 拒绝
-    code, body = http_expect_error("/api/v1/access/report",
-                                   {"ip": '1.2.3.4"; Start-Process calc; #',
-                                    "local_port": 3000, "path": "/"})
+    code, body = http_expect_error(
+        "/api/v1/access/report",
+        {"ip": '1.2.3.4"; Start-Process calc; #', "local_port": 3000, "path": "/"},
+    )
     check("HTTP 层拒绝非法 IP（拒绝命令注入）", code == 400, body[:160])
 
     # 交互式文档必须关闭
@@ -240,14 +302,20 @@ check("停止接收服务", not report_server.is_running())
 
 # ── 8. 数据库总览 ──
 today = count_today()
-check("数据库统计可读", isinstance(today, tuple),
-      f"today={today} access={len(query_access_logs(50))} events={len(query_risk_events(50))}")
+check(
+    "数据库统计可读",
+    isinstance(today, tuple),
+    f"today={today} access={len(query_access_logs(50))} events={len(query_risk_events(50))}",
+)
 
 # ── 收尾 ──
-for k, v in _backup.items():                 # 还原为运行前的设置
+for k, v in _backup.items():  # 还原为运行前的设置
     cfg.set(k, v)
-check("已还原运行前设置", all(cfg.get(k) == v for k, v in _backup.items()),
-      f"auto_mode={cfg.get('auto_mode')!r}")
+check(
+    "已还原运行前设置",
+    all(cfg.get(k) == v for k, v in _backup.items()),
+    f"auto_mode={cfg.get('auto_mode')!r}",
+)
 
 QTimer.singleShot(200, app.quit)
 app.exec()

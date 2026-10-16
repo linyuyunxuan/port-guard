@@ -8,6 +8,7 @@ PortGuard — 离线库在线同步调度（不依赖 Qt）
 
 界面侧只需要：QTimer 定期调 `maybe_auto()`，并把 `bus.drain_xdb()` 的内容渲染出来。
 """
+
 import threading
 import time
 from typing import Callable, Optional
@@ -127,8 +128,15 @@ class XdbSyncService:
                     ok, message = chk.ok, chk.message
                     try:
                         from core.event_bus import bus
-                        bus.emit_xdb({"stage": "checked", "message": chk.message,
-                                      "percent": 100, "has_update": chk.has_update})
+
+                        bus.emit_xdb(
+                            {
+                                "stage": "checked",
+                                "message": chk.message,
+                                "percent": 100,
+                                "has_update": chk.has_update,
+                            }
+                        )
                     except Exception:
                         log.exception("投递离线库探测事件失败")
                 self._last_error = "" if ok else (message or "未知错误")

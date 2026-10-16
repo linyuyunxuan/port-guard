@@ -1,4 +1,5 @@
 """IP 归属地定位器与离线库在线同步的测试（全部离线，不访问网络）"""
+
 import json
 import os
 
@@ -11,6 +12,7 @@ from core.database import init_db
 from core.geo_locator import GeoLocator
 
 # ═══════════════════ 定位器 ═══════════════════
+
 
 @pytest.fixture
 def locator(isolated_env):
@@ -100,12 +102,14 @@ def test_library_info_structure(locator):
 
 # ═══════════════════ 版本指纹 ═══════════════════
 
+
 def test_git_blob_sha1_matches_git_formula(tmp_path):
     """
     git blob sha1 = sha1("blob <size>\\0" + content)
     校验我们的实现与手工计算一致（这是判断线上是否有新版本的唯一依据）。
     """
     import hashlib
+
     p = tmp_path / "f.bin"
     payload = b"hello portguard"
     p.write_bytes(payload)
@@ -125,9 +129,11 @@ def test_git_blob_sha1_against_real_xdb(isolated_env):
 
 # ═══════════════════ 下载校验 ═══════════════════
 
+
 def test_verify_downloaded_accepts_real_library(isolated_env):
-    ok, err = U.verify_downloaded(v4_xdb_path(), "ip2region_v4.xdb",
-                                  expect_sha=U.git_blob_sha1(v4_xdb_path()))
+    ok, err = U.verify_downloaded(
+        v4_xdb_path(), "ip2region_v4.xdb", expect_sha=U.git_blob_sha1(v4_xdb_path())
+    )
     assert ok, err
 
 
@@ -138,8 +144,9 @@ def test_verify_downloaded_rejects_wrong_sha(isolated_env):
 
 
 def test_verify_downloaded_rejects_wrong_size(isolated_env):
-    ok, err = U.verify_downloaded(v4_xdb_path(), "ip2region_v4.xdb",
-                                  expect_size=os.path.getsize(v4_xdb_path()) + 1)
+    ok, err = U.verify_downloaded(
+        v4_xdb_path(), "ip2region_v4.xdb", expect_size=os.path.getsize(v4_xdb_path()) + 1
+    )
     assert ok is False
     assert "大小" in err
 
@@ -161,6 +168,7 @@ def test_verify_downloaded_rejects_empty(tmp_path):
 
 
 # ═══════════════════ 下载源白名单 ═══════════════════
+
 
 def test_build_urls_only_allowlisted_https(isolated_env):
     init_db()
@@ -189,6 +197,7 @@ def test_custom_https_source_is_preferred(isolated_env):
 
 
 # ═══════════════════ 清单与状态 ═══════════════════
+
 
 def test_manifest_roundtrip(isolated_env):
     init_db()

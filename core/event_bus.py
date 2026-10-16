@@ -7,6 +7,7 @@ Qt 主线程用 QTimer 周期性 drain 并刷新界面。
 
 本模块不依赖 PyQt，可独立测试。
 """
+
 import queue
 import threading
 from typing import Any, List
@@ -15,12 +16,14 @@ from typing import Any, List
 class EventBus:
     """进程内唯一事件总线"""
 
-    def __init__(self,
-                 access_size: int = 50000,
-                 risk_size: int = 10000,
-                 ban_size: int = 2000,
-                 alert_size: int = 2000,
-                 xdb_size: int = 500):
+    def __init__(
+        self,
+        access_size: int = 50000,
+        risk_size: int = 10000,
+        ban_size: int = 2000,
+        alert_size: int = 2000,
+        xdb_size: int = 500,
+    ):
         self.access_q: queue.Queue = queue.Queue(maxsize=access_size)
         self.risk_q: queue.Queue = queue.Queue(maxsize=risk_size)
         self.ban_q: queue.Queue = queue.Queue(maxsize=ban_size)
@@ -91,9 +94,13 @@ class EventBus:
             return self._dropped
 
     def pending(self) -> int:
-        return (self.access_q.qsize() + self.risk_q.qsize()
-                + self.ban_q.qsize() + self.alert_q.qsize()
-                + self.xdb_q.qsize())
+        return (
+            self.access_q.qsize()
+            + self.risk_q.qsize()
+            + self.ban_q.qsize()
+            + self.alert_q.qsize()
+            + self.xdb_q.qsize()
+        )
 
 
 # 全局单例

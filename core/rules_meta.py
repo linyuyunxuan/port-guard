@@ -2,6 +2,7 @@
 PortGuard — 规则元数据（规则名称、说明、默认参数）
 UI 与核心共用，避免循环依赖。
 """
+
 from typing import Any, Dict, List
 
 # 规则 ID -> 中文名
@@ -57,7 +58,13 @@ RULE_PARAMS: Dict[str, List[Dict[str, Any]]] = {
         {"key": "error_ratio", "type": "float", "label": "错误占比(0~1)", "min": 0.0, "max": 1.0},
     ],
     "large_body": [
-        {"key": "min_bytes", "type": "int", "label": "请求体阈值(字节)", "min": 1, "max": 1073741824},
+        {
+            "key": "min_bytes",
+            "type": "int",
+            "label": "请求体阈值(字节)",
+            "min": 1,
+            "max": 1073741824,
+        },
     ],
     "suspicious_method": [
         {"key": "methods", "type": "list_str", "label": "非常规方法(逗号分隔)"},

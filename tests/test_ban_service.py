@@ -1,4 +1,5 @@
 """封禁编排测试（app/ban_service.py）"""
+
 import pytest
 
 from app import ban_service
@@ -20,17 +21,22 @@ def no_admin(monkeypatch):
 @pytest.fixture
 def fake_fw(monkeypatch):
     """假装防火墙执行成功"""
-    monkeypatch.setattr(firewall, "block_ip",
-                        lambda ip, duration=None, note="": (True, f"PortGuard_Block_{ip}_1_aa", ""))
+    monkeypatch.setattr(
+        firewall,
+        "block_ip",
+        lambda ip, duration=None, note="": (True, f"PortGuard_Block_{ip}_1_aa", ""),
+    )
 
 
 @pytest.fixture
 def failing_fw(monkeypatch):
-    monkeypatch.setattr(firewall, "block_ip",
-                        lambda ip, duration=None, note="": (False, "", "Access denied"))
+    monkeypatch.setattr(
+        firewall, "block_ip", lambda ip, duration=None, note="": (False, "", "Access denied")
+    )
 
 
 # ═══════════════════ prepare ═══════════════════
+
 
 def test_prepare_accepts_valid(isolated_env):
     init_db()
@@ -49,16 +55,19 @@ def test_prepare_permanent_ban_has_no_expire(isolated_env):
     assert rec.expire_at is None
 
 
-@pytest.mark.parametrize("evil", [
-    '1.2.3.4"; Start-Process calc; #',
-    "$(calc)",
-    "abc",
-    "",
-    "10.0.0.1",
-    "192.168.1.1",
-    "127.0.0.1",
-    "::1",
-])
+@pytest.mark.parametrize(
+    "evil",
+    [
+        '1.2.3.4"; Start-Process calc; #',
+        "$(calc)",
+        "abc",
+        "",
+        "10.0.0.1",
+        "192.168.1.1",
+        "127.0.0.1",
+        "::1",
+    ],
+)
 def test_prepare_rejects_bad_or_protected(isolated_env, evil):
     init_db()
     with pytest.raises(ban_service.BanError):
@@ -67,7 +76,7 @@ def test_prepare_rejects_bad_or_protected(isolated_env, evil):
 
 def test_prepare_clamps_and_sanitizes(isolated_env):
     init_db()
-    rec = ban_service.prepare("203.0.113.10", 99999, "a" * 500, 10 ** 12)
+    rec = ban_service.prepare("203.0.113.10", 99999, "a" * 500, 10**12)
     assert rec.risk_score == 100
     assert rec.duration_sec == ban_service.MAX_BAN_SECONDS
     assert len(rec.reason) <= 180
@@ -82,6 +91,7 @@ def test_prepare_sanitizes_injection_in_reason(isolated_env):
 
 
 # ═══════════════════ execute ═══════════════════
+
 
 def test_execute_requires_admin(isolated_env, no_admin):
     init_db()
@@ -136,6 +146,7 @@ def test_execute_is_idempotent_for_active_ip(isolated_env, admin, fake_fw):
 
 # ═══════════════════ 解封 / 巡检 ═══════════════════
 
+
 def test_unban_requires_admin(isolated_env, no_admin):
     init_db()
     b = BanRecord(id=1, ip="203.0.113.10", rule_name="PortGuard_Block_x")
@@ -146,8 +157,15 @@ def test_unban_requires_admin(isolated_env, no_admin):
 def test_unban_success(isolated_env, admin, monkeypatch):
     init_db()
     from core.database import insert_ban
-    bid = insert_ban(BanRecord(ip="203.0.113.10", rule_name="PortGuard_Block_x_1_aa",
-                               status=STATUS_ACTIVE, source="manual"))
+
+    bid = insert_ban(
+        BanRecord(
+            ip="203.0.113.10",
+            rule_name="PortGuard_Block_x_1_aa",
+            status=STATUS_ACTIVE,
+            source="manual",
+        )
+    )
     monkeypatch.setattr(firewall, "unblock_ip", lambda ip, names=None: (True, "", 1))
     b = find_active_ban_by_ip("203.0.113.10")
     assert b is not None
@@ -165,9 +183,17 @@ def test_check_expired_requires_admin(isolated_env, no_admin):
 def test_check_expired_marks_expired(isolated_env, admin, monkeypatch):
     init_db()
     from core.database import insert_ban
-    insert_ban(BanRecord(ip="203.0.113.10", rule_name="PortGuard_Block_x_1_aa",
-                         status=STATUS_ACTIVE, source="manual",
-                         duration_sec=60, expire_at=1))     # 早已过期
+
+    insert_ban(
+        BanRecord(
+            ip="203.0.113.10",
+            rule_name="PortGuard_Block_x_1_aa",
+            status=STATUS_ACTIVE,
+            source="manual",
+            duration_sec=60,
+            expire_at=1,
+        )
+    )  # 早已过期
     monkeypatch.setattr(firewall, "unblock_ip", lambda ip, names=None: (True, "", 1))
     done = ban_service.check_expired()
     assert len(done) == 1
@@ -177,10 +203,23 @@ def test_check_expired_marks_expired(isolated_env, admin, monkeypatch):
 def test_reconcile_fixes_stale_records(isolated_env, admin):
     init_db()
     from core.database import insert_ban
-    insert_ban(BanRecord(ip="203.0.113.10", rule_name="PortGuard_Block_gone_1_aa",
-                         status=STATUS_ACTIVE, source="manual"))
-    insert_ban(BanRecord(ip="203.0.113.11", rule_name="PortGuard_Block_keep_1_bb",
-                         status=STATUS_ACTIVE, source="manual"))
+
+    insert_ban(
+        BanRecord(
+            ip="203.0.113.10",
+            rule_name="PortGuard_Block_gone_1_aa",
+            status=STATUS_ACTIVE,
+            source="manual",
+        )
+    )
+    insert_ban(
+        BanRecord(
+            ip="203.0.113.11",
+            rule_name="PortGuard_Block_keep_1_bb",
+            status=STATUS_ACTIVE,
+            source="manual",
+        )
+    )
     fixed = ban_service.reconcile(["PortGuard_Block_keep_1_bb"])
     assert fixed == 1
     statuses = {b.ip: b.status for b in query_bans(limit=10)}

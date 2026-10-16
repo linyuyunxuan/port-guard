@@ -28,6 +28,7 @@ GitHub Contents API 返回的是 **git blob sha1**（`sha1("blob <size>\\0" + co
 - 校验不过的文件绝不落盘到正式库位置
 - 校验通过后仍保留 .bak，可一键回滚
 """
+
 import contextlib
 import hashlib
 import json
@@ -73,6 +74,7 @@ ProgressFn = Optional[Callable[[str, str, int], None]]
 #  结果模型
 # ═══════════════════════════════════════════════════════════
 
+
 @dataclass
 class FileStatus:
     name: str
@@ -96,7 +98,7 @@ class FileStatus:
 class CheckResult:
     ok: bool = False
     message: str = ""
-    method: str = "none"          # github-api | content-range | none
+    method: str = "none"  # github-api | content-range | none
     files: List[FileStatus] = field(default_factory=list)
     checked_at: int = 0
 
@@ -108,7 +110,7 @@ class CheckResult:
 @dataclass
 class UpdateResult:
     ok: bool = False
-    updated: bool = False          # 是否真的换了库
+    updated: bool = False  # 是否真的换了库
     message: str = ""
     files: List[Dict] = field(default_factory=list)
     duration_ms: int = 0
@@ -119,6 +121,7 @@ class UpdateResult:
 # ═══════════════════════════════════════════════════════════
 #  指纹
 # ═══════════════════════════════════════════════════════════
+
 
 def git_blob_sha1(path: str) -> str:
     """
@@ -145,6 +148,7 @@ def sha256_of(path: str) -> str:
 # ═══════════════════════════════════════════════════════════
 #  清单（记录上次同步状态，供 UI 展示）
 # ═══════════════════════════════════════════════════════════
+
 
 def get_manifest() -> Dict:
     p = xdb_manifest_path()
@@ -174,6 +178,7 @@ def _save_manifest(d: Dict) -> None:
 #  网络
 # ═══════════════════════════════════════════════════════════
 
+
 def _opener(direct: bool):
     """direct=True 直连（默认）；False 走系统/环境变量代理"""
     if direct:
@@ -188,7 +193,7 @@ def _proxy_modes() -> List[bool]:
     """
     proxy = (cfg.get("xdb_proxy", "") or "").strip()
     if proxy:
-        return [True]     # 显式配置了代理，_opener 会用它
+        return [True]  # 显式配置了代理，_opener 会用它
     modes = [True]
     try:
         if urllib.request.getproxies():
@@ -262,6 +267,7 @@ def _build_urls(name: str) -> List[str]:
 #  探测
 # ═══════════════════════════════════════════════════════════
 
+
 def _remote_via_api(name: str, timeout: float) -> Optional[Tuple[str, int]]:
     """GitHub Contents API -> (sha, size)。只需几百字节流量。"""
     up = XDB_UPSTREAM.get(name)
@@ -270,8 +276,7 @@ def _remote_via_api(name: str, timeout: float) -> Optional[Tuple[str, int]]:
     url = XDB_META_API.format(path=up)
     for direct in _proxy_modes():
         try:
-            with _open(url, timeout, direct,
-                       {"Accept": "application/vnd.github+json"}) as r:
+            with _open(url, timeout, direct, {"Accept": "application/vnd.github+json"}) as r:
                 data = json.loads(r.read().decode("utf-8"))
             sha = str(data.get("sha") or "")
             size = int(data.get("size") or 0)
@@ -334,8 +339,11 @@ def _file_status(name: str, remote: Optional[Tuple[str, int]]) -> FileStatus:
             st.reason = "线上内容已更新"
     elif st.remote_size:
         st.needs_update = st.local_size != st.remote_size
-        st.reason = ("大小不一致，可能已更新" if st.needs_update
-                     else "大小一致（未能取到内容指纹，按大小判定为最新）")
+        st.reason = (
+            "大小不一致，可能已更新"
+            if st.needs_update
+            else "大小一致（未能取到内容指纹，按大小判定为最新）"
+        )
     else:
         st.needs_update = False
         st.reason = "无法判定"
@@ -357,8 +365,11 @@ def check(progress: ProgressFn = None) -> CheckResult:
                 size = _remote_via_range(name, timeout=15)
                 remote = ("", size) if size else None
             res.files.append(_file_status(name, remote))
-        res.method = "github-api" if any_api else (
-            "content-range" if any(f.remote_size for f in res.files) else "none")
+        res.method = (
+            "github-api"
+            if any_api
+            else ("content-range" if any(f.remote_size for f in res.files) else "none")
+        )
     except Exception as e:
         log.exception("探测线上版本失败")
         res.ok = False
@@ -381,13 +392,19 @@ def check(progress: ProgressFn = None) -> CheckResult:
 #  下载与校验
 # ═══════════════════════════════════════════════════════════
 
+
 def _timeout_for(size: int) -> float:
     est = max(XDB_DOWNLOAD_TIMEOUT, int(size / _MIN_SPEED_BPS) + 30)
     return float(min(est, 900))
 
 
-def _download(name: str, dest: str, expect_size: int = 0,
-              progress: ProgressFn = None, budget: str = "download") -> Tuple[bool, str, str]:
+def _download(
+    name: str,
+    dest: str,
+    expect_size: int = 0,
+    progress: ProgressFn = None,
+    budget: str = "download",
+) -> Tuple[bool, str, str]:
     """
     依次尝试各下载源，成功返回 (True, 使用的源, "")。
     下载写入 dest.part，完成后大小校验通过才 rename 成 dest。
@@ -418,8 +435,7 @@ def _download(name: str, dest: str, expect_size: int = 0,
                             break
                         got += len(chunk)
                         if got > max_bytes:
-                            raise RuntimeError(
-                                f"文件超过 {XDB_MAX_FILE_MB} MB 上限，已中断")
+                            raise RuntimeError(f"文件超过 {XDB_MAX_FILE_MB} MB 上限，已中断")
                         f.write(chunk)
                         # 进度节流：百分比变化 且 间隔 >= 400ms 才回调，
                         # 否则 10MB 下载会触发 160 次 UI 刷新
@@ -428,17 +444,20 @@ def _download(name: str, dest: str, expect_size: int = 0,
                             now = time.monotonic()
                             if pct != last_pct and now - last_emit >= 0.4:
                                 last_pct, last_emit = pct, now
-                                progress(budget,
-                                         f"{os.path.basename(name)} 已下载 "
-                                         f"{got / 1048576:.1f}/{total / 1048576:.1f} MB",
-                                         pct)
+                                progress(
+                                    budget,
+                                    f"{os.path.basename(name)} 已下载 "
+                                    f"{got / 1048576:.1f}/{total / 1048576:.1f} MB",
+                                    pct,
+                                )
                 if expect_size and got != expect_size:
                     raise RuntimeError(f"大小不符：期望 {expect_size} 实得 {got}")
                 if got == 0:
                     raise RuntimeError("下载内容为空")
                 os.replace(part, dest)
-                log.info("离线库 %s 下载完成：%s（%.2f MB，源 %s）",
-                         name, dest, got / 1048576, host)
+                log.info(
+                    "离线库 %s 下载完成：%s（%.2f MB，源 %s）", name, dest, got / 1048576, host
+                )
                 return True, url, ""
             except Exception as e:
                 errors.append(f"{host}: {e}")
@@ -451,8 +470,9 @@ def _download(name: str, dest: str, expect_size: int = 0,
     return False, "", "；".join(errors[:6])
 
 
-def verify_downloaded(path: str, name: str, expect_sha: str = "",
-                      expect_size: int = 0) -> Tuple[bool, str]:
+def verify_downloaded(
+    path: str, name: str, expect_sha: str = "", expect_size: int = 0
+) -> Tuple[bool, str]:
     """
     四重校验：大小 → git blob sha → xdb 结构 → 抽样查询冒烟。
     任何一项不过都判定失败，调用方不会把它换进正式库位置。
@@ -477,6 +497,7 @@ def verify_downloaded(path: str, name: str, expect_sha: str = "",
     # xdb 结构校验 + 抽样查询
     try:
         from ip2region import util as ip2util
+
         ip2util.verify_from_file(path)
     except Exception as e:
         return False, f"xdb 结构校验失败：{e}"
@@ -484,12 +505,15 @@ def verify_downloaded(path: str, name: str, expect_sha: str = "",
     try:
         from ip2region import searcher as xdbsearcher
         from ip2region import util as ip2util
+
         version = ip2util.IPv4 if name.endswith("_v4.xdb") else ip2util.IPv6
         buf = ip2util.load_content_from_file(path)
         s = xdbsearcher.new_with_buffer(version, buf)
-        probes = (["1.1.1.1", "8.8.8.8", "223.5.5.5", "114.114.114.114"]
-                  if version is ip2util.IPv4
-                  else ["2400:3200::1", "2001:4860:4860::8888", "240e:1:1::1"])
+        probes = (
+            ["1.1.1.1", "8.8.8.8", "223.5.5.5", "114.114.114.114"]
+            if version is ip2util.IPv4
+            else ["2400:3200::1", "2001:4860:4860::8888", "240e:1:1::1"]
+        )
         hits = 0
         for ip in probes:
             try:
@@ -509,6 +533,7 @@ def verify_downloaded(path: str, name: str, expect_sha: str = "",
 #  备份 / 回滚
 # ═══════════════════════════════════════════════════════════
 
+
 def _backup(name: str) -> Optional[str]:
     src = xdb_path(name)
     if not os.path.exists(src):
@@ -527,8 +552,8 @@ def restore_backup(name: str, backup_file: str = "") -> Tuple[bool, str]:
     """从备份恢复指定库并热加载"""
     if not backup_file:
         cands = sorted(
-            (f for f in os.listdir(backup_dir()) if f.startswith(name + ".")),
-            reverse=True)
+            (f for f in os.listdir(backup_dir()) if f.startswith(name + ".")), reverse=True
+        )
         if not cands:
             return False, f"没有 {name} 的可用备份"
         backup_file = os.path.join(backup_dir(), cands[0])
@@ -539,8 +564,9 @@ def restore_backup(name: str, backup_file: str = "") -> Tuple[bool, str]:
     except Exception as e:
         return False, f"恢复失败：{e}"
     ok, err = _reload_locator()
-    log.warning("已从备份恢复 %s（%s），热加载 %s", name, backup_file,
-                "成功" if ok else f"失败：{err}")
+    log.warning(
+        "已从备份恢复 %s（%s），热加载 %s", name, backup_file, "成功" if ok else f"失败：{err}"
+    )
     return ok, err
 
 
@@ -551,9 +577,14 @@ def list_backups() -> List[Dict]:
             p = os.path.join(backup_dir(), f)
             if not os.path.isfile(p):
                 continue
-            out.append({"file": f, "path": p,
-                        "size": os.path.getsize(p),
-                        "mtime": int(os.path.getmtime(p) * 1000)})
+            out.append(
+                {
+                    "file": f,
+                    "path": p,
+                    "size": os.path.getsize(p),
+                    "mtime": int(os.path.getmtime(p) * 1000),
+                }
+            )
     except Exception:
         pass
     return out
@@ -562,6 +593,7 @@ def list_backups() -> List[Dict]:
 def _reload_locator() -> Tuple[bool, str]:
     try:
         from core.geo_locator import reload_locator
+
         return reload_locator()
     except Exception as e:
         log.exception("热加载定位库失败")
@@ -572,12 +604,14 @@ def _reload_locator() -> Tuple[bool, str]:
 #  主流程
 # ═══════════════════════════════════════════════════════════
 
+
 def is_updating() -> bool:
     return _in_progress
 
 
-def update(force: bool = False, progress: ProgressFn = None,
-           names: Optional[List[str]] = None) -> UpdateResult:
+def update(
+    force: bool = False, progress: ProgressFn = None, names: Optional[List[str]] = None
+) -> UpdateResult:
     """
     执行同步：探测 → 下载 → 校验 → 备份 → 原子替换 → 热加载。
     force=True 时即使指纹一致也重新下载（用于修复疑似损坏的库）。
@@ -598,8 +632,9 @@ def update(force: bool = False, progress: ProgressFn = None,
             _in_progress = False
 
 
-def _do_update(force: bool, progress: ProgressFn,
-               names: Optional[List[str]], t0: float) -> UpdateResult:
+def _do_update(
+    force: bool, progress: ProgressFn, names: Optional[List[str]], t0: float
+) -> UpdateResult:
     result = UpdateResult()
     targets = names or list(XDB_UPSTREAM.keys())
 
@@ -608,6 +643,7 @@ def _do_update(force: bool, progress: ProgressFn,
             progress(stage, message, percent)
         try:
             from core.event_bus import bus
+
             bus.emit_xdb({"stage": stage, "message": message, "percent": percent})
         except Exception:
             pass
@@ -652,8 +688,8 @@ def _do_update(force: bool, progress: ProgressFn,
             emit(s, m, _b + int(p * _s / 100))
 
         ok, src, err = _download(
-            name, stage_file, expect_size=fs.remote_size,
-            progress=_on_progress, budget="download")
+            name, stage_file, expect_size=fs.remote_size, progress=_on_progress, budget="download"
+        )
         if not ok:
             msg = f"{name} 下载失败：{err}"
             log.error(msg)
@@ -665,9 +701,9 @@ def _do_update(force: bool, progress: ProgressFn,
             return result
 
         emit("verify", f"正在校验 {name}…", base_pct + span)
-        ok, err = verify_downloaded(stage_file, name,
-                                    expect_sha=fs.remote_sha,
-                                    expect_size=fs.remote_size)
+        ok, err = verify_downloaded(
+            stage_file, name, expect_sha=fs.remote_sha, expect_size=fs.remote_size
+        )
         if not ok:
             msg = f"{name} 校验失败：{err}"
             log.error(msg)
@@ -682,16 +718,23 @@ def _do_update(force: bool, progress: ProgressFn,
 
         new_sha = git_blob_sha1(stage_file)
         new_sha256 = sha256_of(stage_file)
-        staged.append((name, stage_file, _backup(name), {
-            "name": name,
-            "size": os.path.getsize(stage_file),
-            "sha": new_sha,
-            "sha256": new_sha256,
-            "old_sha": fs.local_sha,
-            "old_sha256": "",
-            "source": src,
-            "updated_at": int(time.time() * 1000),
-        }))
+        staged.append(
+            (
+                name,
+                stage_file,
+                _backup(name),
+                {
+                    "name": name,
+                    "size": os.path.getsize(stage_file),
+                    "sha": new_sha,
+                    "sha256": new_sha256,
+                    "old_sha": fs.local_sha,
+                    "old_sha256": "",
+                    "source": src,
+                    "updated_at": int(time.time() * 1000),
+                },
+            )
+        )
         emit("verify", f"{name} 校验通过", base_pct + span)
 
     # 3) 原子替换
@@ -748,8 +791,7 @@ def _do_update(force: bool, progress: ProgressFn,
 
     now_ms = int(time.time() * 1000)
     cfg.set("xdb_last_update_at", str(now_ms))
-    msg = "已更新：" + "、".join(f"{n}（{m['size'] / 1048576:.1f} MB）"
-                                for n, _s, _b, m in staged)
+    msg = "已更新：" + "、".join(f"{n}（{m['size'] / 1048576:.1f} MB）" for n, _s, _b, m in staged)
     cfg.set("xdb_last_result", msg)
     log.info("离线库同步完成：%s", msg)
 
@@ -775,6 +817,7 @@ def _cleanup(staged: List[Tuple[str, str, Optional[str], Dict]]) -> None:
 # ═══════════════════════════════════════════════════════════
 #  状态摘要（UI 用）
 # ═══════════════════════════════════════════════════════════
+
 
 def status_summary() -> Dict:
     """给设置页/IP 查询页展示的一屏摘要"""

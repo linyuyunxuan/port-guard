@@ -6,6 +6,7 @@ pytest 公共装置
 于是 user_data_dir() 随之落到 tmp/data，数据库 / 日志 / 清单 / 备份全部隔离；
 只有读取内置 xdb 与 rules.json 时才映射回项目真实 data/（只读）。
 """
+
 import os
 import shutil
 import sys
@@ -77,4 +78,5 @@ def fresh_db(isolated_env):
 def no_sleep(monkeypatch):
     """把批量写入器的刷盘间隔压到最小，让测试跑得快"""
     from core import db_writer
+
     monkeypatch.setattr(db_writer.BatchWriter, "_flush_interval", 0.01)

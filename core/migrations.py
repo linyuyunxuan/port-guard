@@ -8,6 +8,7 @@ PortGuard — 数据库 schema 版本迁移
 每版一组 DDL，启动时逐版补齐。版本号高于程序支持版本时直接报错，
 避免用旧程序打开新库导致数据损坏。
 """
+
 import sqlite3
 from typing import Dict, List
 
@@ -64,7 +65,8 @@ def migrate(conn: sqlite3.Connection) -> int:
     if cur > SCHEMA_VERSION:
         raise RuntimeError(
             f"数据库版本 v{cur} 高于本程序支持的 v{SCHEMA_VERSION}，"
-            f"请升级 PortGuard 后再打开该数据文件")
+            f"请升级 PortGuard 后再打开该数据文件"
+        )
 
     if cur == SCHEMA_VERSION:
         return cur

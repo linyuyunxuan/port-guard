@@ -8,6 +8,7 @@ PortGuard 端口访问防御工具 — 程序入口
 本环境使用专用虚拟环境：
     C:/Users/Administrator/.workbuddy/binaries/python/envs/portguard/Scripts/python.exe main.py
 """
+
 import os
 import sys
 import traceback
@@ -24,17 +25,21 @@ _shm = None
 
 def _check_deps() -> bool:
     missing = []
-    for mod, label in (("PySide6", "PySide6"), ("fastapi", "fastapi"),
-                       ("uvicorn", "uvicorn"), ("ip2region", "ip2region(py)")):
+    for mod, label in (
+        ("PySide6", "PySide6"),
+        ("fastapi", "fastapi"),
+        ("uvicorn", "uvicorn"),
+        ("ip2region", "ip2region(py)"),
+    ):
         try:
             __import__(mod)
         except Exception:
             missing.append(label)
     if missing:
-        msg = ("缺少依赖：" + ", ".join(missing) +
-               "\n\n请先执行：\npip install -r requirements.txt")
+        msg = "缺少依赖：" + ", ".join(missing) + "\n\n请先执行：\npip install -r requirements.txt"
         try:
             import tkinter.messagebox as mb
+
             mb.showerror("PortGuard 启动失败", msg)
         except Exception:
             print(msg, file=sys.stderr)
@@ -51,16 +56,20 @@ def _init_backend() -> None:
     4. 批量写入器启动（把每条一次事务压成每批一次）
     """
     from core.logger import get_logger, setup
+
     setup()
     log = get_logger("main")
 
     from core.database import init_db
+
     init_db()
 
     from core import settings as cfg
+
     n = cfg.warm()
 
     from core.db_writer import start_writer
+
     start_writer()
 
     log.info("PortGuard 后端就绪（配置项 %d 条）", n)
@@ -76,6 +85,7 @@ def main() -> int:
         err = traceback.format_exc()
         try:
             import tkinter.messagebox as mb
+
             mb.showerror("PortGuard 启动失败", f"初始化后端失败：\n\n{err[:2000]}")
         except Exception:
             print(err, file=sys.stderr)
@@ -91,7 +101,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("PortGuard")
     app.setApplicationDisplayName("PortGuard 端口访问防御工具")
-    app.setQuitOnLastWindowClosed(False)   # 关闭窗口后驻留托盘
+    app.setQuitOnLastWindowClosed(False)  # 关闭窗口后驻留托盘
 
     app.setFont(QFont("Microsoft YaHei UI", 9))
     app.setStyle("Fusion")
@@ -99,21 +109,25 @@ def main() -> int:
     # 单实例保护（避免重复占用上报端口）
     try:
         from PySide6.QtCore import QSharedMemory
+
         global _shm
         _shm = QSharedMemory("PortGuard_SingleInstance_v1")
         if not _shm.create(1):
-            QMessageBox.information(None, "PortGuard",
-                                    "PortGuard 已经在运行中（请查看系统托盘图标）。")
+            QMessageBox.information(
+                None, "PortGuard", "PortGuard 已经在运行中（请查看系统托盘图标）。"
+            )
             return 0
     except Exception:
         try:
             from core.logger import get_logger
+
             get_logger("main").warning("单实例保护不可用（不影响正常使用）", exc_info=True)
         except Exception:
             pass
 
     try:
         from gui.main_window import MainWindow
+
         win = MainWindow()
         win.show()
         return app.exec()
@@ -121,6 +135,7 @@ def main() -> int:
         err = traceback.format_exc()
         try:
             from core.logger import get_logger
+
             get_logger("main").error("界面启动失败：\n%s", err)
         except Exception:
             pass

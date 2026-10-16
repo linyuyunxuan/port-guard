@@ -7,6 +7,7 @@ PortGuard — 封禁编排（不依赖 Qt，可脱离界面单测）
 
 这里把校验收敛成唯一入口 `prepare()`，所有调用方都必须过它。
 """
+
 import contextlib
 import time
 from typing import List, Optional, Tuple
@@ -41,8 +42,7 @@ class BanError(Exception):
     """封禁前置校验失败（消息可直接展示给用户）"""
 
 
-def prepare(ip: str, score: int = 0, reason: str = "",
-            duration_sec: int = 0) -> BanRecord:
+def prepare(ip: str, score: int = 0, reason: str = "", duration_sec: int = 0) -> BanRecord:
     """
     校验并构造封禁记录（**不落库、不执行**）。
     这里是所有封禁路径的唯一校验入口。
@@ -68,8 +68,9 @@ def prepare(ip: str, score: int = 0, reason: str = "",
     )
 
 
-def execute(ip: str, score: int = 0, reason: str = "",
-            duration_sec: int = 0, source: str = "manual") -> Tuple[Optional[int], str]:
+def execute(
+    ip: str, score: int = 0, reason: str = "", duration_sec: int = 0, source: str = "manual"
+) -> Tuple[Optional[int], str]:
     """
     完整封禁流程：校验 → 写 pending → 调防火墙 → 回填结果 → 投递事件。
     返回 (ban_id, 错误信息)。成功时错误信息为空串。
@@ -103,17 +104,24 @@ def execute(ip: str, score: int = 0, reason: str = "",
 
     ok, name, err = firewall.block_ip(rec.ip, rec.duration_sec, note=rec.reason)
     try:
-        update_ban(ban_id,
-                   status=(STATUS_ACTIVE if ok else STATUS_FAILED),
-                   rule_name=name, error_msg=err)
+        update_ban(
+            ban_id, status=(STATUS_ACTIVE if ok else STATUS_FAILED), rule_name=name, error_msg=err
+        )
     except Exception:
         log.exception("回填封禁结果失败 ban_id=%s", ban_id)
 
-    bus.emit_ban({"ip": rec.ip, "ok": ok, "rule_name": name, "error": err,
-                  "ban_id": ban_id, "source": source})
+    bus.emit_ban(
+        {
+            "ip": rec.ip,
+            "ok": ok,
+            "rule_name": name,
+            "error": err,
+            "ban_id": ban_id,
+            "source": source,
+        }
+    )
     if ok:
-        log.info("封禁成功 ip=%s rule=%s 时长=%s", rec.ip, name,
-                 rec.duration_sec or "永久")
+        log.info("封禁成功 ip=%s rule=%s 时长=%s", rec.ip, name, rec.duration_sec or "永久")
     return ban_id, ("" if ok else err)
 
 
@@ -143,6 +151,7 @@ def unban_all() -> Tuple[bool, int, str]:
         return False, 0, err or "未知错误"
     try:
         from core.database import query_bans
+
         for b in query_bans(status=STATUS_ACTIVE, limit=100000):
             update_ban(b.id, status="unbanned")
     except Exception:
@@ -185,6 +194,7 @@ def reconcile(rule_names: List[str]) -> int:
     返回修正条数。
     """
     from core.database import query_bans
+
     existing = set(rule_names or [])
     fixed = 0
     for b in query_bans(status=STATUS_ACTIVE, limit=100000):

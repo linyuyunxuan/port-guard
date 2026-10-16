@@ -1,4 +1,5 @@
 """PortGuard — 实时监控页"""
+
 import datetime
 from collections import deque
 from typing import List, Optional
@@ -37,8 +38,21 @@ from core.models import AccessRecord
 from gui.theme import LEVEL_BG, LEVEL_COLORS, C
 from gui.widgets import StatCard, ToggleSwitch
 
-HEADERS = ["时间", "来源 IP", "归属地", "端口", "协议", "方法", "路径",
-           "状态", "大小", "User-Agent", "命中规则", "风险", "服务器"]
+HEADERS = [
+    "时间",
+    "来源 IP",
+    "归属地",
+    "端口",
+    "协议",
+    "方法",
+    "路径",
+    "状态",
+    "大小",
+    "User-Agent",
+    "命中规则",
+    "风险",
+    "服务器",
+]
 
 
 class AccessTableModel(QAbstractTableModel):
@@ -58,10 +72,10 @@ class AccessTableModel(QAbstractTableModel):
 
     # ── Qt 接口 ──
     # QModelIndex() 是 Qt 覆写方法的标准默认值（不可变、无副作用），保持签名一致
-    def rowCount(self, parent=QModelIndex()):      # noqa: B008
+    def rowCount(self, parent=QModelIndex()):  # noqa: B008
         return 0 if parent.isValid() else len(self._view)
 
-    def columnCount(self, parent=QModelIndex()):   # noqa: B008
+    def columnCount(self, parent=QModelIndex()):  # noqa: B008
         return len(HEADERS)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
@@ -69,8 +83,9 @@ class AccessTableModel(QAbstractTableModel):
             return HEADERS[section]
         return None
 
-    def data(self, index: "QModelIndex | QPersistentModelIndex",
-             role: int = Qt.ItemDataRole.DisplayRole):
+    def data(
+        self, index: "QModelIndex | QPersistentModelIndex", role: int = Qt.ItemDataRole.DisplayRole
+    ):
         # 基类签名允许 QPersistentModelIndex，但 QAbstractTableModel 实际只会传
         # QModelIndex（两者并无继承关系），非 QModelIndex 一律按无效索引处理。
         if not isinstance(index, QModelIndex) or not index.isValid():
@@ -232,8 +247,15 @@ class AccessTableModel(QAbstractTableModel):
     def _match(self, rec: AccessRecord) -> bool:
         kw = self._filters["keyword"]
         if kw:
-            hay = " ".join([rec.ip, rec.path or "", rec.user_agent or "",
-                            rec.server_name or "", rec.host or ""]).lower()
+            hay = " ".join(
+                [
+                    rec.ip,
+                    rec.path or "",
+                    rec.user_agent or "",
+                    rec.server_name or "",
+                    rec.host or "",
+                ]
+            ).lower()
             if kw not in hay:
                 return False
         port = self._filters["port"]
@@ -271,8 +293,9 @@ def _fmt_size(n: int) -> str:
 
 class MonitorPage(QWidget):
     """实时监控页面"""
-    ask_lookup = Signal(str)         # 请求切到 IP 查询页并查询
-    ask_blacklist = Signal(str)      # 请求把 IP 加入黑名单
+
+    ask_lookup = Signal(str)  # 请求切到 IP 查询页并查询
+    ask_blacklist = Signal(str)  # 请求把 IP 加入黑名单
     ask_ban = Signal(str, int, str)  # 请求封禁 ip / score / reason
 
     def __init__(self, parent=None):
@@ -382,8 +405,9 @@ class MonitorPage(QWidget):
 
     def _on_filter(self) -> None:
         port = self.port_filter.value() or None
-        self.model.set_filters(keyword=self.search.text(),
-                               scope=self.scope.currentText(), port=port)
+        self.model.set_filters(
+            keyword=self.search.text(), scope=self.scope.currentText(), port=port
+        )
         self._update_count()
 
     def _clear_view(self) -> None:
@@ -415,12 +439,13 @@ class MonitorPage(QWidget):
         a_copy_ua.triggered.connect(lambda: self._copy(rec.user_agent or ""))
         a_black.triggered.connect(lambda: self.ask_blacklist.emit(rec.ip))
         a_ban.triggered.connect(
-            lambda: self.ask_ban.emit(rec.ip, rec.risk_score,
-                                      rec.matched_str or "手动封禁"))
+            lambda: self.ask_ban.emit(rec.ip, rec.risk_score, rec.matched_str or "手动封禁")
+        )
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _copy(self, text: str) -> None:
         from PySide6.QtWidgets import QApplication
+
         QApplication.clipboard().setText(text or "")
 
     def _on_double_click(self, index) -> None:

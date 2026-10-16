@@ -4,6 +4,7 @@
 这是整个测试套件里最重要的一组：它把「命令注入」固化成回归用例，
 保证以后任何人改动 `firewall` / 封禁入口时，都不能再引入同类漏洞。
 """
+
 import pytest
 
 from core.validators import (
@@ -31,7 +32,7 @@ EVIL_INPUTS = [
     "1.2.3.4; shutdown -s -t 0",
     "`whoami`",
     "1.2.3.4\nStart-Process calc",
-    "8.8.8.8/0",           # 网段写法在 IP 位置不允许
+    "8.8.8.8/0",  # 网段写法在 IP 位置不允许
     "",
     "   ",
     "abc",
@@ -48,15 +49,18 @@ def test_normalize_ip_rejects(evil):
     assert is_valid_ip(evil) is False
 
 
-@pytest.mark.parametrize("good,expected", [
-    ("113.118.113.77", "113.118.113.77"),
-    (" 113.118.113.77 ", "113.118.113.77"),
-    ("8.8.8.8", "8.8.8.8"),
-    ("2408:8000::1", "2408:8000::1"),
-    ("::1", "::1"),
-    ("2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"),
-    ("2001:DB8::1", "2001:db8::1"),
-])
+@pytest.mark.parametrize(
+    "good,expected",
+    [
+        ("113.118.113.77", "113.118.113.77"),
+        (" 113.118.113.77 ", "113.118.113.77"),
+        ("8.8.8.8", "8.8.8.8"),
+        ("2408:8000::1", "2408:8000::1"),
+        ("::1", "::1"),
+        ("2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"),
+        ("2001:DB8::1", "2001:db8::1"),
+    ],
+)
 def test_normalize_ip_accepts(good, expected):
     assert normalize_ip(good) == expected
 
@@ -81,6 +85,7 @@ def test_normalize_ip_output_is_injection_free():
 
 # ── ps_quote ──
 
+
 def test_ps_quote_single_quote_doubling():
     assert ps_quote("abc") == "'abc'"
     assert ps_quote("a'b") == "'a''b'"
@@ -97,19 +102,23 @@ def test_ps_quote_neutralizes_subexpression():
 
 # ── 规则名 ──
 
+
 def test_normalize_rule_name_ok():
     n = "PortGuard_Block_1.2.3.4_1700000000000_ab12"
     assert normalize_rule_name(n, prefix="PortGuard_Block_") == n
 
 
-@pytest.mark.parametrize("bad", [
-    'x"; Remove-Item C:\\ -Recurse; #',
-    "x'; calc; #",
-    "x$(calc)",
-    "x`ncalc",
-    "",
-    "x" * 300,
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        'x"; Remove-Item C:\\ -Recurse; #',
+        "x'; calc; #",
+        "x$(calc)",
+        "x`ncalc",
+        "",
+        "x" * 300,
+    ],
+)
 def test_normalize_rule_name_rejects(bad):
     with pytest.raises(InvalidRuleName):
         normalize_rule_name(bad)
@@ -121,6 +130,7 @@ def test_normalize_rule_name_enforces_prefix():
 
 
 # ── 自由文本 ──
+
 
 def test_safe_text_strips_control_and_newlines():
     assert safe_text("a\r\nb\tc") == "a  b c"
@@ -140,21 +150,25 @@ def test_clamp_int():
 
 # ── URL（离线库下载源）──
 
+
 def test_safe_https_url_ok():
     u = "https://cdn.jsdelivr.net/gh/x/y@master/data/a.xdb"
     assert safe_https_url(u, allowed_hosts=["cdn.jsdelivr.net"]) == u
 
 
-@pytest.mark.parametrize("bad", [
-    "http://cdn.jsdelivr.net/x",            # 非 https
-    "ftp://example.com/x",
-    "https://user:pw@cdn.jsdelivr.net/x",   # 内嵌凭据
-    "https://127.0.0.1/x",                  # 不在白名单
-    "https://internal.corp.local/x",
-    "",
-    "not a url",
-    "file:///etc/passwd",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "http://cdn.jsdelivr.net/x",  # 非 https
+        "ftp://example.com/x",
+        "https://user:pw@cdn.jsdelivr.net/x",  # 内嵌凭据
+        "https://127.0.0.1/x",  # 不在白名单
+        "https://internal.corp.local/x",
+        "",
+        "not a url",
+        "file:///etc/passwd",
+    ],
+)
 def test_safe_https_url_rejects(bad):
     with pytest.raises(InvalidURL):
         safe_https_url(bad, allowed_hosts=["cdn.jsdelivr.net"])

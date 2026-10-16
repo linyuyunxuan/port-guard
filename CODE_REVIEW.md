@@ -92,13 +92,12 @@ def ps_quote(s: str) -> str:
 from core.validators import normalize_ip, ps_quote, InvalidIP
 
 
-def block_ip(ip: str, duration_sec: Optional[int] = None,
-             note: str = "") -> Tuple[bool, str, str]:
+def block_ip(ip: str, duration_sec: Optional[int] = None, note: str = "") -> Tuple[bool, str, str]:
     if not is_admin():
         return False, "", "需要管理员权限才能修改 Windows 防火墙"
 
     try:
-        safe_ip = normalize_ip(ip)          # ← 唯一入口做校验，杜绝绕过
+        safe_ip = normalize_ip(ip)  # ← 唯一入口做校验，杜绝绕过
     except InvalidIP as e:
         return False, "", str(e)
     if is_never_ban(safe_ip):
@@ -108,10 +107,12 @@ def block_ip(ip: str, duration_sec: Optional[int] = None,
     desc = f"PortGuard 封禁 {safe_ip}" + (f" · {note}" if note else "")
 
     with _exec_lock:
-        ps = (f'New-NetFirewallRule -DisplayName {ps_quote(name)} '
-              f'-Description {ps_quote(desc)} -Direction Inbound -Action Block '
-              f'-RemoteAddress {ps_quote(safe_ip)} '
-              f'-Profile Any -Enabled True -ErrorAction Stop | Out-Null')
+        ps = (
+            f"New-NetFirewallRule -DisplayName {ps_quote(name)} "
+            f"-Description {ps_quote(desc)} -Direction Inbound -Action Block "
+            f"-RemoteAddress {ps_quote(safe_ip)} "
+            f"-Profile Any -Enabled True -ErrorAction Stop | Out-Null"
+        )
         code, out = _powershell(ps)
         ...
 ```
@@ -126,7 +127,8 @@ def unblock_by_name(name: str) -> Tuple[bool, str]:
         return False, f"非 PortGuard 规则名，拒绝删除: {name!r}"
     with _exec_lock:
         code, out = _powershell(
-            f'Remove-NetFirewallRule -DisplayName {ps_quote(name)} -ErrorAction SilentlyContinue')
+            f"Remove-NetFirewallRule -DisplayName {ps_quote(name)} -ErrorAction SilentlyContinue"
+        )
 ```
 
 另外在 GUI 层做前置拦截，让用户尽早看到错误（`gui/page_bans.py`）：
@@ -134,6 +136,7 @@ def unblock_by_name(name: str) -> Tuple[bool, str]:
 ```python
 def accept(self) -> None:
     from core.validators import normalize_ip, InvalidIP
+
     try:
         normalize_ip(self.ip.text())
     except InvalidIP as e:
@@ -231,7 +234,7 @@ class TokenBucket:
                 self._buckets[key] = (tokens, now)
                 return False
             self._buckets[key] = (tokens - 1, now)
-            if len(self._buckets) > 10000:              # 防内存膨胀
+            if len(self._buckets) > 10000:  # 防内存膨胀
                 self._buckets = {k: v for k, v in self._buckets.items() if now - v[1] < 60}
             return True
 ```
@@ -245,14 +248,25 @@ class TokenBucket:
 **位置**：`core/database.py:381-391`
 
 ```python
-cols = ", ".join(f"{k} = ?" for k in fields)     # 列名来自 kwargs，未做白名单
+cols = ", ".join(f"{k} = ?" for k in fields)  # 列名来自 kwargs，未做白名单
 ```
 
 当前调用点都在项目内部、值可控，但这是一个**一旦有人传入外部数据就会变成注入点的写法**。建议加白名单：
 
 ```python
-_BAN_COLUMNS = {"ip", "rule_name", "reason", "risk_score", "source", "status",
-                "duration_sec", "expire_at", "updated_at", "error_msg"}
+_BAN_COLUMNS = {
+    "ip",
+    "rule_name",
+    "reason",
+    "risk_score",
+    "source",
+    "status",
+    "duration_sec",
+    "expire_at",
+    "updated_at",
+    "error_msg",
+}
+
 
 def update_ban(ban_id: int, **fields) -> None:
     bad = set(fields) - _BAN_COLUMNS
@@ -298,8 +312,9 @@ from core.database import _connect, insert_access_log_sql, insert_risk_event_sql
 class BatchWriter:
     """单写线程 + 攒批事务。把 N 次 commit 压成 1 次，实测 ~200x。"""
 
-    def __init__(self, batch_size: int = 200, flush_interval: float = 0.2,
-                 queue_size: int = 200_000):
+    def __init__(
+        self, batch_size: int = 200, flush_interval: float = 0.2, queue_size: int = 200_000
+    ):
         self._q: "queue.Queue[Tuple[str, Any]]" = queue.Queue(maxsize=queue_size)
         self._batch_size = batch_size
         self._flush_interval = flush_interval
@@ -317,10 +332,10 @@ class BatchWriter:
             self._q.put_nowait((kind, payload))
         except queue.Full:
             with self._lock:
-                self.dropped += 1          # 显式计数并告警，绝不静默
+                self.dropped += 1  # 显式计数并告警，绝不静默
 
     def _loop(self) -> None:
-        conn = _connect()                  # 长连接，只在建库时设一次 PRAGMA
+        conn = _connect()  # 长连接，只在建库时设一次 PRAGMA
         while not self._stop.is_set():
             items = self._drain()
             if not items:
@@ -332,7 +347,7 @@ class BatchWriter:
                         insert_access_log_sql(conn, payload)
                     elif kind == "risk":
                         insert_risk_event_sql(conn, *payload)
-                conn.commit()              # ← 每批一次 fsync
+                conn.commit()  # ← 每批一次 fsync
             except Exception:
                 conn.rollback()
                 log.exception("批量写入失败，丢弃 %d 条", len(items))
@@ -436,13 +451,19 @@ def invalidate() -> None:
 
 ```python
 def _learn_provinces(self, records) -> None:
-    new = {r.geo.province for r in records
-           if r.geo and r.geo.is_china and r.geo.province and r.geo.province != "0"
-           and r.geo.province not in self._provinces}
+    new = {
+        r.geo.province
+        for r in records
+        if r.geo
+        and r.geo.is_china
+        and r.geo.province
+        and r.geo.province != "0"
+        and r.geo.province not in self._provinces
+    }
     if not new:
         return
     self._provinces |= new
-    for p in sorted(new):                       # 增量插入，不重建
+    for p in sorted(new):  # 增量插入，不重建
         self.scope.addItem(f"省:{p}")
 ```
 
@@ -510,13 +531,13 @@ self._win: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5000))
 try:
     rid = insert_access_log(rec)
 except Exception:
-    rid = None                      # 数据丢了，没有任何记录
+    rid = None  # 数据丢了，没有任何记录
 
 # core/report_server.py:78-79
 try:
     insert_risk_event(rec, result, access_id=rid)
 except Exception:
-    pass                            # 风险事件丢了，无声无息
+    pass  # 风险事件丢了，无声无息
 ```
 
 **修复方案**：新增 `core/logger.py`，落盘 + 轮转。
@@ -532,11 +553,15 @@ from core.config import user_data_dir
 def setup(level: int = logging.INFO) -> logging.Logger:
     log_dir = os.path.join(user_data_dir(), "logs")
     os.makedirs(log_dir, exist_ok=True)
-    handler = RotatingFileHandler(os.path.join(log_dir, "portguard.log"),
-                                  maxBytes=5 * 1024 * 1024, backupCount=5,
-                                  encoding="utf-8")
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"))
+    handler = RotatingFileHandler(
+        os.path.join(log_dir, "portguard.log"),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s")
+    )
     root = logging.getLogger("portguard")
     if not root.handlers:
         root.addHandler(handler)
@@ -579,11 +604,14 @@ from core import firewall
 from core.validators import InvalidIP, normalize_ip
 
 
-@pytest.mark.parametrize("evil", [
-    '1.2.3.4"; Start-Process calc; #',
-    '$(Get-Content C:\\Windows\\win.ini)',
-    "1.2.3.4' ; Remove-Item C:\\ -Recurse",
-])
+@pytest.mark.parametrize(
+    "evil",
+    [
+        '1.2.3.4"; Start-Process calc; #',
+        "$(Get-Content C:\\Windows\\win.ini)",
+        "1.2.3.4' ; Remove-Item C:\\ -Recurse",
+    ],
+)
 def test_block_ip_rejects_injection(monkeypatch, evil):
     """S1 回归测试：恶意 IP 必须在进入命令拼接前被拒。"""
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
@@ -598,6 +626,7 @@ def test_block_ip_rejects_injection(monkeypatch, evil):
 
 def test_ps_quote_neutralizes():
     from core.validators import ps_quote
+
     assert ps_quote("a'; calc; #") == "'a''; calc; #'"
 ```
 
@@ -844,7 +873,11 @@ python -c "..."   # 对比「每条独立 commit」与「批量单事务」，�
   显式声明宿主属性」；Qt 基类签名比实现更宽（如 `data()` 允许 `QPersistentModelIndex`）→
   按基类签名标注后 `isinstance` 收窄。过程中还清掉了 `page_rules.py` 里三处
   `_fields["score"|"level"|"action"]` 的**只写不读死代码**，正是它造成 `_fields` 类型混杂。
-* `ruff format --check` 目前设为 `continue-on-error`，存量代码格式尚未统一；建议单独一个提交做一次全量 `ruff format` 后改为门禁。
+* **已完成（2026-10-16）**：`ruff format` 已做一次全量格式化（45 个文件），
+  `.github/workflows/ci.yml` 中的 `continue-on-error` 已移除，转为硬门禁。
+  这一步本身不含任何逻辑改动；过程中暴露的一处 `# noqa: S104` 与格式化后行号错位的问题，
+  通过把「绑定所有网卡」的地址收敛为 `core/config.py` 的 `WILDCARD_HOST` /
+  `BIND_ALL_HOSTS` 常量解决（顺带消除了三处重复字面量与两处 `noqa`）。
 * 真实防火墙规则的创建/删除、打包后 exe 的运行验证仍未做（会改动系统状态），需要单独确认后进行。
 * **已决策（2026-10-16）**：GUI 框架由 PyQt6 整体迁移到 **PySide6**。PyQt6 是 GPL v3 /
   商业双许可，闭源分发会触发 GPL 传染性；PySide6 为 Qt 官方绑定、LGPL v3，允许闭源分发。

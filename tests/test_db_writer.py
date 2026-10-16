@@ -4,6 +4,7 @@
 以「相对倍数」做断言而不是绝对毫秒：绝对耗时受本机磁盘与杀软影响，
 但「每条一事务」与「批量一事务」的量级差距在任何环境都成立。
 """
+
 import time
 
 import pytest
@@ -16,16 +17,23 @@ from core.models import AccessRecord, GeoInfo, RiskResult, now_ms
 
 
 def _rec(i: int, ip: str = "203.0.113.10") -> AccessRecord:
-    r = AccessRecord(ip=ip, local_port=3000, path=f"/p/{i}", user_agent="pytest",
-                     status_code=200, event_ts=now_ms())
-    r.geo = GeoInfo(ip=ip, country="中国", province="广东省", city="深圳市",
-                    isp="电信", iso="CN", found=True)
+    r = AccessRecord(
+        ip=ip,
+        local_port=3000,
+        path=f"/p/{i}",
+        user_agent="pytest",
+        status_code=200,
+        event_ts=now_ms(),
+    )
+    r.geo = GeoInfo(
+        ip=ip, country="中国", province="广东省", city="深圳市", isp="电信", iso="CN", found=True
+    )
     return r
 
 
 @pytest.fixture
 def writer():
-    init_db()                      # 写入器建连前 schema 必须已就绪（生产里也是这个顺序）
+    init_db()  # 写入器建连前 schema 必须已就绪（生产里也是这个顺序）
     w = BatchWriter(batch_size=100, flush_interval=0.02)
     w.start()
     yield w
@@ -51,8 +59,9 @@ def test_risk_pair_links_access_id(writer):
     rec.risk_score = 95
     rec.risk_level = "critical"
     rec.matched_rules = ["blacklist"]
-    res = RiskResult(score=95, level="critical", matched_rules=["blacklist"],
-                     reason="命中规则：黑名单")
+    res = RiskResult(
+        score=95, level="critical", matched_rules=["blacklist"], reason="命中规则：黑名单"
+    )
     writer.submit_risk(rec, res)
     assert writer.flush(timeout=10) is True
 
@@ -154,7 +163,8 @@ def test_batch_is_faster_than_per_row_commit():
     batched = time.perf_counter() - t1
 
     assert batched < per_row / 5, (
-        f"批量写入没有体现出应有的优势：per_row={per_row:.3f}s batched={batched:.3f}s")
+        f"批量写入没有体现出应有的优势：per_row={per_row:.3f}s batched={batched:.3f}s"
+    )
 
 
 def test_low_traffic_still_gets_written():
@@ -164,7 +174,7 @@ def test_low_traffic_still_gets_written():
     导致「只来一条上报就再也不写」，只有攒够 batch_size 才落库。
     """
     init_db()
-    w = BatchWriter(batch_size=500, flush_interval=0.05)   # batch 远大于本次条数
+    w = BatchWriter(batch_size=500, flush_interval=0.05)  # batch 远大于本次条数
     w.start()
     try:
         w.submit_access(_rec(1, ip="198.51.100.11"))

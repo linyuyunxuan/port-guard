@@ -10,6 +10,7 @@ PortGuard — 日志系统
 - 有控制台时同时输出到 stderr（pythonw 启动无 stderr，自动跳过）
 - 目录不可写时降级为 NullHandler，绝不因为日志把主流程搞崩
 """
+
 import logging
 import os
 import sys
@@ -27,6 +28,7 @@ _DATEFMT = "%Y-%m-%d %H:%M:%S"
 def logs_dir() -> str:
     """日志目录（用户数据目录下的 logs/）"""
     from core.config import user_data_dir
+
     d = os.path.join(user_data_dir(), "logs")
     os.makedirs(d, exist_ok=True)
     return d
@@ -50,8 +52,8 @@ def setup(level: int = logging.INFO, console: bool = True) -> logging.Logger:
 
     try:
         handler = RotatingFileHandler(
-            log_file(), maxBytes=_MAX_BYTES, backupCount=_BACKUP_COUNT,
-            encoding="utf-8", delay=True)
+            log_file(), maxBytes=_MAX_BYTES, backupCount=_BACKUP_COUNT, encoding="utf-8", delay=True
+        )
         handler.setFormatter(fmt)
         logger.addHandler(handler)
     except Exception:

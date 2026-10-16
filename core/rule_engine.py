@@ -6,6 +6,7 @@ PortGuard — 规则引擎
 - 多规则命中分值累加，单条封顶 100，映射到风险等级
 - 黑/白名单支持 IP 与 CIDR，白名单优先（命中即清零且不封禁）
 """
+
 import ipaddress
 import json
 import os
@@ -47,7 +48,7 @@ class _IPSet:
     def __init__(self, entries: Optional[List[str]] = None):
         self._exact: set = set()
         self._nets: List[Any] = []
-        for e in (entries or []):
+        for e in entries or []:
             self.add(e)
 
     def add(self, entry: str) -> bool:
@@ -124,8 +125,7 @@ class RuleEngine:
         self._lock = threading.Lock()
         self._path = path or rules_path()
         self._cfg: Dict = {}
-        self._win: Dict[str, deque] = defaultdict(
-            lambda: deque(maxlen=_MAX_WINDOW_ITEMS))
+        self._win: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_WINDOW_ITEMS))
         self._last_prune = 0.0
         self._ua_re: List[re.Pattern] = []
         self._path_cfg: Dict[str, Any] = {"paths": [], "status": []}
@@ -156,7 +156,7 @@ class RuleEngine:
         rules = self._cfg.get("rules", {})
         ua = rules.get("scanner_ua", {})
         self._ua_re = []
-        for p in (ua.get("patterns") or []):
+        for p in ua.get("patterns") or []:
             try:
                 self._ua_re.append(re.compile(re.escape(str(p)), re.I))
             except Exception:
@@ -204,9 +204,14 @@ class RuleEngine:
 
         # 白名单优先
         if ip in self.whitelist:
-            return RiskResult(score=0, level=LEVEL_NORMAL, matched_rules=[],
-                              suggest_ban=False, whitelisted=True,
-                              reason="命中白名单，已豁免")
+            return RiskResult(
+                score=0,
+                level=LEVEL_NORMAL,
+                matched_rules=[],
+                suggest_ban=False,
+                whitelisted=True,
+                reason="命中白名单，已豁免",
+            )
 
         score = 0
         matched: List[str] = []
@@ -214,8 +219,7 @@ class RuleEngine:
         with self._lock:
             rules = self._cfg.get("rules", {})
             dq = self._win[ip]
-            dq.append((now, rec.local_port, (rec.path or "").lower(),
-                       rec.status_code, rec.size))
+            dq.append((now, rec.local_port, (rec.path or "").lower(), rec.status_code, rec.size))
             self._prune(dq, now)
             self._maybe_gc(now)
 
@@ -308,8 +312,9 @@ class RuleEngine:
         level = self.level_of(score)
         suggest = level in (LEVEL_HIGH, LEVEL_CRITICAL) and ip not in self.whitelist
         reason = "命中规则：" + "、".join(rule_label(m) for m in matched) if matched else ""
-        return RiskResult(score=score, level=level, matched_rules=matched,
-                          suggest_ban=suggest, reason=reason)
+        return RiskResult(
+            score=score, level=level, matched_rules=matched, suggest_ban=suggest, reason=reason
+        )
 
     @staticmethod
     def level_of(score: int) -> str:

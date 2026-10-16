@@ -103,18 +103,29 @@ import requests
 
 PORTGUARD_URL = "http://127.0.0.1:18080/api/v1/access/report"
 
-def report_access(client_ip, local_port, path, status_code,
-                  user_agent="", method="GET", server_name="xcl-pos"):
+
+def report_access(
+    client_ip, local_port, path, status_code, user_agent="", method="GET", server_name="xcl-pos"
+):
     try:
-        requests.post(PORTGUARD_URL, json={
-            "ip": client_ip, "local_port": local_port, "protocol": "http",
-            "method": method, "path": path, "status_code": status_code,
-            "user_agent": user_agent, "bytes": 0,
-            "server_name": server_name,
-            "timestamp": datetime.datetime.now().astimezone().isoformat(),
-        }, timeout=1.0)
+        requests.post(
+            PORTGUARD_URL,
+            json={
+                "ip": client_ip,
+                "local_port": local_port,
+                "protocol": "http",
+                "method": method,
+                "path": path,
+                "status_code": status_code,
+                "user_agent": user_agent,
+                "bytes": 0,
+                "server_name": server_name,
+                "timestamp": datetime.datetime.now().astimezone().isoformat(),
+            },
+            timeout=1.0,
+        )
     except Exception:
-        pass   # 熔断：上报失败不影响业务
+        pass  # 熔断：上报失败不影响业务
 ```
 
 ---
@@ -211,7 +222,7 @@ port-guard/
 ├── selftest.py             离屏端到端自检（真实环境冒烟，35 项检查）
 ├── pyproject.toml          ruff / mypy / pytest 统一配置（工程规范的锚点）
 ├── NOTICE                  第三方代码与数据来源、许可说明
-├── .github/workflows/ci.yml  CI：ruff 门禁 + mypy 门禁 + pytest 门禁
+├── .github/workflows/ci.yml  CI：ruff check + ruff format + mypy + pytest 四道门禁
 ├── requirements.txt        运行时依赖
 ├── requirements-dev.txt    开发依赖（pytest / ruff / mypy / httpx）
 ├── install.bat / start.bat / start_as_admin.bat
@@ -316,7 +327,7 @@ python selftest.py
 :: 静态检查（CI 门禁，必须全绿）
 ruff check .
 
-:: 格式化（CI 先只检查不拦，见下方说明）
+:: 格式化（CI 门禁；本地直接执行即可自动排版）
 ruff format .
 
 :: 类型检查（CI 门禁，覆盖全项目，必须全绿）
@@ -324,8 +335,8 @@ mypy .
 ```
 
 * 规则配置统一在 `pyproject.toml`，不要在各自机器上各配一套
-* 三道门禁：`ruff check` / `mypy .` / `pytest` 全部必须全绿；`ruff format --check`
-  目前只提示不拦截
+* **四道门禁**：`ruff check` / `ruff format --check` / `mypy .` / `pytest` 全部必须全绿。
+  其中 `ruff format` 可本地直接跑来自动排版，不必手工调格式
 * 新增「拼进命令行」的值 → 必须先在 `core/validators.py` 加校验/转义
 * 新增「会影响判定逻辑」的改动 → 必须补 `tests/` 用例
 * 日志统一走 `core.logger.get_logger()`，不要用裸 `print` 或静默 `except: pass`

@@ -10,13 +10,14 @@ PortGuard — SQLite 数据层
 `insert_*_sql(conn, ...)` 是「纯执行」版本：由调用方提供连接与事务边界，
 供批量写入器复用；`insert_*` 是同名的自建连便捷版本，供低频调用与测试。
 """
+
 import datetime
 import json
 import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.config import DEFAULT_SETTINGS, db_path
+from core.config import BIND_ALL_HOSTS, DEFAULT_SETTINGS, db_path
 from core.logger import get_logger
 from core.models import (
     STATUS_ACTIVE,
@@ -156,6 +157,7 @@ def init_db() -> None:
             # schema 版本迁移（原实现只有 CREATE TABLE IF NOT EXISTS，
             # 表已存在时新增字段会静默失败）
             from core.migrations import migrate
+
             migrate(conn)
 
             _fix_insecure_legacy_settings(conn)
@@ -174,8 +176,12 @@ def _fix_insecure_legacy_settings(conn: sqlite3.Connection) -> None:
     规则打满分 → 若开了自动封禁，就变成「借 PortGuard 之手封掉任意 IP」。
     """
     try:
-        rows = {r["key"]: r["value"] for r in conn.execute(
-            "SELECT key, value FROM settings WHERE key IN ('listen_host','api_key','_security_migrated_v110')")}
+        rows = {
+            r["key"]: r["value"]
+            for r in conn.execute(
+                "SELECT key, value FROM settings WHERE key IN ('listen_host','api_key','_security_migrated_v110')"
+            )
+        }
     except Exception:
         return
     if rows.get("_security_migrated_v110") == "1":
@@ -183,20 +189,24 @@ def _fix_insecure_legacy_settings(conn: sqlite3.Connection) -> None:
 
     host = (rows.get("listen_host") or "").strip()
     key = (rows.get("api_key") or "").strip()
-    if host in ("0.0.0.0", "::", "*") and not key:      # noqa: S104 —— 这是在「检测」而非绑定监听
-        conn.execute("UPDATE settings SET value = ? WHERE key = 'listen_host'",
-                     ("127.0.0.1",))
-        log.warning("安全迁移：检测到「监听 0.0.0.0 且未设置 API Key」，"
-                    "已将监听地址收敛为 127.0.0.1。如需局域网上报，"
-                    "请在设置页打开「允许局域网访问」并设置 API Key。")
-    conn.execute("INSERT INTO settings(key, value) VALUES ('_security_migrated_v110','1') "
-                 "ON CONFLICT(key) DO UPDATE SET value = '1'")
+    if host in BIND_ALL_HOSTS and not key:
+        conn.execute("UPDATE settings SET value = ? WHERE key = 'listen_host'", ("127.0.0.1",))
+        log.warning(
+            "安全迁移：检测到「监听 0.0.0.0 且未设置 API Key」，"
+            "已将监听地址收敛为 127.0.0.1。如需局域网上报，"
+            "请在设置页打开「允许局域网访问」并设置 API Key。"
+        )
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES ('_security_migrated_v110','1') "
+        "ON CONFLICT(key) DO UPDATE SET value = '1'"
+    )
     conn.commit()
 
 
 # ═══════════════════════════════════════════════════════════
 #  设置
 # ═══════════════════════════════════════════════════════════
+
 
 def get_setting(key: str, default: str = "") -> str:
     conn = _connect()
@@ -228,7 +238,8 @@ def set_setting(key: str, value: str) -> None:
         conn.execute(
             "INSERT INTO settings(key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, str(value)))
+            (key, str(value)),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -275,12 +286,30 @@ def insert_access_log_sql(conn: sqlite3.Connection, rec: AccessRecord) -> int:
     geo = rec.geo or GeoInfo()
     cur = conn.execute(
         _INSERT_ACCESS_SQL,
-        (rec.ip, rec.remote_port, rec.local_port, rec.protocol, rec.method,
-         rec.path, rec.status_code, rec.user_agent, rec.size, rec.host,
-         rec.server_name, json.dumps(rec.tags, ensure_ascii=False),
-         geo.country, geo.province, geo.city, geo.isp, geo.iso,
-         rec.risk_score, rec.risk_level,
-         json.dumps(rec.matched_rules, ensure_ascii=False), rec.event_ts))
+        (
+            rec.ip,
+            rec.remote_port,
+            rec.local_port,
+            rec.protocol,
+            rec.method,
+            rec.path,
+            rec.status_code,
+            rec.user_agent,
+            rec.size,
+            rec.host,
+            rec.server_name,
+            json.dumps(rec.tags, ensure_ascii=False),
+            geo.country,
+            geo.province,
+            geo.city,
+            geo.isp,
+            geo.iso,
+            rec.risk_score,
+            rec.risk_level,
+            json.dumps(rec.matched_rules, ensure_ascii=False),
+            rec.event_ts,
+        ),
+    )
     return int(cur.lastrowid or 0)
 
 
@@ -305,23 +334,43 @@ def _row_to_access(r: sqlite3.Row) -> AccessRecord:
     except Exception:
         matched = []
     return AccessRecord(
-        id=r["id"], ip=r["ip"], remote_port=r["remote_port"], local_port=r["local_port"],
-        protocol=r["protocol"], method=r["method"], path=r["path"],
-        status_code=r["status_code"], user_agent=r["user_agent"], size=r["bytes"] or 0,
-        host=r["host"], server_name=r["server_name"], tags=tags,
+        id=r["id"],
+        ip=r["ip"],
+        remote_port=r["remote_port"],
+        local_port=r["local_port"],
+        protocol=r["protocol"],
+        method=r["method"],
+        path=r["path"],
+        status_code=r["status_code"],
+        user_agent=r["user_agent"],
+        size=r["bytes"] or 0,
+        host=r["host"],
+        server_name=r["server_name"],
+        tags=tags,
         event_ts=r["event_ts"],
-        geo=GeoInfo(ip=r["ip"], country=r["country"] or "", province=r["province"] or "",
-                    city=r["city"] or "", isp=r["isp"] or "", iso=r["iso"] or "",
-                    found=bool(r["country"])),
-        risk_score=r["risk_score"] or 0, risk_level=r["risk_level"] or "normal",
+        geo=GeoInfo(
+            ip=r["ip"],
+            country=r["country"] or "",
+            province=r["province"] or "",
+            city=r["city"] or "",
+            isp=r["isp"] or "",
+            iso=r["iso"] or "",
+            found=bool(r["country"]),
+        ),
+        risk_score=r["risk_score"] or 0,
+        risk_level=r["risk_level"] or "normal",
         matched_rules=matched,
         suggest_ban=(r["risk_level"] in ("high", "critical")),
     )
 
 
-def query_access_logs(limit: int = 500, offset: int = 0,
-                      keyword: str = "", level: str = "",
-                      port: Optional[int] = None) -> List[AccessRecord]:
+def query_access_logs(
+    limit: int = 500,
+    offset: int = 0,
+    keyword: str = "",
+    level: str = "",
+    port: Optional[int] = None,
+) -> List[AccessRecord]:
     sql = "SELECT * FROM access_log WHERE 1=1"
     args: List[Any] = []
     if keyword:
@@ -349,11 +398,12 @@ def count_today() -> Tuple[int, int]:
     start = int(datetime.datetime(today.year, today.month, today.day).timestamp() * 1000)
     conn = _connect()
     try:
-        total = conn.execute("SELECT COUNT(*) c FROM access_log WHERE event_ts >= ?",
-                             (start,)).fetchone()["c"]
+        total = conn.execute(
+            "SELECT COUNT(*) c FROM access_log WHERE event_ts >= ?", (start,)
+        ).fetchone()["c"]
         risk = conn.execute(
-            "SELECT COUNT(*) c FROM access_log WHERE event_ts >= ? AND risk_score > 0",
-            (start,)).fetchone()["c"]
+            "SELECT COUNT(*) c FROM access_log WHERE event_ts >= ? AND risk_score > 0", (start,)
+        ).fetchone()["c"]
         return int(total), int(risk)
     finally:
         conn.close()
@@ -403,20 +453,31 @@ VALUES (?,?,?,?,?,?,?,?,?,0,?)
 """
 
 
-def insert_risk_event_sql(conn: sqlite3.Connection, rec: AccessRecord,
-                          result: RiskResult, access_id: Optional[int] = None) -> int:
+def insert_risk_event_sql(
+    conn: sqlite3.Connection, rec: AccessRecord, result: RiskResult, access_id: Optional[int] = None
+) -> int:
     """纯执行版本（不建连、不提交），供批量写入器在事务内调用"""
     cur = conn.execute(
         _INSERT_RISK_SQL,
-        (access_id, rec.ip, rec.local_port, rec.path,
-         result.score, result.level,
-         json.dumps(result.matched_rules, ensure_ascii=False),
-         result.reason, (rec.geo or GeoInfo()).to_json(), rec.event_ts))
+        (
+            access_id,
+            rec.ip,
+            rec.local_port,
+            rec.path,
+            result.score,
+            result.level,
+            json.dumps(result.matched_rules, ensure_ascii=False),
+            result.reason,
+            (rec.geo or GeoInfo()).to_json(),
+            rec.event_ts,
+        ),
+    )
     return int(cur.lastrowid or 0)
 
 
-def insert_risk_event(rec: AccessRecord, result: RiskResult,
-                      access_id: Optional[int] = None) -> int:
+def insert_risk_event(
+    rec: AccessRecord, result: RiskResult, access_id: Optional[int] = None
+) -> int:
     """便捷版本：自建连接 + 单条提交"""
     conn = _connect()
     try:
@@ -427,8 +488,13 @@ def insert_risk_event(rec: AccessRecord, result: RiskResult,
         conn.close()
 
 
-def query_risk_events(limit: int = 500, offset: int = 0, level: str = "",
-                      handled: Optional[int] = None, keyword: str = "") -> List[Dict[str, Any]]:
+def query_risk_events(
+    limit: int = 500,
+    offset: int = 0,
+    level: str = "",
+    handled: Optional[int] = None,
+    keyword: str = "",
+) -> List[Dict[str, Any]]:
     sql = "SELECT * FROM risk_event WHERE 1=1"
     args: List[Any] = []
     if level:
@@ -470,7 +536,9 @@ def set_risk_handled(event_id: int, handled: int) -> None:
 def count_risk_unhandled() -> int:
     conn = _connect()
     try:
-        return int(conn.execute("SELECT COUNT(*) c FROM risk_event WHERE handled = 0").fetchone()["c"])
+        return int(
+            conn.execute("SELECT COUNT(*) c FROM risk_event WHERE handled = 0").fetchone()["c"]
+        )
     finally:
         conn.close()
 
@@ -481,8 +549,16 @@ def count_risk_unhandled() -> int:
 
 # ban_list 允许被 update_ban 更新的列（白名单，防动态列名注入）
 _BAN_UPDATABLE = {
-    "ip", "rule_name", "reason", "risk_score", "source", "status",
-    "duration_sec", "expire_at", "error_msg", "unblocked_by",
+    "ip",
+    "rule_name",
+    "reason",
+    "risk_score",
+    "source",
+    "status",
+    "duration_sec",
+    "expire_at",
+    "error_msg",
+    "unblocked_by",
 }
 
 
@@ -494,8 +570,18 @@ def insert_ban(rec: BanRecord) -> int:
                (ip, rule_name, reason, risk_score, source, status,
                 duration_sec, expire_at, error_msg)
                VALUES (?,?,?,?,?,?,?,?,?)""",
-            (rec.ip, rec.rule_name, rec.reason, rec.risk_score, rec.source,
-             rec.status, rec.duration_sec, rec.expire_at, rec.error_msg))
+            (
+                rec.ip,
+                rec.rule_name,
+                rec.reason,
+                rec.risk_score,
+                rec.source,
+                rec.status,
+                rec.duration_sec,
+                rec.expire_at,
+                rec.error_msg,
+            ),
+        )
         conn.commit()
         return int(cur.lastrowid or 0)
     finally:
@@ -523,8 +609,10 @@ def update_ban(ban_id: Optional[int], **fields) -> None:
     try:
         # 列名来自 _BAN_UPDATABLE 白名单（上面已校验），值全部走参数绑定，
         # 故此处 f-string 拼接的是「白名单内的固定列名」，不存在注入面。
-        conn.execute(f"UPDATE ban_list SET {cols} WHERE id = ?",  # noqa: S608
-                     [*list(fields.values()), ban_id])
+        conn.execute(
+            f"UPDATE ban_list SET {cols} WHERE id = ?",  # noqa: S608
+            [*list(fields.values()), ban_id],
+        )
         conn.commit()
     finally:
         conn.close()
@@ -532,11 +620,19 @@ def update_ban(ban_id: Optional[int], **fields) -> None:
 
 def _row_to_ban(r: sqlite3.Row) -> BanRecord:
     return BanRecord(
-        id=r["id"], ip=r["ip"], rule_name=r["rule_name"] or "", reason=r["reason"] or "",
-        risk_score=r["risk_score"] or 0, source=r["source"], status=r["status"],
-        duration_sec=r["duration_sec"], expire_at=r["expire_at"],
-        created_at=r["created_at"] or "", updated_at=r["updated_at"] or "",
-        error_msg=r["error_msg"] or "")
+        id=r["id"],
+        ip=r["ip"],
+        rule_name=r["rule_name"] or "",
+        reason=r["reason"] or "",
+        risk_score=r["risk_score"] or 0,
+        source=r["source"],
+        status=r["status"],
+        duration_sec=r["duration_sec"],
+        expire_at=r["expire_at"],
+        created_at=r["created_at"] or "",
+        updated_at=r["updated_at"] or "",
+        error_msg=r["error_msg"] or "",
+    )
 
 
 def query_bans(limit: int = 1000, status: str = "", keyword: str = "") -> List[BanRecord]:
@@ -571,7 +667,8 @@ def find_active_ban_by_ip(ip: str) -> Optional[BanRecord]:
     try:
         r = conn.execute(
             "SELECT * FROM ban_list WHERE ip = ? AND status = ? ORDER BY id DESC LIMIT 1",
-            (ip, STATUS_ACTIVE)).fetchone()
+            (ip, STATUS_ACTIVE),
+        ).fetchone()
         return _row_to_ban(r) if r else None
     finally:
         conn.close()
@@ -588,7 +685,8 @@ def list_expired_bans(now: Optional[int] = None) -> List[BanRecord]:
     try:
         rows = conn.execute(
             "SELECT * FROM ban_list WHERE status = ? AND expire_at IS NOT NULL AND expire_at <= ?",
-            (STATUS_ACTIVE, now))
+            (STATUS_ACTIVE, now),
+        )
         return [_row_to_ban(r) for r in rows]
     finally:
         conn.close()
@@ -601,8 +699,11 @@ def mark_ban_unbanned(ban_id: Optional[int], new_status: str = STATUS_UNBANNED) 
 def count_active_bans() -> int:
     conn = _connect()
     try:
-        return int(conn.execute("SELECT COUNT(*) c FROM ban_list WHERE status = ?",
-                                (STATUS_ACTIVE,)).fetchone()["c"])
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) c FROM ban_list WHERE status = ?", (STATUS_ACTIVE,)
+            ).fetchone()["c"]
+        )
     finally:
         conn.close()
 
@@ -612,8 +713,11 @@ def count_today_bans() -> int:
     start = datetime.datetime(today.year, today.month, today.day).strftime("%Y-%m-%d %H:%M:%S")
     conn = _connect()
     try:
-        return int(conn.execute("SELECT COUNT(*) c FROM ban_list WHERE created_at >= ?",
-                                (start,)).fetchone()["c"])
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) c FROM ban_list WHERE created_at >= ?", (start,)
+            ).fetchone()["c"]
+        )
     finally:
         conn.close()
 

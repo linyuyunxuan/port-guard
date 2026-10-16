@@ -8,6 +8,7 @@ PortGuard — 告警通知
 
 本模块的方法必须由 Qt 主线程调用（由主窗口的事件泵驱动）。
 """
+
 import time
 from typing import Dict
 
@@ -67,9 +68,12 @@ class Alerter:
         if self.tray is not None:
             try:
                 from PySide6.QtWidgets import QSystemTrayIcon
-                icon = (QSystemTrayIcon.MessageIcon.Critical
-                        if level in ("critical", "high")
-                        else QSystemTrayIcon.MessageIcon.Warning)
+
+                icon = (
+                    QSystemTrayIcon.MessageIcon.Critical
+                    if level in ("critical", "high")
+                    else QSystemTrayIcon.MessageIcon.Warning
+                )
                 self.tray.showMessage(title, body, icon, 8000)
             except Exception:
                 log.exception("托盘气泡告警失败")
@@ -89,6 +93,7 @@ class Alerter:
             return
         try:
             from PySide6.QtWidgets import QMessageBox
+
             QMessageBox.warning(self.parent, title, body)
         except Exception:
             log.exception("弹窗告警失败")
@@ -96,6 +101,7 @@ class Alerter:
     def _beep(self, level: str) -> None:
         try:
             import winsound
+
             if level == "critical":
                 winsound.MessageBeep(winsound.MB_ICONHAND)
             elif level == "high":

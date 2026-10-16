@@ -5,6 +5,7 @@ PortGuard — 数据与文件维护（不依赖 Qt）
 - 离线库备份保留最近 N 份，其余删除（否则每次同步都留一份 11~37MB 的副本）
 - 下载临时目录清扫（异常中断可能留下 .part）
 """
+
 import os
 from typing import Tuple
 
@@ -44,7 +45,7 @@ def cleanup_backups(keep: int = KEEP_BACKUPS_PER_FILE) -> int:
             name = f.rsplit(".", 2)[0] if f.count(".") >= 2 else f
             groups.setdefault(name, []).append(f)
         for _name, files in groups.items():
-            files.sort(reverse=True)          # 文件名内含时间戳，倒序即最新在前
+            files.sort(reverse=True)  # 文件名内含时间戳，倒序即最新在前
             for stale in files[keep:]:
                 try:
                     os.remove(os.path.join(d, stale))

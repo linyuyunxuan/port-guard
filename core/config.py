@@ -4,6 +4,7 @@ PortGuard — 路径与全局常量
   · 只读资源（xdb 库、assets、默认 rules.json）从 resource_path() 读取
   · 可写数据（数据库、用户规则、黑/白名单、日志、离线库）写入 user_data_dir()
 """
+
 import os
 import shutil
 import sys
@@ -20,6 +21,13 @@ DEFAULT_LISTEN_PORT = 18080
 # 届时程序会强制要求设置 API Key。把"暴露到网络"变成显式选择而非默认。
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+# 「绑定所有网卡」的地址。集中在这里定义有两个目的：
+#   1) 全项目只有这一处硬编码字面量，S104（bind-all-interfaces）单点豁免；
+#   2) 默认值、设置页、安全检查共用同一常量，避免三处写法各自漂移。
+WILDCARD_HOST = "0.0.0.0"  # noqa: S104 —— 唯一允许出现该字面量的地方
+# 被视为「对所有网卡监听」的等价写法（含 IPv6 与通配符），供安全检测使用
+BIND_ALL_HOSTS = (WILDCARD_HOST, "::", "*")
 
 # ── 风险等级 ──
 LEVEL_NORMAL = "normal"
@@ -46,10 +54,21 @@ LEVEL_LABEL = {
 
 # ── 永远不允许封禁的网段 / 地址 ──
 NEVER_BAN_NETWORKS = [
-    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16",
-    "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
-    "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
 ]
 
 # ═══════════════════════════════════════════════════════════
@@ -77,14 +96,22 @@ XDB_SOURCE_TEMPLATES = [
 
 # 下载源主机白名单：校验用户自定义源，杜绝被改成内网地址（SSRF）
 XDB_ALLOWED_HOSTS = [
-    "api.github.com", "cdn.jsdelivr.net", "raw.githubusercontent.com",
-    "github.com", "objects.githubusercontent.com",
-    "ghproxy.net", "gh-proxy.com", "mirror.ghproxy.com", "ghfast.top",
-    "gitcode.com", "gitee.com", "cdn.statically.io",
+    "api.github.com",
+    "cdn.jsdelivr.net",
+    "raw.githubusercontent.com",
+    "github.com",
+    "objects.githubusercontent.com",
+    "ghproxy.net",
+    "gh-proxy.com",
+    "mirror.ghproxy.com",
+    "ghfast.top",
+    "gitcode.com",
+    "gitee.com",
+    "cdn.statically.io",
 ]
 
-XDB_DOWNLOAD_TIMEOUT = 60          # 单次下载/探测超时（秒）
-XDB_MAX_FILE_MB = 128              # 单文件体积上限，防止被喂超大文件打爆磁盘
+XDB_DOWNLOAD_TIMEOUT = 60  # 单次下载/探测超时（秒）
+XDB_MAX_FILE_MB = 128  # 单文件体积上限，防止被喂超大文件打爆磁盘
 
 
 def _is_frozen() -> bool:
@@ -192,40 +219,36 @@ DEFAULT_SETTINGS = {
     "listen_port": str(DEFAULT_LISTEN_PORT),
     "listen_host": DEFAULT_LISTEN_HOST,
     "api_key": "",
-    "cors_origins": "",               # 逗号分隔白名单，留空=不加 CORS 中间件
-    "rate_limit_per_sec": "300",      # 每个来源 IP 每秒允许的上报数
-    "rate_limit_burst": "600",        # 桶容量（允许的瞬时突发）
-    "max_body_mb": "2",               # 单次请求体上限（MB）
-    "autostart_server": "0",          # 1=启动程序时自动开启接收服务
-
+    "cors_origins": "",  # 逗号分隔白名单，留空=不加 CORS 中间件
+    "rate_limit_per_sec": "300",  # 每个来源 IP 每秒允许的上报数
+    "rate_limit_burst": "600",  # 桶容量（允许的瞬时突发）
+    "max_body_mb": "2",  # 单次请求体上限（MB）
+    "autostart_server": "0",  # 1=启动程序时自动开启接收服务
     # 封禁
-    "auto_mode": "0",                 # 1=自动封禁（默认关闭）
-    "auto_ban_threshold": "90",       # 自动封禁的最低风险分
+    "auto_mode": "0",  # 1=自动封禁（默认关闭）
+    "auto_ban_threshold": "90",  # 自动封禁的最低风险分
     "default_ban_duration_sec": "3600",
-
     # 告警
     "alert_sound": "1",
     "alert_popup_level": LEVEL_CRITICAL,
-    "alert_merge_sec": "60",          # 同 IP 告警合并窗口
-
+    "alert_merge_sec": "60",  # 同 IP 告警合并窗口
     # 数据
     "log_retention_days": "30",
     "log_level": "INFO",
     "geo_cache_size": "20000",
-    "monitor_buffer_size": "5000",    # 实时监控环形缓冲行数
-    "db_batch_size": "200",           # 批量写入攒批条数
-    "db_flush_ms": "200",             # 批量写入最大延迟（毫秒）
-
+    "monitor_buffer_size": "5000",  # 实时监控环形缓冲行数
+    "db_batch_size": "200",  # 批量写入攒批条数
+    "db_flush_ms": "200",  # 批量写入最大延迟（毫秒）
     # 离线库在线同步
-    "xdb_auto_sync": "1",             # 1=按间隔自动检查更新
+    "xdb_auto_sync": "1",  # 1=按间隔自动检查更新
     "xdb_sync_interval_hours": "24",  # 自动检查间隔（小时）
-    "xdb_sync_on_start": "1",         # 1=启动后后台检查一次
-    "xdb_auto_download": "1",         # 1=发现新版本自动下载并热换（全程校验+可回滚）
-    "xdb_source": "",                 # 自定义镜像前缀，留空用内置源列表
-    "xdb_proxy": "",                  # 下载代理，留空=直连
-    "xdb_last_check_at": "0",         # epoch 毫秒
-    "xdb_last_update_at": "0",        # epoch 毫秒
-    "xdb_last_result": "",            # 最近一次同步结果摘要
+    "xdb_sync_on_start": "1",  # 1=启动后后台检查一次
+    "xdb_auto_download": "1",  # 1=发现新版本自动下载并热换（全程校验+可回滚）
+    "xdb_source": "",  # 自定义镜像前缀，留空用内置源列表
+    "xdb_proxy": "",  # 下载代理，留空=直连
+    "xdb_last_check_at": "0",  # epoch 毫秒
+    "xdb_last_update_at": "0",  # epoch 毫秒
+    "xdb_last_result": "",  # 最近一次同步结果摘要
 }
 
 # 外部可关闭的联网行为（企业内网无出口时用环境变量一键关掉）

@@ -20,6 +20,7 @@ flush_interval 调小即可。
 
 队列满时**显式计数并告警**（dropped），绝不静默丢数据。
 """
+
 import contextlib
 import queue
 import threading
@@ -33,14 +34,19 @@ log = get_logger(__name__)
 
 
 class BatchWriter:
-    def __init__(self, batch_size: int = 200, flush_interval: float = 0.2,
-                 queue_size: int = 200_000, name: str = "pg-writer"):
+    def __init__(
+        self,
+        batch_size: int = 200,
+        flush_interval: float = 0.2,
+        queue_size: int = 200_000,
+        name: str = "pg-writer",
+    ):
         self._q: queue.Queue[Tuple[str, Any]] = queue.Queue(maxsize=queue_size)
         self._batch_size = max(1, int(batch_size))
         self._flush_interval = max(0.005, float(flush_interval))
         self._name = name
         self._stop = threading.Event()
-        self._idle = threading.Event()      # 「没有半途取走但未提交的数据」
+        self._idle = threading.Event()  # 「没有半途取走但未提交的数据」
         self._idle.set()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -56,8 +62,11 @@ class BatchWriter:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name=self._name)
         self._thread.start()
-        log.info("批量写入器已启动（batch=%d, flush=%.0fms）",
-                 self._batch_size, self._flush_interval * 1000)
+        log.info(
+            "批量写入器已启动（batch=%d, flush=%.0fms）",
+            self._batch_size,
+            self._flush_interval * 1000,
+        )
 
     def stop(self, timeout: float = 5.0) -> None:
         """停止写入器：先榨干队列再退出（保证不丢已入队数据）"""
@@ -95,9 +104,14 @@ class BatchWriter:
 
     def stats(self) -> dict:
         with self._lock:
-            return {"written": self.written, "dropped": self.dropped,
-                    "errors": self.errors, "batches": self.batches,
-                    "pending": self._q.qsize(), "running": self.running}
+            return {
+                "written": self.written,
+                "dropped": self.dropped,
+                "errors": self.errors,
+                "batches": self.batches,
+                "pending": self._q.qsize(),
+                "running": self.running,
+            }
 
     def flush(self, timeout: float = 5.0) -> bool:
         """
@@ -109,7 +123,7 @@ class BatchWriter:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._q.empty() and self._idle.is_set():
-                time.sleep(0.005)          # 再确认一次，避开「取走 → 开写」的瞬间
+                time.sleep(0.005)  # 再确认一次，避开「取走 → 开写」的瞬间
                 if self._q.empty() and self._idle.is_set():
                     return True
             time.sleep(0.01)
@@ -169,7 +183,7 @@ class BatchWriter:
                     access_id = database.insert_access_log_sql(conn, rec)
                     database.insert_risk_event_sql(conn, rec, result, access_id)
                     n_access += 1
-            conn.commit()          # ← 每批一次 fsync，这就是 2000 倍差距的来源
+            conn.commit()  # ← 每批一次 fsync，这就是 2000 倍差距的来源
             with self._lock:
                 self.written += n_access
                 self.batches += 1

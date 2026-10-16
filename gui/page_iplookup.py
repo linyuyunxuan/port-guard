@@ -1,4 +1,5 @@
 """PortGuard — IP 归属地查询工具"""
+
 import csv
 from typing import List
 
@@ -33,7 +34,7 @@ HEADERS = ["IP", "是否命中", "国家", "省份", "城市", "ISP", "国家码
 
 
 class IpLookupPage(QWidget):
-    xdb_sync_requested = Signal(bool)   # 请求主窗口同步离线库
+    xdb_sync_requested = Signal(bool)  # 请求主窗口同步离线库
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -153,8 +154,9 @@ class IpLookupPage(QWidget):
             v6 = info.get("v6", {})
             man = info.get("manifest", {}) or {}
             files = man.get("files", {}) or {}
-            synced = files.get("ip2region_v4.xdb", {}).get("updated_at") \
-                or files.get("ip2region_v6.xdb", {}).get("updated_at")
+            synced = files.get("ip2region_v4.xdb", {}).get("updated_at") or files.get(
+                "ip2region_v6.xdb", {}
+            ).get("updated_at")
             parts = [
                 f"v4 {v4.get('size', 0) / 1048576:.1f}MB",
                 f"v6 {v6.get('size', 0) / 1048576:.1f}MB",
@@ -183,7 +185,8 @@ class IpLookupPage(QWidget):
         if geo.found:
             self.single_result.setText(
                 f"{geo.display}　（{geo.country}/{geo.province}/{geo.city}/{geo.isp}/"
-                f"{geo.iso or '-'}）")
+                f"{geo.iso or '-'}）"
+            )
         else:
             self.single_result.setText("未命中任何数据段（可能是内网 / 保留 / 未收录地址）")
 
@@ -208,6 +211,7 @@ class IpLookupPage(QWidget):
                 results.append(loc.lookup(ip))
             except Exception:
                 from core.models import GeoInfo
+
                 results.append(GeoInfo(ip=ip))
 
         self._results = results
@@ -218,6 +222,7 @@ class IpLookupPage(QWidget):
         self.table.setRowCount(0)
         self.table.setRowCount(len(results))
         for i, g in enumerate(results):
+
             def mk(text, color=None, align=None):
                 it = QTableWidgetItem(str(text))
                 if color:
@@ -234,9 +239,15 @@ class IpLookupPage(QWidget):
                 self.table.setItem(i, 4, mk(g.city))
                 self.table.setItem(i, 5, mk(g.isp if g.isp != "0" else "-"))
                 self.table.setItem(i, 6, mk(g.iso or "-", align=Qt.AlignmentFlag.AlignCenter))
-                self.table.setItem(i, 7, mk("中国" if g.is_china else "境外",
-                                            C.primary if g.is_china else C.warning,
-                                            Qt.AlignmentFlag.AlignCenter))
+                self.table.setItem(
+                    i,
+                    7,
+                    mk(
+                        "中国" if g.is_china else "境外",
+                        C.primary if g.is_china else C.warning,
+                        Qt.AlignmentFlag.AlignCenter,
+                    ),
+                )
             else:
                 self.table.setItem(i, 0, mk(g.ip, C.text_link))
                 self.table.setItem(i, 1, mk("否", C.text_muted, Qt.AlignmentFlag.AlignCenter))
@@ -253,7 +264,8 @@ class IpLookupPage(QWidget):
             QMessageBox.information(self, "提示", "没有可导出的查询结果。")
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出查询结果", "ip_lookup.csv", "CSV 文件 (*.csv)")
+            self, "导出查询结果", "ip_lookup.csv", "CSV 文件 (*.csv)"
+        )
         if not path:
             return
         try:
@@ -261,8 +273,18 @@ class IpLookupPage(QWidget):
                 w = csv.writer(f)
                 w.writerow(HEADERS)
                 for g in self._results:
-                    w.writerow([g.ip, "是" if g.found else "否", g.country, g.province,
-                                g.city, g.isp, g.iso, "中国" if g.is_china else "境外"])
+                    w.writerow(
+                        [
+                            g.ip,
+                            "是" if g.found else "否",
+                            g.country,
+                            g.province,
+                            g.city,
+                            g.isp,
+                            g.iso,
+                            "中国" if g.is_china else "境外",
+                        ]
+                    )
             QMessageBox.information(self, "导出成功", f"已导出到：\n{path}")
         except Exception as e:
             QMessageBox.warning(self, "导出失败", str(e))

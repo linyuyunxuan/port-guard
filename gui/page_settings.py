@@ -1,4 +1,5 @@
 """PortGuard — 设置页"""
+
 import secrets
 
 from PySide6.QtCore import Qt, Signal
@@ -31,6 +32,7 @@ from core.config import (
     LEVEL_LABEL,
     LEVEL_LOW,
     LEVEL_MEDIUM,
+    WILDCARD_HOST,
     user_data_dir,
 )
 from core.database import clear_all_logs, delete_old_access
@@ -46,10 +48,10 @@ LEVEL_LABELS = [LEVEL_LABEL[x] for x in LEVEL_ITEMS]
 
 
 class SettingsPage(QWidget):
-    server_toggled = Signal(bool)          # 请求主窗口启动/停止服务
+    server_toggled = Signal(bool)  # 请求主窗口启动/停止服务
     settings_saved = Signal()
-    xdb_sync_requested = Signal(bool)      # 立即同步（True=强制重下）
-    xdb_check_requested = Signal()         # 只检查
+    xdb_sync_requested = Signal(bool)  # 立即同步（True=强制重下）
+    xdb_check_requested = Signal()  # 只检查
     logs_open_requested = Signal()
 
     def __init__(self, parent=None):
@@ -156,12 +158,15 @@ class SettingsPage(QWidget):
 
         warn = QFrame()
         warn.setStyleSheet(
-            f"QFrame{{background:{C.warning_light};border:1px solid {C.warning};border-radius:6px;}}")
+            f"QFrame{{background:{C.warning_light};border:1px solid {C.warning};border-radius:6px;}}"
+        )
         wl = QHBoxLayout(warn)
         wl.setContentsMargins(10, 6, 10, 6)
-        wlbl = QLabel("⚠ 打开局域网访问后，程序会强制要求 API Key。"
-                      "没有 Key 时，局域网内任意主机都能伪造上报记录，"
-                      "进而污染风险判定、甚至借自动封禁之手封掉任意 IP。")
+        wlbl = QLabel(
+            "⚠ 打开局域网访问后，程序会强制要求 API Key。"
+            "没有 Key 时，局域网内任意主机都能伪造上报记录，"
+            "进而污染风险判定、甚至借自动封禁之手封掉任意 IP。"
+        )
         wlbl.setStyleSheet(f"color:{C.text_primary};font-size:12px;")
         wlbl.setWordWrap(True)
         wl.addWidget(wlbl)
@@ -197,8 +202,8 @@ class SettingsPage(QWidget):
 
         self.ed_xdb_source = QLineEdit()
         self.ed_xdb_source.setPlaceholderText(
-            "留空使用内置源（CDN / 官方 / 镜像 / Gitee 自动容错）；"
-            "也可填自定义镜像，用 {path} 占位")
+            "留空使用内置源（CDN / 官方 / 镜像 / Gitee 自动容错）；也可填自定义镜像，用 {path} 占位"
+        )
         self.ed_xdb_source.setMinimumWidth(420)
 
         self.xdb_bar = QProgressBar()
@@ -228,7 +233,8 @@ class SettingsPage(QWidget):
 
         tip = QLabel(
             "同步流程：版本指纹比对 → 多源下载 → 大小/内容指纹/xdb 结构/抽样查询四重校验 "
-            "→ 备份旧库 → 原子替换 → 热加载（无需重启）。任一步失败都会回滚，不影响现有定位能力。")
+            "→ 备份旧库 → 原子替换 → 热加载（无需重启）。任一步失败都会回滚，不影响现有定位能力。"
+        )
         tip.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
         tip.setWordWrap(True)
 
@@ -280,7 +286,8 @@ class SettingsPage(QWidget):
 
         warn = QFrame()
         warn.setStyleSheet(
-            f"QFrame{{background:{C.danger_light};border:1px solid {C.danger};border-radius:6px;}}")
+            f"QFrame{{background:{C.danger_light};border:1px solid {C.danger};border-radius:6px;}}"
+        )
         wl = QHBoxLayout(warn)
         wl.setContentsMargins(10, 6, 10, 6)
         wlbl = QLabel("⚠ 自动模式会跳过人工确认直接写入防火墙，请确认规则阈值后再开启。")
@@ -288,11 +295,14 @@ class SettingsPage(QWidget):
         wlbl.setWordWrap(True)
         wl.addWidget(wlbl)
 
-        perm = QLabel("已以管理员身份运行，封禁功能可用。"
-                       if firewall.is_admin() else
-                       "当前为普通权限，封禁按钮不会生效，请以管理员身份重启程序。")
+        perm = QLabel(
+            "已以管理员身份运行，封禁功能可用。"
+            if firewall.is_admin()
+            else "当前为普通权限，封禁按钮不会生效，请以管理员身份重启程序。"
+        )
         perm.setStyleSheet(
-            f"color:{C.success if firewall.is_admin() else C.warning};font-size:12px;")
+            f"color:{C.success if firewall.is_admin() else C.warning};font-size:12px;"
+        )
 
         f.addRow("自动封禁模式", self._wrap(auto_row))
         f.addRow("", warn)
@@ -422,8 +432,11 @@ class SettingsPage(QWidget):
         # 告警
         self.tg_sound.setChecked(cfg.get_bool("alert_sound", True))
         popup = cfg.get("alert_popup_level", LEVEL_CRITICAL)
-        idx = 0 if popup == "none" else (LEVEL_ITEMS.index(popup) + 1
-                                         if popup in LEVEL_ITEMS else len(LEVEL_ITEMS))
+        idx = (
+            0
+            if popup == "none"
+            else (LEVEL_ITEMS.index(popup) + 1 if popup in LEVEL_ITEMS else len(LEVEL_ITEMS))
+        )
         self.cb_popup.setCurrentIndex(max(0, min(idx, self.cb_popup.count() - 1)))
         self.sp_merge.setValue(cfg.get_int("alert_merge_sec", 60))
 
@@ -444,55 +457,69 @@ class SettingsPage(QWidget):
             key = secrets.token_urlsafe(24)
             self.ed_key.setText(key)
             QMessageBox.information(
-                self, "已自动生成 API Key",
+                self,
+                "已自动生成 API Key",
                 "监听局域网地址必须设置 API Key，已自动生成一个：\n\n"
-                f"{key}\n\n请复制到业务系统的 X-API-Key 请求头。")
+                f"{key}\n\n请复制到业务系统的 X-API-Key 请求头。",
+            )
 
-        cfg.set_many({
-            "listen_port": self.sp_port.value(),
-            # 用户显式打开「允许局域网访问」时才监听全网卡；此时强制 API Key
-            # （上面已自动生成），因此这是有意为之，不是配置疏漏。
-            "listen_host": "0.0.0.0" if lan else "127.0.0.1",   # noqa: S104
-            "api_key": key,
-            "auto_mode": "1" if self.tg_auto.isChecked() else "0",
-            "auto_ban_threshold": self.sp_threshold.value(),
-            "default_ban_duration_sec": self.sp_duration.value() * 60,
-            "rate_limit_per_sec": self.sp_rate.value(),
-            "alert_sound": "1" if self.tg_sound.isChecked() else "0",
-            "alert_popup_level": ("none" if self.cb_popup.currentIndex() == 0
-                                  else LEVEL_ITEMS[self.cb_popup.currentIndex() - 1]),
-            "alert_merge_sec": self.sp_merge.value(),
-            "log_retention_days": self.sp_retention.value(),
-            "monitor_buffer_size": self.sp_buffer.value(),
-            "geo_cache_size": self.sp_cache.value(),
-            "xdb_auto_sync": "1" if self.tg_xdb_auto.isChecked() else "0",
-            "xdb_sync_interval_hours": self.sp_xdb_interval.value(),
-            "xdb_sync_on_start": "1" if self.tg_xdb_start.isChecked() else "0",
-            "xdb_auto_download": "1" if self.tg_xdb_download.isChecked() else "0",
-            "xdb_source": self.ed_xdb_source.text().strip(),
-        })
+        cfg.set_many(
+            {
+                "listen_port": self.sp_port.value(),
+                # 用户显式打开「允许局域网访问」时才监听全网卡；此时强制 API Key
+                # （上面已自动生成），因此这是有意为之，不是配置疏漏。
+                "listen_host": WILDCARD_HOST if lan else DEFAULT_LISTEN_HOST,
+                "api_key": key,
+                "auto_mode": "1" if self.tg_auto.isChecked() else "0",
+                "auto_ban_threshold": self.sp_threshold.value(),
+                "default_ban_duration_sec": self.sp_duration.value() * 60,
+                "rate_limit_per_sec": self.sp_rate.value(),
+                "alert_sound": "1" if self.tg_sound.isChecked() else "0",
+                "alert_popup_level": (
+                    "none"
+                    if self.cb_popup.currentIndex() == 0
+                    else LEVEL_ITEMS[self.cb_popup.currentIndex() - 1]
+                ),
+                "alert_merge_sec": self.sp_merge.value(),
+                "log_retention_days": self.sp_retention.value(),
+                "monitor_buffer_size": self.sp_buffer.value(),
+                "geo_cache_size": self.sp_cache.value(),
+                "xdb_auto_sync": "1" if self.tg_xdb_auto.isChecked() else "0",
+                "xdb_sync_interval_hours": self.sp_xdb_interval.value(),
+                "xdb_sync_on_start": "1" if self.tg_xdb_start.isChecked() else "0",
+                "xdb_auto_download": "1" if self.tg_xdb_download.isChecked() else "0",
+                "xdb_source": self.ed_xdb_source.text().strip(),
+            }
+        )
 
         # 定位库缓存条数改动即时生效
         try:
             from core.geo_locator import get_locator
+
             get_locator().set_cache_size(self.sp_cache.value())
         except Exception:
             log.exception("应用归属地缓存条数失败")
 
         self.settings_saved.emit()
         QMessageBox.information(
-            self, "已保存",
+            self,
+            "已保存",
             "设置已保存。\n\n监听端口 / 监听地址的改动需要**重启接收服务**才会生效"
-            "（可点上方「停止服务」再「启动服务」）。")
+            "（可点上方「停止服务」再「启动服务」）。",
+        )
 
     def _on_auto_toggle(self, on: bool) -> None:
         self.sp_threshold.setEnabled(on)
-        self.lbl_auto.setText("已开启：命中且评分达标将自动封禁"
-                              if on else "已关闭（推荐）：仅生成建议，人工确认后执行")
+        self.lbl_auto.setText(
+            "已开启：命中且评分达标将自动封禁"
+            if on
+            else "已关闭（推荐）：仅生成建议，人工确认后执行"
+        )
 
     def _on_lan_toggle(self, on: bool) -> None:
-        self.lbl_lan.setText("已开启：局域网内其他主机可上报（需 API Key）"
-                             if on else "已关闭（推荐）：仅本机可上报")
+        self.lbl_lan.setText(
+            "已开启：局域网内其他主机可上报（需 API Key）" if on else "已关闭（推荐）：仅本机可上报"
+        )
 
     def _toggle_key_echo(self) -> None:
         if self.ed_key.echoMode() == QLineEdit.EchoMode.Password:
@@ -521,8 +548,8 @@ class SettingsPage(QWidget):
     def _refresh_server_state(self) -> None:
         running = report_server.is_running()
         port = report_server.get_port() or self.sp_port.value()
-        host = report_server.get_host() if running else (
-            "0.0.0.0" if self.tg_lan.isChecked() else "127.0.0.1")  # noqa: S104
+        fallback = WILDCARD_HOST if self.tg_lan.isChecked() else DEFAULT_LISTEN_HOST
+        host = report_server.get_host() if running else fallback
         if running:
             self.btn_server.setText("停止服务")
             self.btn_server.setObjectName("btn_danger")
@@ -539,7 +566,8 @@ class SettingsPage(QWidget):
         shown = "127.0.0.1" if host in ("127.0.0.1", "localhost", "::1") else host
         self.lbl_endpoint.setText(
             f"POST http://{shown}:{port}/api/v1/access/report\n"
-            f"GET  http://{shown}:{port}/api/v1/health")
+            f"GET  http://{shown}:{port}/api/v1/health"
+        )
 
     # ═══════════════════════════════════════════════
     #  离线库状态
@@ -548,6 +576,7 @@ class SettingsPage(QWidget):
     def refresh_xdb_state(self) -> None:
         try:
             from app.xdb_service import get_service
+
             s = get_service().summary()
         except Exception:
             log.exception("读取离线库状态失败")
@@ -565,8 +594,10 @@ class SettingsPage(QWidget):
                     src = src.split("/")[2]
                 except Exception:
                     src = ""
-            lines.append(f"{label}：{size} · 本地文件 {ms_to_str(d.get('mtime'))} · "
-                         f"上次同步 {when}" + (f"（源 {src}）" if src else ""))
+            lines.append(
+                f"{label}：{size} · 本地文件 {ms_to_str(d.get('mtime'))} · "
+                f"上次同步 {when}" + (f"（源 {src}）" if src else "")
+            )
         last_check = ms_to_str(s.get("last_check_at")) if s.get("last_check_at") else "从未检查"
         lines.append(f"上次检查：{last_check}")
         if s.get("last_result"):
@@ -596,12 +627,16 @@ class SettingsPage(QWidget):
             self.refresh_xdb_state()
 
     def _force_sync(self) -> None:
-        if QMessageBox.question(
-                self, "强制重新下载",
+        if (
+            QMessageBox.question(
+                self,
+                "强制重新下载",
                 "将忽略版本指纹，重新下载全部离线库并覆盖本地文件。\n"
                 "用于修复疑似损坏的库；下载前会自动备份，失败会回滚。\n\n继续？",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         self.xdb_sync_requested.emit(True)
 
@@ -611,10 +646,19 @@ class SettingsPage(QWidget):
 
     def _test_alert(self) -> None:
         from core.alerts import Alerter
+
         a = Alerter(tray=getattr(self.window(), "tray", None), parent_widget=self)
         a._last_alert.clear()
-        a.notify({"ip": "203.0.113.10", "level": "critical", "score": 95,
-                  "reason": "这是一条测试告警", "geo": "测试·测试·测试", "local_port": 8080})
+        a.notify(
+            {
+                "ip": "203.0.113.10",
+                "level": "critical",
+                "score": 95,
+                "reason": "这是一条测试告警",
+                "geo": "测试·测试·测试",
+                "local_port": 8080,
+            }
+        )
 
     def _clean_logs(self) -> None:
         days = self.sp_retention.value()
@@ -622,10 +666,15 @@ class SettingsPage(QWidget):
         QMessageBox.information(self, "完成", f"已清理 {n} 条超过 {days} 天的访问日志。")
 
     def _clear_logs(self) -> None:
-        if QMessageBox.question(self, "清空日志",
-                                "将删除全部访问日志与风险事件（不影响封禁列表）。\n\n确认继续？",
-                                QMessageBox.StandardButton.Yes
-                                | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "清空日志",
+                "将删除全部访问日志与风险事件（不影响封禁列表）。\n\n确认继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         clear_all_logs()
         QMessageBox.information(self, "完成", "日志已清空。")

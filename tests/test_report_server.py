@@ -3,6 +3,7 @@
 
 覆盖：默认收敛、鉴权、限流、请求体上限、错误处理、CORS 收敛。
 """
+
 import json
 from typing import Any, Dict
 
@@ -23,7 +24,7 @@ def client(isolated_env):
     init_db()
     cfg.warm()
     cfg.set("api_key", "")
-    cfg.set("rate_limit_per_sec", 0)       # 默认关掉限流，单测专注其它逻辑
+    cfg.set("rate_limit_per_sec", 0)  # 默认关掉限流，单测专注其它逻辑
     app = report_server._make_app("")
     with TestClient(app) as c:
         yield c
@@ -41,8 +42,10 @@ GOOD = {
 
 # ═══════════════════ 默认收敛 ═══════════════════
 
+
 def test_default_listen_host_is_loopback():
     from core.config import DEFAULT_LISTEN_HOST, DEFAULT_SETTINGS
+
     assert DEFAULT_LISTEN_HOST == "127.0.0.1"
     assert DEFAULT_SETTINGS["listen_host"] == "127.0.0.1"
 
@@ -74,6 +77,7 @@ def test_cors_whitelist_when_configured(isolated_env):
 
 # ═══════════════════ 鉴权 ═══════════════════
 
+
 def test_no_key_means_open(isolated_env):
     init_db()
     cfg.warm()
@@ -90,10 +94,14 @@ def test_key_required_when_set(isolated_env):
     app = report_server._make_app("s3cret")
     with TestClient(app) as c:
         assert c.post("/api/v1/access/report", json=GOOD).status_code == 401
-        assert c.post("/api/v1/access/report", json=GOOD,
-                      headers={"X-API-Key": "wrong"}).status_code == 401
-        assert c.post("/api/v1/access/report", json=GOOD,
-                      headers={"X-API-Key": "s3cret"}).status_code == 200
+        assert (
+            c.post("/api/v1/access/report", json=GOOD, headers={"X-API-Key": "wrong"}).status_code
+            == 401
+        )
+        assert (
+            c.post("/api/v1/access/report", json=GOOD, headers={"X-API-Key": "s3cret"}).status_code
+            == 200
+        )
 
 
 def test_lan_listen_forces_generated_key(isolated_env, monkeypatch):
@@ -122,6 +130,7 @@ def test_resolve_host_defaults_to_loopback(isolated_env):
 
 
 # ═══════════════════ 限流 ═══════════════════
+
 
 def test_rate_limit_returns_429(isolated_env):
     init_db()
@@ -152,6 +161,7 @@ def test_rate_limit_disabled_when_zero(isolated_env):
 
 # ═══════════════════ 请求体上限 ═══════════════════
 
+
 def test_body_too_large_returns_413(isolated_env):
     init_db()
     cfg.warm()
@@ -167,6 +177,7 @@ def test_body_too_large_returns_413(isolated_env):
 
 
 # ═══════════════════ 业务处理 ═══════════════════
+
 
 def test_report_returns_risk_fields(client):
     r = client.post("/api/v1/access/report", json=GOOD)
@@ -191,8 +202,14 @@ def test_single_scanner_probe_is_alerted_not_banned(client):
     sqlmap 的 UA 一条就能命中 scanner_ua（45 分 / medium / action=alert）。
     这是刻意的保守策略：UA 可伪造，单次请求不足以封禁，否则容易误伤。
     """
-    evil = dict(GOOD, ip="45.33.32.156", path="/admin/login", status_code=401,
-                method="POST", user_agent="sqlmap/1.7")
+    evil = dict(
+        GOOD,
+        ip="45.33.32.156",
+        path="/admin/login",
+        status_code=401,
+        method="POST",
+        user_agent="sqlmap/1.7",
+    )
     d = client.post("/api/v1/access/report", json=evil).json()["data"]
     assert d["risk_score"] >= 45
     assert d["risk_level"] in ("medium", "high", "critical")
@@ -206,8 +223,14 @@ def test_repeated_login_probing_escalates_to_ban(client):
     sensitive_path_login 是窗口型规则（60s 内 10 次 /admin*/login* 且 401/403），
     命中后 70 分 + scanner_ua 45 分 → critical 且 suggest_ban。
     """
-    evil = dict(GOOD, ip="45.33.32.156", path="/admin/login", status_code=401,
-                method="POST", user_agent="sqlmap/1.7")
+    evil = dict(
+        GOOD,
+        ip="45.33.32.156",
+        path="/admin/login",
+        status_code=401,
+        method="POST",
+        user_agent="sqlmap/1.7",
+    )
     last: Dict[str, Any] = {}
     for _ in range(12):
         last = client.post("/api/v1/access/report", json=evil).json()["data"]
@@ -227,8 +250,13 @@ def test_foreign_probe_of_report_port_is_banned(client):
 
 def test_benign_domestic_request_is_not_flagged(client):
     """国内正常业务请求不应产生任何风险分（防误报底线）"""
-    good = dict(GOOD, ip="113.118.113.77", path="/api/products", status_code=200,
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)")
+    good = dict(
+        GOOD,
+        ip="113.118.113.77",
+        path="/api/products",
+        status_code=200,
+        user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)",
+    )
     d = client.post("/api/v1/access/report", json=good).json()["data"]
     assert d["risk_score"] == 0
     assert d["risk_level"] == "normal"
@@ -284,6 +312,7 @@ def test_rules_reload_endpoint(client):
 
 # ═══════════════════ 无静默异常 ═══════════════════
 
+
 def test_process_failure_returns_500_without_crashing(client, monkeypatch):
     import core.report_server as rs
 
@@ -298,6 +327,7 @@ def test_process_failure_returns_500_without_crashing(client, monkeypatch):
 
 def test_health_after_failure_still_ok(client, monkeypatch):
     import core.report_server as rs
+
     monkeypatch.setattr(rs, "get_locator", lambda: (_ for _ in ()).throw(RuntimeError("x")))
     client.post("/api/v1/access/report", json=GOOD)
     assert client.get("/api/v1/health").status_code == 200

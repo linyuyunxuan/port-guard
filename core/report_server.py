@@ -14,6 +14,7 @@ PortGuard — 业务系统上报接收服务（FastAPI + 后台线程 uvicorn）
 - 每来源 IP 令牌桶限流 + 请求体大小上限
 - 服务端直连场景不需要 CORS，`allow_origins=["*"]` 纯属多余风险
 """
+
 import contextlib
 import threading
 import time
@@ -54,7 +55,7 @@ _running = False
 _host = DEFAULT_LISTEN_HOST
 _port = DEFAULT_LISTEN_PORT
 _start_error = ""
-_generated_key = ""      # 对外监听时自动生成的 Key（用于提示用户）
+_generated_key = ""  # 对外监听时自动生成的 Key（用于提示用户）
 
 # 限流桶：上报接口按来源 IP 计
 _bucket = TokenBucket(rate=300.0, burst=600)
@@ -71,14 +72,14 @@ def _client_key(request: Request) -> str:
 #  单条处理
 # ═══════════════════════════════════════════════════════════
 
+
 def _process(body: Dict[str, Any], fallback_ip: str) -> Dict[str, Any]:
     """处理一条上报，返回判定结果"""
     raw_ip = body.get("ip") or fallback_ip or ""
     try:
         ip = normalize_ip(raw_ip)
     except InvalidIP:
-        raise HTTPException(status_code=400,
-                            detail=f"无效的 IP 地址: {raw_ip!r}") from None
+        raise HTTPException(status_code=400, detail=f"无效的 IP 地址: {raw_ip!r}") from None
 
     rec = AccessRecord.from_payload(body, ip)
 
@@ -109,18 +110,23 @@ def _process(body: Dict[str, Any], fallback_ip: str) -> Dict[str, Any]:
     if result.is_risk:
         bus.emit_risk({"record": rec, "result": result})
 
-        bus.emit_alert({
-            "ip": ip,
-            "level": result.level,
-            "score": result.score,
-            "reason": result.reason or "命中风险规则",
-            "geo": geo.display,
-            "local_port": rec.local_port,
-        })
+        bus.emit_alert(
+            {
+                "ip": ip,
+                "level": result.level,
+                "score": result.score,
+                "reason": result.reason or "命中风险规则",
+                "geo": geo.display,
+                "local_port": rec.local_port,
+            }
+        )
 
         # 自动封禁模式（默认关闭）
-        if (result.suggest_ban and cfg.get_bool("auto_mode", False)
-                and result.score >= cfg.get_int("auto_ban_threshold", 90)):
+        if (
+            result.suggest_ban
+            and cfg.get_bool("auto_mode", False)
+            and result.score >= cfg.get_int("auto_ban_threshold", 90)
+        ):
             _auto_ban(rec, result, geo)
 
     return {
@@ -137,13 +143,20 @@ def _process(body: Dict[str, Any], fallback_ip: str) -> Dict[str, Any]:
 def _auto_ban(rec: AccessRecord, result: RiskResult, geo: GeoInfo) -> None:
     """自动模式：无需人工确认直接封禁（默认关闭）"""
     from core.firewall import block_ip
+
     if is_never_ban(rec.ip):
         return
     duration = cfg.get_int("default_ban_duration_sec", 3600)
     expire = int(time.time() * 1000) + duration * 1000
     rec_ban = BanRecord(
-        ip=rec.ip, reason=f"[自动] {result.reason}", risk_score=result.score,
-        source="auto", status="pending", duration_sec=duration, expire_at=expire)
+        ip=rec.ip,
+        reason=f"[自动] {result.reason}",
+        risk_score=result.score,
+        source="auto",
+        status="pending",
+        duration_sec=duration,
+        expire_at=expire,
+    )
     try:
         ban_id = insert_ban(rec_ban)
     except Exception:
@@ -152,35 +165,53 @@ def _auto_ban(rec: AccessRecord, result: RiskResult, geo: GeoInfo) -> None:
     ok, name, err = block_ip(rec.ip, duration, note=result.reason)
     if ban_id:
         try:
-            update_ban(ban_id, status=(STATUS_ACTIVE if ok else "failed"),
-                       rule_name=name, error_msg=err)
+            update_ban(
+                ban_id, status=(STATUS_ACTIVE if ok else "failed"), rule_name=name, error_msg=err
+            )
         except Exception:
             log.exception("自动封禁：回填记录失败 ban_id=%s", ban_id)
     if ok:
         log.warning("自动封禁生效 ip=%s rule=%s score=%d", rec.ip, name, result.score)
     else:
         log.error("自动封禁失败 ip=%s err=%s", rec.ip, err)
-    bus.emit_ban({"ip": rec.ip, "ok": ok, "rule_name": name, "error": err,
-                  "source": "auto", "ban_id": ban_id, "auto": True})
+    bus.emit_ban(
+        {
+            "ip": rec.ip,
+            "ok": ok,
+            "rule_name": name,
+            "error": err,
+            "source": "auto",
+            "ban_id": ban_id,
+            "auto": True,
+        }
+    )
 
 
 # ═══════════════════════════════════════════════════════════
 #  FastAPI 应用
 # ═══════════════════════════════════════════════════════════
 
+
 def _make_app(api_key: str) -> FastAPI:
     # 关闭交互式文档与 OpenAPI：这是一个内部接收端点，不需要对外暴露接口清单
-    app = FastAPI(title="PortGuard 上报接收服务", version=APP_VERSION,
-                  docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(
+        title="PortGuard 上报接收服务",
+        version=APP_VERSION,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     # CORS：默认不加。业务系统是服务端直连，不需要 CORS；
     # 确需浏览器直连时，由用户在设置页填白名单域名。
     allow = [o.strip() for o in (cfg.get("cors_origins", "") or "").split(",") if o.strip()]
     if allow:
         app.add_middleware(
-            CORSMiddleware, allow_origins=allow,
+            CORSMiddleware,
+            allow_origins=allow,
             allow_methods=["POST", "GET"],
-            allow_headers=["Content-Type", "X-API-Key"])
+            allow_headers=["Content-Type", "X-API-Key"],
+        )
         log.info("已启用 CORS 白名单：%s", allow)
 
     def _check_key(key: Optional[str]) -> None:
@@ -204,17 +235,19 @@ def _make_app(api_key: str) -> FastAPI:
         max_mb = cfg.get_int("max_body_mb", 2)
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and max_mb > 0 and int(cl) > max_mb * 1024 * 1024:
-            return JSONResponse(status_code=413,
-                                content={"detail": f"请求体超过 {max_mb} MB 上限"})
+            return JSONResponse(status_code=413, content={"detail": f"请求体超过 {max_mb} MB 上限"})
         return await call_next(request)
 
     @app.get("/api/v1/health")
     def health():
         w = get_writer()
-        return {"status": "ok", "ts": int(time.time() * 1000),
-                "version": APP_VERSION,
-                "writer": w.stats() if w else None,
-                "ratelimit": _bucket.stats()}
+        return {
+            "status": "ok",
+            "ts": int(time.time() * 1000),
+            "version": APP_VERSION,
+            "writer": w.stats() if w else None,
+            "ratelimit": _bucket.stats(),
+        }
 
     @app.get("/api/v1/version")
     def version():
@@ -222,15 +255,21 @@ def _make_app(api_key: str) -> FastAPI:
         conf = eng.get_config().get("rules", {})
         enabled = sum(1 for v in conf.values() if v.get("enabled"))
         loc = get_locator()
-        return {"app": "PortGuard", "version": APP_VERSION,
-                "listen_host": _host, "listen_port": _port,
-                "rules_enabled": enabled, "rules_total": len(conf),
-                "geo_available": loc.available,
-                "geo_library": loc.library_info()}
+        return {
+            "app": "PortGuard",
+            "version": APP_VERSION,
+            "listen_host": _host,
+            "listen_port": _port,
+            "rules_enabled": enabled,
+            "rules_total": len(conf),
+            "geo_available": loc.available,
+            "geo_library": loc.library_info(),
+        }
 
     @app.post("/api/v1/access/report")
-    def report(body: Dict[str, Any], request: Request,
-               x_api_key: Optional[str] = Header(default=None)):
+    def report(
+        body: Dict[str, Any], request: Request, x_api_key: Optional[str] = Header(default=None)
+    ):
         _check_rate(request)
         _check_key(x_api_key)
         if not isinstance(body, dict):
@@ -246,8 +285,9 @@ def _make_app(api_key: str) -> FastAPI:
         return JSONResponse({"success": True, "data": data})
 
     @app.post("/api/v1/access/batch")
-    def report_batch(body: Dict[str, Any], request: Request,
-                     x_api_key: Optional[str] = Header(default=None)):
+    def report_batch(
+        body: Dict[str, Any], request: Request, x_api_key: Optional[str] = Header(default=None)
+    ):
         _check_rate(request)
         _check_key(x_api_key)
         items = body.get("items") if isinstance(body, dict) else None
@@ -266,10 +306,12 @@ def _make_app(api_key: str) -> FastAPI:
             except Exception as e:
                 log.exception("批处理第 %d 条失败", i)
                 errors.append({"index": i, "error": str(e)})
-        return JSONResponse({"success": True,
-                             "data": {"accepted": len(results),
-                                      "failed": len(errors),
-                                      "errors": errors[:20]}})
+        return JSONResponse(
+            {
+                "success": True,
+                "data": {"accepted": len(results), "failed": len(errors), "errors": errors[:20]},
+            }
+        )
 
     @app.post("/api/v1/rules/reload")
     def rules_reload(x_api_key: Optional[str] = Header(default=None)):
@@ -287,10 +329,15 @@ def _make_app(api_key: str) -> FastAPI:
         except InvalidIP as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         rec = find_active_ban_by_ip(safe_ip)
-        return {"success": True, "data": {
-            "ip": safe_ip, "banned": rec is not None,
-            "reason": rec.reason if rec else "",
-            "expire_at": rec.expire_at if rec else None}}
+        return {
+            "success": True,
+            "data": {
+                "ip": safe_ip,
+                "banned": rec is not None,
+                "reason": rec.reason if rec else "",
+                "expire_at": rec.expire_at if rec else None,
+            },
+        }
 
     return app
 
@@ -298,6 +345,7 @@ def _make_app(api_key: str) -> FastAPI:
 # ═══════════════════════════════════════════════════════════
 #  启停
 # ═══════════════════════════════════════════════════════════
+
 
 def _resolve_host() -> str:
     host = (cfg.get("listen_host", DEFAULT_LISTEN_HOST) or DEFAULT_LISTEN_HOST).strip()
@@ -313,11 +361,16 @@ def _ensure_api_key(host: str, provided: str) -> str:
     key = (provided or cfg.get("api_key", "") or "").strip()
     if host not in LOOPBACK_HOSTS and not key:
         import secrets
+
         key = secrets.token_urlsafe(24)
         cfg.set("api_key", key)
         _generated_key = key
-        log.warning("服务监听非本机地址 %s 但未设置 API Key：已自动生成 %s "
-                    "（请把该 Key 配到业务系统上报请求头 X-API-Key）", host, key)
+        log.warning(
+            "服务监听非本机地址 %s 但未设置 API Key：已自动生成 %s "
+            "（请把该 Key 配到业务系统上报请求头 X-API-Key）",
+            host,
+            key,
+        )
     else:
         _generated_key = ""
     return key
@@ -333,14 +386,18 @@ def start_server(port: Optional[int] = None, api_key: str = "") -> bool:
         _host = _resolve_host()
         key = _ensure_api_key(_host, api_key)
 
-        _bucket.configure(cfg.get_int("rate_limit_per_sec", 300),
-                          cfg.get_int("rate_limit_burst", 600))
+        _bucket.configure(
+            cfg.get_int("rate_limit_per_sec", 300), cfg.get_int("rate_limit_burst", 600)
+        )
 
         app = _make_app(key)
         max_body = cfg.get_int("max_body_mb", 2)
         config = uvicorn.Config(
-            app=app, host=_host, port=_port,
-            log_level="warning", access_log=False,
+            app=app,
+            host=_host,
+            port=_port,
+            log_level="warning",
+            access_log=False,
             # 单次未完成事件的字节上限，兜住不带 Content-Length 的慢速大 body
             h11_max_incomplete_event_size=max(16 * 1024, max_body * 1024 * 1024),
         )
@@ -348,6 +405,7 @@ def start_server(port: Optional[int] = None, api_key: str = "") -> bool:
 
         def run():
             import asyncio
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -361,8 +419,12 @@ def start_server(port: Optional[int] = None, api_key: str = "") -> bool:
         _thread.start()
         _running = True
         _start_error = ""
-        log.info("接收服务已启动：http://%s:%d（API Key %s）",
-                 _host, _port, "已启用" if key else "未启用")
+        log.info(
+            "接收服务已启动：http://%s:%d（API Key %s）",
+            _host,
+            _port,
+            "已启用" if key else "未启用",
+        )
         return True
     except Exception as e:
         _start_error = str(e)
@@ -373,7 +435,7 @@ def start_server(port: Optional[int] = None, api_key: str = "") -> bool:
 
 def stop_server() -> None:
     global _running
-    if _server:                       # 只读引用，不需要 global 声明
+    if _server:  # 只读引用，不需要 global 声明
         with contextlib.suppress(Exception):
             _server.should_exit = True
     _running = False
