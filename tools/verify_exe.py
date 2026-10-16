@@ -203,6 +203,48 @@ def _run_selfcheck(exe: str, timeout: int = 180) -> Tuple[Optional[int], str]:
         return None, f"启动失败：{e}"
 
 
+def _run_diag(exe: str, timeout: int = 120) -> Tuple[Optional[int], str]:
+    """跑 `--diag --quiet`：验证「拷到别的电脑」时的排障入口在打包产物里可用。
+
+    必须带 `--quiet`：窗口程序没有控制台，不带它会弹出一个模态框一直挂着。
+    """
+    try:
+        p = subprocess.run(
+            [exe, "--diag", "--quiet"],
+            cwd=os.path.dirname(exe),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+        return p.returncode, ""
+    except subprocess.TimeoutExpired:
+        return None, f"--diag 超过 {timeout} 秒未退出（缺 --quiet？）"
+    except Exception as e:
+        return None, f"启动失败：{e}"
+
+
+def _diag_reports() -> set:
+    """现有诊断报告文件名集合（用来识别本次新写出的那一份）。"""
+    try:
+        return {n for n in os.listdir(os.path.join(DATA_DIR, "logs")) if n.startswith("diag-")}
+    except OSError:
+        return set()
+
+
+def _read_newest_report(before: set) -> Tuple[str, str]:
+    directory = os.path.join(DATA_DIR, "logs")
+    fresh = sorted(_diag_reports() - before)
+    if not fresh:
+        return "", ""
+    path = os.path.join(directory, fresh[-1])
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return path, fh.read()
+    except OSError:
+        return path, ""
+
+
 # ═══════════════════════════════════════════════════════════
 #  检查项
 # ═══════════════════════════════════════════════════════════
@@ -254,7 +296,24 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
         hits1 = [m for m in BAD_MARKS if m in text1]
         rec.add("06 自检段无失败/异常痕迹", not hits1, f"命中={hits1}")
 
-        # ── 第二道：正常启动，验证真实 Qt 插件与完整界面链路 ──
+        # ── 第二道：环境自诊断（拷到别的电脑排障就靠它，必须能在产物里跑通）──
+        reports_before = _diag_reports()
+        code_diag, err_diag = _run_diag(exe)
+        rec.add("07 --diag 退出码为 0", code_diag == 0, f"退出码={code_diag} {err_diag}".strip())
+        dpath, dtext = _read_newest_report(reports_before)
+        rec.add("08 --diag 写出了报告文件", bool(dpath), dpath or "未见新的 diag-*.txt")
+        rec.add(
+            "09 报告含系统版本与依赖闭包",
+            "【系统】" in dtext and "【依赖闭包】" in dtext,
+            f"{len(dtext)} 字符",
+        )
+        rec.add(
+            "10 Qt 关键库按真实加载方式探测成功",
+            "✓ Qt6Core.dll" in dtext and "✓ Qt6Widgets.dll" in dtext,
+            next((ln.strip() for ln in dtext.splitlines() if "Qt6Core.dll" in ln), "无探测结果"),
+        )
+
+        # ── 第三道：正常启动，验证真实 Qt 插件与完整界面链路 ──
         off2 = _log_offset()
         env = dict(os.environ)
         if not desktop:
@@ -275,7 +334,7 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
                 died_at = elapsed
                 break
         rec.add(
-            f"07 正常启动后存活 {max(1, watch)} 秒",
+            f"11 正常启动后存活 {max(1, watch)} 秒",
             died_at is None,
             f"存活 {elapsed} 秒"
             + (f"，第 {died_at} 秒退出，码={proc.returncode}" if died_at else ""),
@@ -283,20 +342,20 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
 
         text2 = _log_since(off2)
         rec.add(
-            "08 后端就绪标志位出现",
+            "12 后端就绪标志位出现",
             OK_MARK in text2,
             next(
                 (ln.strip() for ln in text2.splitlines() if OK_MARK in ln), f"未找到「{OK_MARK}」"
             ),
         )
         hits2 = [m for m in BAD_MARKS if m in text2]
-        rec.add("09 界面启动段无失败/异常痕迹", not hits2, f"命中={hits2}")
+        rec.add("13 界面启动段无失败/异常痕迹", not hits2, f"命中={hits2}")
 
         after = _snapshot(DATA_DIR)
         new = sorted(set(after) - set(before))
         changed = sorted(k for k in set(after) & set(before) if after[k] != before[k])
         rec.add(
-            "10 运行期写出用户数据（新建或更新）",
+            "14 运行期写出用户数据（新建或更新）",
             bool(new or changed),
             f"新建={new[:8]} 变更={changed[:8]}",
         )
@@ -326,7 +385,7 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
             check=False,
             creationflags=CREATE_NO_WINDOW,
         ).stdout
-        rec.add("11 收尾无残留进程", image.encode() not in leftover, f"镜像={image}")
+        rec.add("15 收尾无残留进程", image.encode() not in leftover, f"镜像={image}")
 
     result["ok"] = rec.all_ok()
     return result

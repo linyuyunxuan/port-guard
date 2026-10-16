@@ -4,6 +4,8 @@ PortGuard 端口访问防御工具 — 程序入口
 用法：
     python main.py                 # 普通权限，仅监控 + 建议
     （以管理员身份运行）            # 启用封禁/解封功能
+    python main.py --selfcheck     # 交付冒烟：无控制台条件下启停一次接收服务
+    python main.py --diag          # 环境自诊断：查「为什么这台电脑跑不起来」
 
 本环境使用专用虚拟环境：
     C:/Users/Administrator/.workbuddy/binaries/python/envs/portguard/Scripts/python.exe main.py
@@ -45,10 +47,12 @@ def _check_deps(interactive: bool = True) -> bool:
             # 自动化场景（如 --selfcheck）不弹窗：模态对话框会让流水线直接挂住
             print(msg, file=sys.stderr)
             return False
+        # 用 ctypes 弹原生框：tkinter 在打包时被 excludes 排除，窗口化运行时
+        # 一旦走到这里就会「连错误提示都弹不出来」。
         try:
-            import tkinter.messagebox as mb
+            from core.diag import show_message
 
-            mb.showerror("PortGuard 启动失败", msg)
+            show_message("PortGuard 启动失败", msg, error=True)
         except Exception:
             print(msg, file=sys.stderr)
         return False
@@ -156,6 +160,84 @@ def _selfcheck() -> int:
     return 0 if ok else 1
 
 
+def _run_diag() -> int:
+    """`--diag`：把「为什么这台电脑跑不起来」查清楚并落盘。
+
+    交付现场反馈最多的现象是把打包目录拷到别的电脑后提示
+    「DLL load failed while importing QtCore: 找不到指定的模块」——
+    根因是目标机缺少某个系统组件（最常见的两个：没装 VC++ 运行库、
+    系统版本过低没有 icuuc.dll）。窗口程序没有控制台，光靠报错框看不出是哪一种，
+    所以这里跑一遍依赖诊断，弹窗给结论、同时把完整报告写进日志目录。
+    """
+    from core import diag
+
+    # 加 --quiet 可跳过弹窗（自动化/流水线里用；窗口程序没有控制台，
+    # 弹窗会一直挂着等点击）
+    quiet = "--quiet" in sys.argv
+    code, report, summary = diag.run()
+    path = diag.write_report(report)
+    # 窗口程序没有可用的 stdout，打印失败是正常现象，不能因此中断诊断
+    with contextlib.suppress(Exception):
+        print(report, flush=True)
+    if not quiet:
+        tail = f"\n\n完整报告：\n{path}" if path else ""
+        diag.show_message(
+            "PortGuard 环境自诊断",
+            f"{summary}{tail}",
+            error=code != 0,
+        )
+    return code
+
+
+def _qt_import_failed(exc: BaseException, detail: str) -> int:
+    """PySide6 导入失败时的兜底。
+
+    窗口化打包程序走到这里，默认是 PyInstaller 的英文崩溃框：「Failed to execute
+    script 'main' due to unhandled exception」。现场看到这句话只能猜，所以改成
+    写日志 + 跑依赖诊断 + 给中文结论。
+    """
+    summary = str(exc)
+    report = ""
+    try:
+        from core import diag
+
+        _, report, summary = diag.run()
+    except Exception:
+        pass
+
+    try:
+        from core.logger import get_logger, log_file
+
+        log = get_logger("main")
+        log.error("PySide6 导入失败，界面无法启动：\n%s", detail)
+        if report:
+            log.error("依赖自诊断结果：\n%s", report)
+        log.info("日志文件：%s", log_file())
+    except Exception:
+        pass
+
+    path = ""
+    try:
+        from core import diag
+
+        body = f"PySide6 导入失败，界面无法启动。\n\n{detail[:1500]}\n\n{report}"
+        path = diag.write_report(body)
+        diag.show_message(
+            "PortGuard 启动失败",
+            "无法加载界面组件（PySide6/Qt）。\n\n"
+            f"诊断结论：{summary}\n\n"
+            "常见原因：\n"
+            "  1) 目标电脑缺少 Microsoft Visual C++ 运行库\n"
+            "  2) 系统版本过低（需 Windows 10 1703 以上）\n"
+            "  3) 拷贝不完整，缺 _internal 目录下的 DLL\n\n"
+            + (f"完整报告：\n{path}" if path else "详情见日志"),
+            error=True,
+        )
+    except Exception:
+        print(detail, file=sys.stderr)
+    return 3
+
+
 def main() -> int:
     # 第一件事：窗口化运行（pythonw / 打包后 console=False）没有控制台，
     # `sys.stdout` 与 `sys.stderr` 都是 None。第三方库会直接调用
@@ -167,6 +249,10 @@ def main() -> int:
     _PATCHED_STREAMS = ensure_std_streams()
 
     selfcheck = "--selfcheck" in sys.argv
+
+    # 自诊断必须排在一切依赖检查之前：它要回答的正是「依赖为什么起不来」
+    if "--diag" in sys.argv:
+        return _run_diag()
 
     if not _check_deps(interactive=not selfcheck):
         return 2
@@ -190,9 +276,18 @@ def main() -> int:
     if selfcheck:
         return _selfcheck()
 
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QFont
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    # PySide6 导入必须单独兜住：这是「拷到别的电脑就跑不起来」的唯一现场。
+    # 走到这里说明 Python 与被打包的运行库都正常（否则连这个 try 都进不来），
+    # 所以失败几乎必然出在 Qt 的依赖链上。
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QApplication, QMessageBox
+    except ImportError as exc:
+        if selfcheck:
+            print(traceback.format_exc(), file=sys.stderr)
+            return 3
+        return _qt_import_failed(exc, traceback.format_exc())
 
     if hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)

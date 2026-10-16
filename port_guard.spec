@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""
+r"""
 PortGuard PyInstaller 打包配置
 
 打包命令：
@@ -26,10 +26,67 @@ PortGuard PyInstaller 打包配置
   可靠做法是看 %APPDATA%/PortGuard/logs/portguard.log 里出现
   「PortGuard 后端就绪（配置项 N 条）」且没有「界面启动失败」。
 - 离屏跑设 QT_QPA_PLATFORM=offscreen，避免在自动化环境里弹窗。
+- **拷到别的电脑跑不起来时，先跑 `PortGuard.exe --diag`**：它打印系统内部版本、
+  逐个探测运行库、扫描产物依赖闭包，直接点名是缺哪个 DLL。见 core/diag.py。
+  `tools/verify_exe.py` 的第 07–10 项就是校验这个入口在产物里可用。
+
+运行环境要求（2026-10-16 用 PE 导入表实测）：
+- `Qt6Core.dll` 把 `icuuc.dll` 列为**硬导入**，而 `icuuc.dll` 是 Windows 10 1703
+  （内部版本 15063）才加入的系统组件 → 目标是 **Windows 10 1703+（推荐 1809+）**。
+  在 Win7 / Win8.1 / Server 2012R2 / Server 2016 / Win10 早期版本上，
+  `import PySide6.QtCore` 必然报「找不到指定的模块」，且无法通过补 DLL 解决。
+- 静态核对依赖：`python tools/check_dll_deps.py dist/PortGuard`
+  （判定时只认**硬导入**，并按「DLL 自身目录 / _internal / System32」的
+  真实搜索上下文解析，而不是「整个目录树里有没有」）
 """
 import os
 
 block_cipher = None
+
+# --- VC++ 运行库平铺到 _internal 根目录 -------------------------------------
+# PySide6 轮子里带有 MSVCP140 / VCRUNTIME140 系列，但它们是散落在
+# `_internal/PySide6/`、`_internal/shiboken6/` 子目录里的。Windows 解析依赖时
+# 会先搜「DLL 自身所在目录」，所以本机能跑；可一旦有模块从别的目录起链（或
+# 目标机没装 VC++ 运行库），就得靠 PATH / add_dll_directory 兜，非常脆弱。
+# 平铺一份到 _internal 根目录后，任何模块都能按标准搜索顺序解析到，
+# 与目标机是否安装过 VC++ 运行库、是否被 PATH 干扰都无关。
+# 注意：vcruntime140.dll / vcruntime140_1.dll 是 python313.dll 的依赖，
+# PyInstaller 已经自动平铺在 _internal 根，重复添加会撞名，这里排除。
+_VC_ALREADY_FLAT = {"vcruntime140.dll", "vcruntime140_1.dll"}
+_VC_RUNTIME = [
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "msvcp140_codecvt_ids.dll",
+    "concrt140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+]
+
+
+def _pyside6_dir() -> str:
+    """定位 PySide6 包目录；只查 spec 不求 import，避免拖慢打包。"""
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("PySide6")
+        if spec and spec.origin:
+            return os.path.dirname(os.path.abspath(spec.origin))
+    except Exception:
+        pass
+    return ""
+
+
+_pyside_dir = _pyside6_dir()
+_vc_binaries = []
+for _name in _VC_RUNTIME:
+    if _name in _VC_ALREADY_FLAT:
+        continue
+    _src = os.path.join(_pyside_dir, _name)
+    if _pyside_dir and os.path.exists(_src):
+        _vc_binaries.append((_src, "."))
+    else:
+        print(f"[port_guard.spec] 未找到 VC 运行库 {_name}（跳过，通常不影响）")
 
 hidden = [
     "uvicorn.logging",
@@ -63,7 +120,7 @@ if _missing:
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
+    binaries=_vc_binaries,
     datas=datas,
     hiddenimports=hidden,
     hookspath=[],

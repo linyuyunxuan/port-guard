@@ -261,7 +261,8 @@ port-guard/
 ├── gui/                    PySide6 界面（主题 / 主窗口 + mixins / 6 个页面 / 通用控件）
 ├── tools/                  真实环境验证脚本（自行请求提权，不改动仓库状态）
 │   ├── verify_firewall.py  真实防火墙「封禁 → 解封」全链路
-│   └── verify_exe.py       打包产物运行验证（--selfcheck + 正常启动）
+│   ├── verify_exe.py       打包产物运行验证（--selfcheck + 正常启动）
+│   └── check_dll_deps.py   静态核对产物依赖闭包（找「缺哪个 DLL」）
 └── tests/                  pytest 用例（隔离环境，全离线）
 ```
 
@@ -341,6 +342,37 @@ dist\PortGuard\PortGuard.exe --selfcheck
 界面点击也没法自动化，而「窗口化 + std 流为 None」恰恰是唯一能让接收服务启动失败的环境
 （uvicorn 的彩色 formatter 会执行 `sys.stdout.isatty()`）。
 
+### 拷到别的电脑跑不起来？先跑环境自诊断
+
+```bat
+dist\PortGuard\PortGuard.exe --diag            :: 弹窗给结论 + 完整报告落盘
+dist\PortGuard\PortGuard.exe --diag --quiet    :: 不弹窗（流水线/自动化用）
+```
+
+现象通常是：**开发机上运行正常，拷到别的电脑却弹**
+
+```
+Failed to execute script 'main' due to unhandled exception:
+DLL load failed while importing QtCore: 找不到指定的模块。
+```
+
+根因只有一个：Qt 的某个**硬导入** DLL 在那台机器上解析不到。而开发机多半装过
+Microsoft Visual C++ 运行库甚至 Visual Studio，缺的东西会被 `C:\Windows\System32`
+悄悄兜住，所以在本机永远复现不出来。
+
+`--diag` 会打印系统内部版本号、逐个探测运行库、扫描产物依赖闭包，并**按扩展模块的真实
+加载方式**（`LOAD_WITH_ALTERED_SEARCH_PATH`）实际 LoadLibrary 一遍 Qt 关键库，直接点名
+是缺哪个 DLL、谁在依赖它。完整报告写入 `%APPDATA%\PortGuard\logs\diag-*.txt`。
+
+开发机上想静态核对依赖（不必运行 exe）：
+
+```bat
+python tools\check_dll_deps.py dist\PortGuard
+```
+
+它只认硬导入，并按「DLL 自身目录 / `_internal` / System32」的真实搜索上下文解析，而不是
+「整个目录树里有没有」——这两者的差别正是「本机能跑、别处不能跑」的成因。
+
 ### 真实环境验证脚本（`tools/`，交付前跑）
 
 上面两条都还有盲区：单元测试把防火墙命令**全部打了桩**（只能证明「命令拼对了」，
@@ -397,6 +429,20 @@ pyinstaller port_guard.spec
 
 > 离线 IP 库（两个 xdb 合计约 46 MB）**不入版本库**，打包脚本会自动跳过不存在的资源。
 > 新克隆的仓库在打包前请先运行一次同步，或把上游仓库 `data/` 下的 xdb 复制过来。
+
+### 运行环境要求（实测结论，不要凭感觉）
+
+| 项 | 要求 | 依据 |
+| --- | --- | --- |
+| 系统 | **Windows 10 1703（内部版本 15063）起**；推荐 1809（17763）起 | `Qt6Core.dll` 把 `icuuc.dll` 列为**硬导入**，而 `icuuc.dll` 是 Windows 10 1703 才加入的系统组件 |
+| 架构 | 64 位（x64） | 打包产物为 x64 |
+| VC++ 运行库 | **无需预装**（已随包分发并平铺到 `_internal`） | `MSVCP140*` / `VCRUNTIME140*` 由 PySide6 轮子提供，spec 里平铺到 `_internal` 根目录 |
+
+**Win7 / Win8.1 / Server 2008 R2 / Server 2012 R2 / Server 2016 / Win10 1607 及更早都不支持**，
+且**无法通过补 DLL 解决**：这些系统缺少 `icuuc.dll`（以及 Win7 上还缺 `bcryptprimitives.dll`、
+`api-ms-win-core-winrt-*` 等），`import PySide6.QtCore` 必然报「找不到指定的模块」。
+PySide6 6.12（Qt 6.10）本身也不再支持这些系统。要部署到这类机器，只有两条路：
+升级/更换目标机系统，或者把界面栈降到 Python 3.8 + PySide2（Qt 5.15）另建一套老系统构建。
 
 ---
 
