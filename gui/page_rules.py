@@ -1,8 +1,8 @@
 """PortGuard — 规则配置页"""
 from typing import Dict, List
 
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFrame,
@@ -192,7 +192,7 @@ def _split(text: str) -> List[str]:
 
 
 class RulesPage(QWidget):
-    rules_saved = pyqtSignal()
+    rules_saved = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

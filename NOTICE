@@ -23,6 +23,9 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 - **来源**：https://github.com/lionsoul2014/ip2region  （仓库内 `data/`）
 - **许可**：Apache License 2.0
 - **格式**：xdb（ip2region 自有二进制格式）
+- **是否入库**：**不入库**。两个文件合计约 46 MB（v4 约 10.6 MB、v6 约 35.6 MB），
+  且可由内置的同步器随时从上游重新拉取，因此列入 `.gitignore`。
+  新克隆的仓库首次运行前需要同步一次离线库（默认启动即自动同步）。
 - **运行期更新**：`core/xdb_updater.py` 会在版本指纹变化时从
   jsDelivr CDN / GitHub raw / ghproxy 等镜像下载新版本，
   经「大小 → git blob SHA-1 → xdb 结构校验 → 抽样查询」四重校验后原子替换，
@@ -33,15 +36,25 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 
 | 包 | 用途 | 许可 |
 | --- | --- | --- |
-| PyQt6 | 桌面界面 | GPL v3 / 商业双许可 |
+| PySide6 | 桌面界面 | **LGPL v3**（另有 Qt 商业许可可选） |
+| shiboken6 | PySide6 的 C++/Python 绑定层 | LGPL v3 |
 | FastAPI | 上报接收服务 | MIT |
 | Uvicorn | ASGI 服务器 | BSD-3-Clause |
 | Starlette（FastAPI 依赖） | ASGI 框架 | BSD-3-Clause |
 | Pydantic（FastAPI 依赖） | 数据校验 | MIT |
 
-> **PyQt6 许可提示**：PyQt6 采用 GPL v3 / 商业双许可。若 PortGuard 需要以
-> **闭源**形式对外分发，应改用 **PySide6**（LGPL，可闭源动态链接），
-> 或购买 Riverbank 的商业许可。仅内部自用不受影响，但请知悉此约束。
+> **为什么用 PySide6 而不是 PyQt6**：两者 API 基本同源，但许可差异决定了能怎么分发。
+> PyQt6 是 GPL v3 / 商业双许可 —— 闭源分发会直接触发 GPL 的传染性，必须购买商业许可。
+> PySide6 是 Qt 官方绑定，采用 **LGPL v3**，**允许闭源分发**，只要满足以下几项义务：
+>
+> 1. 以**动态链接**方式使用（即按发行版原样 pip 安装 / 原样打包 Qt 的 DLL，不做静态链接）；
+> 2. 允许最终用户**替换**其中的 PySide6 / Qt 部分（例如随产品提供原版 wheel，
+>    或说明如何重新安装），使替换后的版本仍能与你的程序一起工作；
+> 3. 随产品附上 LGPL v3 全文与版权声明，并说明使用了 PySide6 / Qt；
+> 4. 若修改了 Qt / PySide6 源码本身（本项目未做任何修改），需公开这些修改。
+>
+> 本项目仅以动态链接方式使用，未修改 Qt 源码，也不对其做静态链接，
+> 因此上述 1、4 项自动满足；发布闭源产品时请补齐第 2、3 项材料。
 
 开发期依赖（pytest / ruff / mypy / httpx）仅用于 CI 与本地开发，不随产品分发。
 

@@ -1,3 +1,6 @@
-PyQt6>=6.6.0
+# 桌面界面：PySide6 是 Qt 官方绑定，LGPL v3，允许闭源分发（见 NOTICE）
+# 若只关心体积，可换成 PySide6-Essentials（仅含 QtCore/QtGui/QtWidgets 等必需模块，
+# 不含 Addons / WebEngine / Pdf，可省下约 200 MB）；本项目只用得到 Essentials 的部分。
+PySide6>=6.6.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0

@@ -31,12 +31,18 @@ hidden = [
     "anyio._backends._asyncio",
 ]
 
-datas = [
+# 只打包真实存在的资源：离线 IP 库与会话数据已列入 .gitignore（体积大，
+# 可在设置页从上游同步），新克隆的仓库里可能没有，硬写路径会让 PyInstaller 直接报错。
+_res_candidates = [
     ("data/ip2region_v4.xdb", "data"),
     ("data/ip2region_v6.xdb", "data"),
     ("data/rules.json", "data"),
     ("assets", "assets"),
 ]
+datas = [(src, dst) for src, dst in _res_candidates if os.path.exists(src)]
+_missing = [src for src, _ in _res_candidates if not os.path.exists(src)]
+if _missing:
+    print(f"[port_guard.spec] 跳过不存在的资源（首次运行会自动同步离线库）：{_missing}")
 
 a = Analysis(
     ["main.py"],
@@ -46,7 +52,7 @@ a = Analysis(
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "pandas", "PyQt6.QtWebEngineCore"],
+    excludes=["tkinter", "matplotlib", "numpy", "pandas", "PySide6.QtWebEngineCore"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

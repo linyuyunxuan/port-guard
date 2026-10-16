@@ -1,9 +1,9 @@
 """PortGuard — 封禁管理页"""
 import datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
@@ -108,8 +108,8 @@ class ManualBanDialog(QDialog):
 
 class BansPage(QWidget):
     """封禁建议 + 封禁列表"""
-    ask_ban = pyqtSignal(str, int, str)
-    request_refresh_stats = pyqtSignal()
+    ask_ban = Signal(str, int, str)
+    request_refresh_stats = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -411,5 +411,5 @@ class BansPage(QWidget):
             QMessageBox.warning(self, "提权失败",
                                 f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
         else:
-            from PyQt6.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
             QApplication.instance().quit()

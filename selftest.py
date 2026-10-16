@@ -28,8 +28,8 @@ def check(label: str, ok: bool, detail: str = "") -> None:
         _failures.append(label)
 
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 
 app = QApplication(sys.argv)
 

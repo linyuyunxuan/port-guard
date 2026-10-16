@@ -2,9 +2,9 @@
 import csv
 from typing import List
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
     QGroupBox,
@@ -33,7 +33,7 @@ HEADERS = ["IP", "是否命中", "国家", "省份", "城市", "ISP", "国家码
 
 
 class IpLookupPage(QWidget):
-    xdb_sync_requested = pyqtSignal(bool)   # 请求主窗口同步离线库
+    xdb_sync_requested = Signal(bool)   # 请求主窗口同步离线库
 
     def __init__(self, parent=None):
         super().__init__(parent)

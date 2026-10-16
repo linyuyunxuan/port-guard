@@ -1,8 +1,8 @@
 """PortGuard — 设置页"""
 import secrets
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFormLayout,
@@ -46,11 +46,11 @@ LEVEL_LABELS = [LEVEL_LABEL[x] for x in LEVEL_ITEMS]
 
 
 class SettingsPage(QWidget):
-    server_toggled = pyqtSignal(bool)          # 请求主窗口启动/停止服务
-    settings_saved = pyqtSignal()
-    xdb_sync_requested = pyqtSignal(bool)      # 立即同步（True=强制重下）
-    xdb_check_requested = pyqtSignal()         # 只检查
-    logs_open_requested = pyqtSignal()
+    server_toggled = Signal(bool)          # 请求主窗口启动/停止服务
+    settings_saved = Signal()
+    xdb_sync_requested = Signal(bool)      # 立即同步（True=强制重下）
+    xdb_check_requested = Signal()         # 只检查
+    logs_open_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

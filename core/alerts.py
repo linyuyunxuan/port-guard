@@ -66,7 +66,7 @@ class Alerter:
 
         if self.tray is not None:
             try:
-                from PyQt6.QtWidgets import QSystemTrayIcon
+                from PySide6.QtWidgets import QSystemTrayIcon
                 icon = (QSystemTrayIcon.MessageIcon.Critical
                         if level in ("critical", "high")
                         else QSystemTrayIcon.MessageIcon.Warning)
@@ -88,7 +88,7 @@ class Alerter:
         if self.parent is None:
             return
         try:
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self.parent, title, body)
         except Exception:
             log.exception("弹窗告警失败")

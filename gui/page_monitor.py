@@ -3,9 +3,9 @@ import datetime
 from collections import deque
 from typing import List, Optional
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QBrush, QColor, QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtGui import QAction, QBrush, QColor, QFont
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QHBoxLayout,
@@ -262,9 +262,9 @@ def _fmt_size(n: int) -> str:
 
 class MonitorPage(QWidget):
     """实时监控页面"""
-    ask_lookup = pyqtSignal(str)         # 请求切到 IP 查询页并查询
-    ask_blacklist = pyqtSignal(str)      # 请求把 IP 加入黑名单
-    ask_ban = pyqtSignal(str, int, str)  # 请求封禁 ip / score / reason
+    ask_lookup = Signal(str)         # 请求切到 IP 查询页并查询
+    ask_blacklist = Signal(str)      # 请求把 IP 加入黑名单
+    ask_ban = Signal(str, int, str)  # 请求封禁 ip / score / reason
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -411,7 +411,7 @@ class MonitorPage(QWidget):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _copy(self, text: str) -> None:
-        from PyQt6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(text or "")
 
     def _on_double_click(self, index) -> None:

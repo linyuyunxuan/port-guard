@@ -24,7 +24,7 @@ _shm = None
 
 def _check_deps() -> bool:
     missing = []
-    for mod, label in (("PyQt6", "PyQt6"), ("fastapi", "fastapi"),
+    for mod, label in (("PySide6", "PySide6"), ("fastapi", "fastapi"),
                        ("uvicorn", "uvicorn"), ("ip2region", "ip2region(py)")):
         try:
             __import__(mod)
@@ -81,9 +81,9 @@ def main() -> int:
             print(err, file=sys.stderr)
         return 1
 
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QFont
-    from PyQt6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     if hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
@@ -98,7 +98,7 @@ def main() -> int:
 
     # 单实例保护（避免重复占用上报端口）
     try:
-        from PyQt6.QtCore import QSharedMemory
+        from PySide6.QtCore import QSharedMemory
         global _shm
         _shm = QSharedMemory("PortGuard_SingleInstance_v1")
         if not _shm.create(1):

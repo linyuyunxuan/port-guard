@@ -2,9 +2,9 @@
 import datetime
 from typing import Dict, List
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
@@ -72,7 +72,7 @@ class EventDetailDialog(QDialog):
 
 class EventsPage(QWidget):
     """风险事件列表"""
-    ask_ban = pyqtSignal(str, int, str)
+    ask_ban = Signal(str, int, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)

@@ -13,7 +13,7 @@ PortGuard — 主窗口的行为 Mixin
 """
 import contextlib
 
-from PyQt6.QtCore import QTimer
+from PySide6.QtCore import QTimer
 
 from app import ban_service, maintenance, server_ctl
 from app.xdb_service import get_service as get_xdb_service
@@ -223,14 +223,14 @@ class ServerCtlMixin:
         ok, msg = server_ctl.toggle(start)
         if not ok:
             self._set_status(msg.splitlines()[0], C.danger)
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "启动失败", msg)
         else:
             color = C.success if report_server.is_running() else C.text_secondary
             first = msg.splitlines()[0]
             self._set_status(first, color)
             if report_server.get_generated_key():
-                from PyQt6.QtWidgets import QMessageBox
+                from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(
                     self, "已启用局域网监听",
                     msg + "\n\n安全提示：监听非本机地址时必须设置 API Key，"

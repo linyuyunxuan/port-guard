@@ -1,15 +1,15 @@
 """PortGuard — 可复用控件"""
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
+    Property,
     QEasingCurve,
     QPropertyAnimation,
     QRect,
     QSize,
     Qt,
-    pyqtProperty,
-    pyqtSignal,
+    Signal,
 )
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter
-from PyQt6.QtWidgets import (
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -25,7 +25,7 @@ from gui.theme import LEVEL_COLORS, C
 
 class ToggleSwitch(QWidget):
     """简洁的开关控件（替代 QCheckBox 用于"启用/自动模式"）"""
-    toggled = pyqtSignal(bool)
+    toggled = Signal(bool)
 
     def __init__(self, checked: bool = False, parent=None, width: int = 44, height: int = 24):
         super().__init__(parent)
@@ -46,7 +46,7 @@ class ToggleSwitch(QWidget):
         self._pos = v
         self.update()
 
-    position = pyqtProperty(float, fget=_get_pos, fset=_set_pos)
+    position = Property(float, fget=_get_pos, fset=_set_pos)
 
     def isChecked(self) -> bool:
         return self._checked
@@ -155,7 +155,7 @@ class Badge(QLabel):
 
 class WarnBanner(QFrame):
     """页面顶部警示条"""
-    action_clicked = pyqtSignal()
+    action_clicked = Signal()
 
     def __init__(self, text: str = "", action_text: str = "", color: str | None = None, parent=None):
         super().__init__(parent)

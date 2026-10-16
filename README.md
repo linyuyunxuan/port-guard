@@ -242,7 +242,7 @@ port-guard/
 │   ├── xdb_service.py      离线库同步的后台调度
 │   ├── server_ctl.py       上报服务启停
 │   └── maintenance.py      日志 / 备份 / 临时文件清理
-├── gui/                    PyQt6 界面（主题 / 主窗口 + mixins / 6 个页面 / 通用控件）
+├── gui/                    PySide6 界面（主题 / 主窗口 + mixins / 6 个页面 / 通用控件）
 └── tests/                  pytest 用例（隔离环境，全离线）
 ```
 
@@ -338,6 +338,9 @@ pyinstaller port_guard.spec
 
 产物在 `dist/PortGuard/`。打包后只读资源（xdb、rules.json 默认值）随包分发，运行时数据写入 `%APPDATA%/PortGuard/`。
 
+> 离线 IP 库（两个 xdb 合计约 46 MB）**不入版本库**，打包脚本会自动跳过不存在的资源。
+> 新克隆的仓库在打包前请先运行一次同步，或把上游仓库 `data/` 下的 xdb 复制过来。
+
 ---
 
 ## 十二、注意事项
@@ -350,5 +353,5 @@ pyinstaller port_guard.spec
   持续爆破（窗口型规则）才会升级为封禁建议 —— 这是刻意设计，避免误伤
 * IP 归属地数据来自 `data/ip2region_v*.xdb`，精度到城市，不保证 100% 准确；
   可开启在线同步保持最新
-* 第三方代码与许可见 `NOTICE`（特别注意 **PyQt6 是 GPL v3/商业双许可**，
-  若需闭源分发请改用 PySide6 或购买商业许可）
+* 第三方代码与许可见 `NOTICE`。**GUI 使用 PySide6（LGPL v3），因此允许闭源分发**；
+  此前用的 PyQt6 是 GPL v3 / 商业双许可，闭源分发会触发 GPL 传染性，已整体迁移

@@ -8,9 +8,9 @@ PortGuard — 主窗口
 """
 import threading
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
@@ -72,8 +72,8 @@ def _make_icon(color: str | None = None, size: int = 64) -> QIcon:
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setBrush(QColor(color or C.primary))
     p.setPen(Qt.PenStyle.NoPen)
-    from PyQt6.QtCore import QPointF
-    from PyQt6.QtGui import QPolygonF
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPolygonF
     w = size
     pts = [QPointF(w * 0.5, w * 0.06), QPointF(w * 0.90, w * 0.22),
            QPointF(w * 0.90, w * 0.55), QPointF(w * 0.5, w * 0.95),
