@@ -145,6 +145,24 @@ from gui.region_rules import new_rule_id
 
 win = MainWindow()
 check("MainWindow 构建", win is not None)
+# 离屏模式下必须真正 show()，否则页面 isVisible() 恒为 False，
+# page_logs.append_access 会走「只进缓冲、不渲染」分支，访问行进不了界面文档
+win.show()
+app.processEvents()
+
+# 导航按钮真实点击（PySide2 回归锁）：shiboken2 会把「带默认参数的 lambda」槽
+# 按 0 参调用，点击全部失灵且错误只进看不见的 stderr —— 必须逐颗点一遍
+_nav_bad = []
+for _i, _btn in enumerate(win.nav_buttons):
+    _btn.click()
+    app.processEvents()
+    if win.stack.currentIndex() != _i:
+        _nav_bad.append(f"按钮{_i}→页{win.stack.currentIndex()}")
+check(
+    "导航按钮点击可切页",
+    not _nav_bad,
+    ";".join(_nav_bad) if _nav_bad else f"{len(win.nav_buttons)} 颗全部命中",
+)
 
 win._drain_events()
 app.processEvents()
