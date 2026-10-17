@@ -31,26 +31,37 @@ PortGuard PyInstaller 打包配置
   `tools/verify_exe.py` 的第 07–10 项就是校验这个入口在产物里可用。
 
 运行环境要求（2026-10-16 用 PE 导入表实测）：
-- `Qt6Core.dll` 把 `icuuc.dll` 列为**硬导入**，而 `icuuc.dll` 是 Windows 10 1703
-  （内部版本 15063）才加入的系统组件 → 目标是 **Windows 10 1703+（推荐 1809+）**。
-  在 Win7 / Win8.1 / Server 2012R2 / Server 2016 / Win10 早期版本上，
-  `import PySide6.QtCore` 必然报「找不到指定的模块」，且无法通过补 DLL 解决。
-- 静态核对依赖：`python tools/check_dll_deps.py dist/PortGuard`
-  （判定时只认**硬导入**，并按「DLL 自身目录 / _internal / System32」的
-  真实搜索上下文解析，而不是「整个目录树里有没有」）
+两条 Qt 线路，打包哪条由**当前 Python 环境里装的是哪个绑定**决定：
+
+- **PySide6 线路**（Python 3.9+）：`Qt6Core.dll` 把 `icuuc.dll` 列为**硬导入**，
+  而 `icuuc.dll` 是 Windows 10 1703（内部版本 15063）才加入的系统组件
+  → 目标是 **Windows 10 1703+（推荐 1809+）**。在 Win7 / Win8.1 / Server 2012R2 /
+  Server 2016 / Win10 早期版本上，`import PySide6.QtCore` 必然报「找不到指定的模块」，
+  且无法通过补 DLL 解决。
+- **PySide2 线路**（Python 3.8）：`Qt5Core.dll` 只依赖 VC++ 运行库，**不导入 icuuc**
+  → 目标是 **Windows 7 SP1 / Server 2008 R2（7601）及以上**。
+  Win7 上需先装 KB2999226（通用 C 运行库）。
+
+打包前先过一遍 Win7 兼容闸门（不依赖真的有一台 Win7）：
+
+    python tools/check_dll_deps.py dist/PortGuard
+
+它除了核对依赖闭包，还会点名「引用了底线系统上不存在的组件」。
+静态依赖核对同样只认**硬导入**，并按「DLL 自身目录 / _internal / System32」的
+真实搜索上下文解析，而不是「整个目录树里有没有」。
 """
 import os
 
 block_cipher = None
 
-# --- VC++ 运行库平铺到 _internal 根目录 -------------------------------------
-# PySide6 轮子里带有 MSVCP140 / VCRUNTIME140 系列，但它们是散落在
-# `_internal/PySide6/`、`_internal/shiboken6/` 子目录里的。Windows 解析依赖时
-# 会先搜「DLL 自身所在目录」，所以本机能跑；可一旦有模块从别的目录起链（或
-# 目标机没装 VC++ 运行库），就得靠 PATH / add_dll_directory 兜，非常脆弱。
-# 平铺一份到 _internal 根目录后，任何模块都能按标准搜索顺序解析到，
-# 与目标机是否安装过 VC++ 运行库、是否被 PATH 干扰都无关。
-# 注意：vcruntime140.dll / vcruntime140_1.dll 是 python313.dll 的依赖，
+# --- 运行库平铺到 _internal 根目录 -------------------------------------------
+# 两个绑定轮子里都带有 MSVCP140 / VCRUNTIME140 系列，但它们散落在
+# `_internal/PySide2/`（或 `PySide6/`）、`_internal/shiboken2/`（或 `shiboken6/`）
+# 子目录里。Windows 解析依赖时会先搜「DLL 自身所在目录」，所以本机能跑；
+# 可一旦有模块从别的目录起链（或目标机没装 VC++ 运行库），就得靠 PATH /
+# add_dll_directory 兜，非常脆弱。平铺一份到 _internal 根目录后，任何模块都能按
+# 标准搜索顺序解析到，与目标机是否安装过 VC++ 运行库、是否被 PATH 干扰都无关。
+# 注意：vcruntime140.dll / vcruntime140_1.dll 是 python3xx.dll 的依赖，
 # PyInstaller 已经自动平铺在 _internal 根，重复添加会撞名，这里排除。
 _VC_ALREADY_FLAT = {"vcruntime140.dll", "vcruntime140_1.dll"}
 _VC_RUNTIME = [
@@ -64,20 +75,30 @@ _VC_RUNTIME = [
 ]
 
 
-def _pyside6_dir() -> str:
-    """定位 PySide6 包目录；只查 spec 不求 import，避免拖慢打包。"""
-    try:
-        import importlib.util
+def _find_binding() -> tuple:
+    """返回 (绑定名, 包目录)。PySide6 优先，找不到再退回 PySide2。
 
-        spec = importlib.util.find_spec("PySide6")
+    只查 spec 不求 import，避免拖慢打包；用 find_spec 而不是 import，
+    顺便避免在打包机上真的加载一次 Qt 运行库。
+    """
+    import importlib.util
+
+    for name in ("PySide6", "PySide2"):
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception:
+            continue
         if spec and spec.origin:
-            return os.path.dirname(os.path.abspath(spec.origin))
-    except Exception:
-        pass
-    return ""
+            return name, os.path.dirname(os.path.abspath(spec.origin))
+    return "", ""
 
 
-_pyside_dir = _pyside6_dir()
+_QT_BINDING, _pyside_dir = _find_binding()
+if _QT_BINDING:
+    print(f"[port_guard.spec] 检测到 Qt 绑定：{_QT_BINDING}（目录 {_pyside_dir}）")
+else:
+    print("[port_guard.spec] 警告：没找到 PySide6 / PySide2，产物将无法启动")
+
 _vc_binaries = []
 for _name in _VC_RUNTIME:
     if _name in _VC_ALREADY_FLAT:

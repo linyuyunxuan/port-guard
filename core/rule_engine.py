@@ -28,7 +28,12 @@ from core.config import (
 )
 from core.logger import get_logger
 from core.models import AccessRecord, GeoInfo, RiskResult
-from core.rules_meta import rule_label
+from core.rules_meta import (
+    REGION_ACTION_KEYS,
+    region_rule_key,
+    register_region_rules,
+    rule_label,
+)
 
 log = get_logger(__name__)
 
@@ -112,6 +117,23 @@ def is_never_ban(ip: str) -> bool:
     return ip in _NEVER_BAN
 
 
+def has_http_context(rec: AccessRecord) -> bool:
+    """
+    这条记录是否来自 HTTP 层。
+
+    判据：协议是 http/https，或带了 HTTP 特有的 method / path。
+    本机端口采集（core/port_watcher 的 TCP 表轮询与防火墙日志）产生的记录
+    三者皆无 —— 它们描述的是"一次 TCP 连接/一个被丢弃的包"，不是一次 HTTP 请求。
+
+    为什么必须区分：`scanner_ua` 规则里有「UA 为空即视为扫描器」这条启发式，
+    对 HTTP 上报完全合理（正常人浏览器一定带 UA），但对 TCP 层采集是**必然误报**
+    —— 每条自采记录都会白拿那 45 分，直接把分数抬到"中危"。
+    """
+    if (rec.protocol or "").lower() in ("http", "https"):
+        return True
+    return bool((rec.method or "").strip() or (rec.path or "").strip())
+
+
 DEFAULT_RULES = {
     "version": 1,
     "rules": {
@@ -129,6 +151,7 @@ class RuleEngine:
         self._last_prune = 0.0
         self._ua_re: List[re.Pattern] = []
         self._path_cfg: Dict[str, Any] = {"paths": [], "status": []}
+        self._region_rules: List[Dict[str, Any]] = []
         self.blacklist = _IPSet.load_file(blacklist_path())
         self.whitelist = _IPSet.load_file(whitelist_path())
         self.reload()
@@ -166,6 +189,137 @@ class RuleEngine:
             "paths": [str(x).lower() for x in (sp.get("paths") or [])],
             "status": [int(x) for x in (sp.get("status") or []) if str(x).isdigit()],
         }
+        self._region_rules = self._compile_region_rules(self._cfg.get("region_rules") or [])
+        # 让 rules_meta 记住 id->名称，models.matched_str 才能把命中翻译成中文
+        register_region_rules(self._region_rules)
+
+    # ── 区域规则编译 ──
+    @staticmethod
+    def _as_str_list(match: Dict[str, Any], key: str) -> List[str]:
+        """把 match 里的某个维度归一化成「去空、去重的字符串列表」"""
+        v = match.get(key) or []
+        if isinstance(v, str):
+            v = [v]
+        out: List[str] = []
+        for x in v:
+            s = str(x).strip()
+            if s and s not in out:
+                out.append(s)
+        return out
+
+    @classmethod
+    def _compile_region_rules(cls, raw: Any) -> List[Dict[str, Any]]:
+        """
+        把 rules.json 里的 region_rules 预编译成便于逐条比对的结构。
+
+        编译期就把 CIDR 解析成 ip_network 对象、把端口转成 int，
+        避免每条上报都重复做字符串解析（热路径）。
+        非法条目**跳过而不是抛错** —— 用户手改 JSON 写错一行，
+        不该让整个规则引擎罢工。
+        """
+        out: List[Dict[str, Any]] = []
+        if not isinstance(raw, list):
+            return out
+        for i, r in enumerate(raw):
+            if not isinstance(r, dict):
+                continue
+            match = r.get("match")
+            if not isinstance(match, dict):
+                match = {}
+            rid = str(r.get("id") or f"r{i + 1}").strip() or f"r{i + 1}"
+            action = str(r.get("action") or "watch").strip().lower()
+            if action not in REGION_ACTION_KEYS:
+                log.warning("区域规则 %s 的动作 %r 不合法，按 watch 处理", rid, action)
+                action = "watch"
+
+            ports: List[int] = []
+            for p in r.get("target_ports") or []:
+                if str(p).strip().isdigit():
+                    ports.append(int(str(p).strip()))
+
+            nets: List[Any] = []
+            for c in match.get("cidrs") or []:
+                try:
+                    nets.append(ipaddress.ip_network(str(c).strip(), strict=False))
+                except ValueError:
+                    log.warning("区域规则 %s 忽略非法网段 %r", rid, c)
+
+            out.append(
+                {
+                    "id": rid,
+                    "name": str(r.get("name") or rid).strip() or rid,
+                    "enabled": bool(r.get("enabled", True)),
+                    "action": action,
+                    "ports": ports,
+                    "factor": float(r.get("factor", 0.3) or 0.3),
+                    "score": int(r.get("score", 90) or 90),
+                    "provinces": cls._as_str_list(match, "provinces"),
+                    "cities": cls._as_str_list(match, "cities"),
+                    "countries": cls._as_str_list(match, "countries"),
+                    "isps": cls._as_str_list(match, "isp"),
+                    "nets": nets,
+                    "ip_keywords": cls._as_str_list(match, "ip_keywords"),
+                    "not_china": bool(match.get("not_china", False)),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _text_hit(configured: List[str], actual: str) -> bool:
+        """文本维度匹配：双向包含，兼容 '河南' / '河南省' 两种写法"""
+        if not configured:
+            return True
+        a = (actual or "").strip()
+        if not a:
+            return False
+        return any(c in a or a in c for c in configured)
+
+    def _match_region_rules(self, rec: AccessRecord, geo: GeoInfo) -> List[Dict[str, Any]]:
+        """返回所有命中的区域规则（保持配置顺序）"""
+        hits: List[Dict[str, Any]] = []
+        ip = (rec.ip or "").split("%", 1)[0]
+        for r in self._region_rules:
+            if not r["enabled"]:
+                continue
+            # 端口限定：留空表示对所有端口生效
+            if r["ports"] and rec.local_port not in r["ports"]:
+                continue
+            # IP 维度（与归属地无关，可独立使用）
+            if r["nets"]:
+                try:
+                    addr = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                if not any(addr in n for n in r["nets"]):
+                    continue
+            if r["ip_keywords"] and not any(ip.startswith(k) for k in r["ip_keywords"]):
+                continue
+            if r["not_china"] and not (geo.found and not geo.is_china):
+                continue
+
+            geo_dims = r["provinces"] or r["cities"] or r["countries"] or r["isps"]
+            ip_dims = r["nets"] or r["ip_keywords"] or r["not_china"]
+            # 一条什么维度都没配的规则等价于"匹配全部地址"，属于误配，直接不生效
+            if not geo_dims and not ip_dims:
+                continue
+            if geo_dims:
+                # 归属地未知时不猜测：宁可放过，也不能凭"不知道"就放行
+                if not geo.found:
+                    continue
+                if not self._text_hit(r["provinces"], geo.province):
+                    continue
+                if not self._text_hit(r["cities"], geo.city):
+                    continue
+                if not self._text_hit(r["countries"], geo.country):
+                    continue
+                if not self._text_hit(r["isps"], geo.isp):
+                    continue
+            hits.append(r)
+        return hits
+
+    def region_rules(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return json.loads(json.dumps(self._region_rules, default=str))
 
     def load_lists(self) -> None:
         self.blacklist = _IPSet.load_file(blacklist_path())
@@ -212,6 +366,20 @@ class RuleEngine:
                 whitelisted=True,
                 reason="命中白名单，已豁免",
             )
+
+        # ── 区域规则：action=allow 优先级最高，命中即豁免 ──
+        # 「河南/山西的 IP 可以访问某端口」就是靠这条短路实现的。
+        region_hits = self._match_region_rules(rec, geo)
+        for r in region_hits:
+            if r["action"] == "allow":
+                return RiskResult(
+                    score=0,
+                    level=LEVEL_NORMAL,
+                    matched_rules=[region_rule_key("allow", r["id"])],
+                    suggest_ban=False,
+                    whitelisted=True,
+                    reason=f"命中区域放行规则「{r['name']}」，已豁免",
+                )
 
         score = 0
         matched: List[str] = []
@@ -273,11 +441,12 @@ class RuleEngine:
                     matched.append("rate_limit")
 
             # 6. 扫描器 UA
+            #    「UA 为空」只在 HTTP 场景下才是有效信号，详见 has_http_context
             r = rules.get("scanner_ua", {})
             if r.get("enabled"):
                 ua = rec.user_agent or ""
                 hit = bool(ua) and any(rx.search(ua) for rx in self._ua_re)
-                if not hit and not ua and r.get("empty_ua", True):
+                if not hit and not ua and r.get("empty_ua", True) and has_http_context(rec):
                     hit = True
                 if hit:
                     score += int(r.get("score", 45))
@@ -307,6 +476,19 @@ class RuleEngine:
             if r.get("enabled") and rec.size >= int(r.get("min_bytes", 5242880)):
                 score += int(r.get("score", 25))
                 matched.append("large_body")
+
+        # ── 区域规则（非放行类）：在常规评分之后叠加 / 调整 ──
+        for r in region_hits:
+            act = r["action"]
+            matched.append(region_rule_key(act, r["id"]))
+            if act == "suggest_ban":
+                score += int(r["score"])
+
+        # downgrade：多条同时命中时取最狠的那个系数（最低 factor）
+        factors = [r["factor"] for r in region_hits if r["action"] == "downgrade"]
+        if factors:
+            factor = max(0.0, min([*factors, 1.0]))
+            score = round(score * factor)
 
         score = min(score, 100)
         level = self.level_of(score)

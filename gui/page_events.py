@@ -3,31 +3,32 @@
 import datetime
 from typing import Dict, List
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import (
+from core.config import LEVEL_LABEL
+from core.database import query_risk_events, set_risk_handled
+from core.models import ms_to_str
+from core.rules_meta import rule_label
+from gui.theme import LEVEL_BG, LEVEL_COLORS, C
+from qtcompat import (
     QAbstractItemView,
+    QColor,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFont,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    Qt,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    Signal,
 )
-
-from core.config import LEVEL_LABEL
-from core.database import query_risk_events, set_risk_handled
-from core.models import ms_to_str
-from core.rules_meta import rule_label
-from gui.theme import LEVEL_BG, LEVEL_COLORS, C
 
 HEADERS = [
     "时间",

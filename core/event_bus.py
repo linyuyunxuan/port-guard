@@ -10,7 +10,7 @@ Qt 主线程用 QTimer 周期性 drain 并刷新界面。
 
 import queue
 import threading
-from typing import Any, List
+from typing import Any, List, Optional
 
 
 class EventBus:
@@ -64,7 +64,7 @@ class EventBus:
 
     # ── 消费（UI 线程调用）──
     @staticmethod
-    def drain(q: "queue.Queue", max_n: int = 500, batch: List[Any] | None = None) -> List[Any]:
+    def drain(q: "queue.Queue", max_n: int = 500, batch: Optional[List[Any]] = None) -> List[Any]:
         batch = [] if batch is None else batch
         try:
             while len(batch) < max_n:

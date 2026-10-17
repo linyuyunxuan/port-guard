@@ -2,8 +2,20 @@
 
 from typing import Dict, List, Tuple
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import (
+from core.config import (
+    LEVEL_CRITICAL,
+    LEVEL_HIGH,
+    LEVEL_LABEL,
+    LEVEL_LOW,
+    LEVEL_MEDIUM,
+    LEVEL_NORMAL,
+)
+from core.rule_engine import get_engine
+from core.rules_meta import RULE_DESCS, RULE_LABELS, RULE_PARAMS
+from gui.region_rules import RegionRulesTab
+from gui.theme import C
+from gui.widgets import ToggleSwitch
+from qtcompat import (
     QComboBox,
     QDoubleSpinBox,
     QFrame,
@@ -20,20 +32,8 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
     QWidget,
+    Signal,
 )
-
-from core.config import (
-    LEVEL_CRITICAL,
-    LEVEL_HIGH,
-    LEVEL_LABEL,
-    LEVEL_LOW,
-    LEVEL_MEDIUM,
-    LEVEL_NORMAL,
-)
-from core.rule_engine import get_engine
-from core.rules_meta import RULE_DESCS, RULE_LABELS, RULE_PARAMS
-from gui.theme import C
-from gui.widgets import ToggleSwitch
 
 LEVEL_ITEMS = [LEVEL_NORMAL, LEVEL_LOW, LEVEL_MEDIUM, LEVEL_HIGH, LEVEL_CRITICAL]
 LEVEL_ITEM_LABELS = [LEVEL_LABEL[x] for x in LEVEL_ITEMS]
@@ -240,7 +240,19 @@ class RulesPage(QWidget):
 
         # Tab2 名单
         self.tabs.addTab(self._build_lists(), "黑 / 白名单")
+
+        # Tab3 区域规则（区域访问白名单）
+        self.tab_region = RegionRulesTab()
+        self.tab_region.changed.connect(self._mark_region_dirty)
+        self.tabs.addTab(self.tab_region, "区域访问白名单")
+
         root.addWidget(self.tabs, 1)
+
+    def _mark_region_dirty(self) -> None:
+        """区域规则一改动就给标签加个圆点，提示「有尚未保存的改动」"""
+        i = self.tabs.indexOf(self.tab_region)
+        if i >= 0:
+            self.tabs.setTabText(i, "区域访问白名单 •")
 
     def _build_lists(self) -> QWidget:
         w = QWidget()
@@ -308,6 +320,12 @@ class RulesPage(QWidget):
 
         self._load_lists()
 
+        # 区域规则
+        self.tab_region.load(eng.get_config().get("region_rules") or [])
+        i = self.tabs.indexOf(self.tab_region)
+        if i >= 0:
+            self.tabs.setTabText(i, "区域访问白名单")
+
     def _load_lists(self) -> None:
         eng = get_engine()
         eng.load_lists()
@@ -319,14 +337,25 @@ class RulesPage(QWidget):
         cfg = eng.get_config()
         for rule_id, card in self._cards.items():
             cfg.setdefault("rules", {})[rule_id] = card.collect()
+        # 区域访问白名单规则（顶层数组，与 rules 并列）
+        region_rules = self.tab_region.collect()
+        cfg["region_rules"] = region_rules
         try:
             eng.save_config(cfg)
             eng.reload()
         except Exception as e:
             QMessageBox.warning(self, "保存失败", str(e))
             return
+        i = self.tabs.indexOf(self.tab_region)
+        if i >= 0:
+            self.tabs.setTabText(i, "区域访问白名单")
         self.rules_saved.emit()
-        QMessageBox.information(self, "已保存", "规则已保存并即时生效。")
+        enabled = sum(1 for r in region_rules if r.get("enabled", True))
+        QMessageBox.information(
+            self,
+            "已保存",
+            f"规则已保存并即时生效。\n\n区域访问白名单：共 {len(region_rules)} 条，启用 {enabled} 条。",
+        )
 
     def _save_lists(self) -> None:
         eng = get_engine()

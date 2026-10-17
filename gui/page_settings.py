@@ -2,26 +2,6 @@
 
 import secrets
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QFormLayout,
-    QFrame,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLayout,
-    QLineEdit,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QScrollArea,
-    QSpinBox,
-    QVBoxLayout,
-    QWidget,
-)
-
 from app import maintenance
 from core import firewall, report_server
 from core import settings as cfg
@@ -41,6 +21,26 @@ from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.theme import C
 from gui.widgets import ToggleSwitch
+from qtcompat import (
+    QApplication,
+    QComboBox,
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLayout,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    Qt,
+    QVBoxLayout,
+    QWidget,
+    Signal,
+)
 
 log = get_logger(__name__)
 
@@ -54,6 +54,7 @@ class SettingsPage(QWidget):
     xdb_sync_requested = Signal(bool)  # 立即同步（True=强制重下）
     xdb_check_requested = Signal()  # 只检查
     logs_open_requested = Signal()
+    watch_changed = Signal()  # 本机端口观察的开关/参数发生变化
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -91,6 +92,7 @@ class SettingsPage(QWidget):
         lay.setSpacing(12)
 
         lay.addWidget(self._build_server_group())
+        lay.addWidget(self._build_watch_group())
         lay.addWidget(self._build_xdb_group())
         lay.addWidget(self._build_ban_group())
         lay.addWidget(self._build_alert_group())
@@ -179,6 +181,200 @@ class SettingsPage(QWidget):
         f.addRow("服务状态", self._wrap(row_state))
         f.addRow("上报地址", self.lbl_endpoint)
         return g
+
+    # ── 离线库在线同步 ──
+    # ── 本机端口访问观察（双通道采集） ──
+    def _build_watch_group(self) -> QGroupBox:
+        g = QGroupBox("本机端口访问观察")
+        f = QFormLayout(g)
+        f.setContentsMargins(14, 10, 14, 14)
+        f.setSpacing(9)
+
+        self.tg_watch = ToggleSwitch(False)
+
+        self.ed_watch_ports = QLineEdit()
+        self.ed_watch_ports.setPlaceholderText("18080,3389,1433,3306,6379")
+        self.ed_watch_ports.setMinimumWidth(240)
+
+        self.cb_watch_method = QComboBox()
+        self.cb_watch_method.addItems(["TCP 连接表轮询", "防火墙日志", "两者都要（推荐）"])
+        self.cb_watch_method.setFixedWidth(180)
+
+        self.sp_watch_interval = QSpinBox()
+        self.sp_watch_interval.setRange(1, 3600)
+        self.sp_watch_interval.setValue(5)
+        self.sp_watch_interval.setSuffix(" 秒")
+        self.sp_watch_interval.setFixedWidth(120)
+
+        self.sp_watch_dedupe = QSpinBox()
+        self.sp_watch_dedupe.setRange(0, 86400)
+        self.sp_watch_dedupe.setValue(120)
+        self.sp_watch_dedupe.setSuffix(" 秒")
+        self.sp_watch_dedupe.setFixedWidth(120)
+
+        self.ed_watch_log = QLineEdit()
+        self.ed_watch_log.setPlaceholderText("留空使用系统默认位置")
+        self.ed_watch_log.setMinimumWidth(240)
+
+        self.tg_watch_pid = ToggleSwitch(True)
+        self.tg_watch_skip = ToggleSwitch(True)
+        self.tg_watch_autoban = ToggleSwitch(False)
+
+        b_start = QPushButton("立即启用观察")
+        b_start.setObjectName("btn_primary")
+        b_start.clicked.connect(lambda: self._watch_apply(True))
+        b_stop = QPushButton("停止观察")
+        b_stop.setObjectName("btn_outline")
+        b_stop.clicked.connect(lambda: self._watch_apply(False))
+        b_fwlog = QPushButton("启用防火墙日志记录")
+        b_fwlog.setObjectName("btn_outline")
+        b_fwlog.setToolTip(
+            "开启 Windows 防火墙安全日志（需要管理员权限）。\n"
+            "只记被丢弃的连接：能抓到扫描/爆破，又不会把日志文件写爆。"
+        )
+        b_fwlog.clicked.connect(self._enable_fwlog)
+
+        self.lbl_watch_state = QLabel("未启动")
+        self.lbl_watch_state.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_watch_state.setWordWrap(True)
+
+        hint = QLabel(
+            "程序自己观察本机端口，不依赖业务系统上报。"
+            "TCP 连接表：免管理员，但只能看见仍然连着的连接；"
+            "防火墙日志：连被丢弃的扫描都看得见，需管理员开启一次日志记录。"
+        )
+        hint.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        hint.setWordWrap(True)
+
+        f.addRow("启用本机观察", self._wrap(self.tg_watch))
+        f.addRow("监控端口", self.ed_watch_ports)
+        f.addRow("采集通道", self.cb_watch_method)
+        f.addRow("采样间隔", self.sp_watch_interval)
+        f.addRow("同来源去重", self.sp_watch_dedupe)
+        f.addRow("防火墙日志", self.ed_watch_log)
+        f.addRow("解析进程名", self._wrap(self.tg_watch_pid))
+        f.addRow("跳过历史日志", self._wrap(self.tg_watch_skip))
+        f.addRow("允许触发自动封禁", self._wrap(self.tg_watch_autoban))
+        f.addRow("", self._wrap(b_start, b_stop, b_fwlog))
+        f.addRow("运行状态", self.lbl_watch_state)
+        f.addRow(hint)
+        return g
+
+    # 采集通道下拉：索引 -> 设置值
+    _METHOD_VALUES = ("table", "fwlog", "table,fwlog")
+
+    def _watch_methods_text(self) -> str:
+        i = max(0, min(self.cb_watch_method.currentIndex(), len(self._METHOD_VALUES) - 1))
+        return self._METHOD_VALUES[i]
+
+    def _set_watch_methods(self, text: str) -> None:
+        norm = ",".join(sorted(x.strip() for x in str(text or "").split(",") if x.strip()))
+        table = {"table": 0, "fwlog": 1, "fwlog,table": 2, "table,fwlog": 2}
+        self.cb_watch_method.setCurrentIndex(table.get(norm, 2))
+
+    def _watch_apply(self, start: bool) -> None:
+        """
+        立即启用 / 停止观察。
+
+        启用前先把界面上当前的参数写进设置 —— 否则用户改了端口直接点「启用」，
+        用的还是上一次保存的旧参数，行为很难理解。
+        """
+        if start:
+            self._watch_save_settings()
+        try:
+            from core import port_watcher
+
+            if start:
+                c = port_watcher.WatchConfig.from_settings()
+                if not c.ports:
+                    QMessageBox.warning(
+                        self, "无法启用", "请先填写至少一个合法的监控端口（1-65535）。"
+                    )
+                    return
+                port_watcher.get_watcher().update_config(c, restart=False)
+                port_watcher.start_watcher()
+            else:
+                port_watcher.stop_watcher()
+        except Exception as e:
+            log.exception("切换本机观察状态失败")
+            QMessageBox.warning(self, "操作失败", str(e))
+        self.watch_changed.emit()
+        self._refresh_watch_state()
+
+    def _enable_fwlog(self) -> None:
+        from core import win_fwlog
+
+        if not firewall.is_admin():
+            QMessageBox.warning(
+                self,
+                "需要管理员权限",
+                "开启防火墙日志记录需要管理员权限。\n\n请以管理员身份重新运行程序后再试。",
+            )
+            return
+        ok, err = win_fwlog.enable_logging()
+        if ok:
+            QMessageBox.information(
+                self,
+                "已开启",
+                "已开启 Windows 防火墙安全日志（记录被丢弃的连接）。\n\n"
+                f"日志路径：{win_fwlog.DEFAULT_LOG_PATH}\n\n"
+                "新的连接尝试会开始写入日志，「防火墙日志」通道即可看到数据。",
+            )
+        else:
+            QMessageBox.warning(self, "开启失败", err or "未知错误")
+        self._refresh_watch_state()
+
+    def _refresh_watch_state(self) -> None:
+        """刷新「运行状态」一行（也由主窗口统计定时器周期调用）"""
+        try:
+            from core import port_watcher, win_fwlog, win_net
+
+            w = port_watcher.get_watcher()
+            st = w.stats()
+            if st.get("running"):
+                ports = st.get("ports") or []
+                self.lbl_watch_state.setText(
+                    f"运行中 · 端口 {len(ports)} 个 · 已采集 {st.get('emitted', 0)} 条"
+                    f" · 去重 {st.get('deduped', 0)} 条"
+                )
+                self.lbl_watch_state.setStyleSheet(f"color:{C.success};font-size:12px;")
+            else:
+                bits = ["未启动"]
+                if not win_net.available():
+                    bits.append(f"（TCP 连接表不可用：{win_net.unavailable_reason()}）")
+                if not win_fwlog.logging_enabled():
+                    bits.append("（防火墙日志未开启）")
+                self.lbl_watch_state.setText(" ".join(bits))
+                self.lbl_watch_state.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        except Exception:
+            log.debug("刷新本机观察状态失败", exc_info=True)
+
+    def _watch_save_settings(self) -> None:
+        """把观察相关控件写进设置（保存设置 / 立即启用 共用）"""
+        cfg.set_many(
+            {
+                "watch_enabled": "1" if self.tg_watch.isChecked() else "0",
+                "watch_ports": self.ed_watch_ports.text().strip(),
+                "watch_methods": self._watch_methods_text(),
+                "watch_interval_sec": self.sp_watch_interval.value(),
+                "watch_dedupe_sec": self.sp_watch_dedupe.value(),
+                "watch_fwlog_path": self.ed_watch_log.text().strip(),
+                "watch_resolve_pid": "1" if self.tg_watch_pid.isChecked() else "0",
+                "watch_skip_history": "1" if self.tg_watch_skip.isChecked() else "0",
+                "watch_auto_ban": "1" if self.tg_watch_autoban.isChecked() else "0",
+            }
+        )
+
+    def _watch_load(self) -> None:
+        self.tg_watch.setChecked(cfg.get_bool("watch_enabled", False))
+        self.ed_watch_ports.setText(cfg.get("watch_ports", "3389,1433,3306,6379,18080"))
+        self._set_watch_methods(cfg.get("watch_methods", "table,fwlog"))
+        self.sp_watch_interval.setValue(max(1, cfg.get_int("watch_interval_sec", 5)))
+        self.sp_watch_dedupe.setValue(max(0, cfg.get_int("watch_dedupe_sec", 120)))
+        self.ed_watch_log.setText(cfg.get("watch_fwlog_path", ""))
+        self.tg_watch_pid.setChecked(cfg.get_bool("watch_resolve_pid", True))
+        self.tg_watch_skip.setChecked(cfg.get_bool("watch_skip_history", True))
+        self.tg_watch_autoban.setChecked(cfg.get_bool("watch_auto_ban", False))
 
     # ── 离线库在线同步 ──
     def _build_xdb_group(self) -> QGroupBox:
@@ -463,6 +659,10 @@ class SettingsPage(QWidget):
         self._refresh_server_state()
         self.refresh_xdb_state()
 
+        # 本机端口访问观察
+        self._watch_load()
+        self._refresh_watch_state()
+
     def save(self) -> None:
         # 局域网监听 + 空 Key 是危险组合：保存时强制作出选择
         lan = self.tg_lan.isChecked()
@@ -514,6 +714,19 @@ class SettingsPage(QWidget):
             get_locator().set_cache_size(self.sp_cache.value())
         except Exception:
             log.exception("应用归属地缓存条数失败")
+
+        # 本机端口访问观察：配置即时热更新到运行中的观察器
+        self._watch_save_settings()
+        try:
+            from core import port_watcher
+
+            if self.tg_watch.isChecked():
+                port_watcher.reload_from_settings(restart=True)
+            else:
+                port_watcher.stop_watcher()
+        except Exception:
+            log.exception("应用本机观察配置失败")
+        self._refresh_watch_state()
 
         # 日志保留天数改动即时生效（滚动 handler 每次滚动时才读 backupCount）
         try:

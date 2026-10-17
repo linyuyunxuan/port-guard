@@ -8,28 +8,7 @@ PortGuard — 主窗口
 """
 
 import threading
-
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import (
-    QApplication,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QMenu,
-    QMessageBox,
-    QPushButton,
-    QSpinBox,
-    QStackedWidget,
-    QStatusBar,
-    QSystemTrayIcon,
-    QVBoxLayout,
-    QWidget,
-)
+from typing import Optional
 
 from app import ban_service, server_ctl
 from app.xdb_service import get_service as get_xdb_service
@@ -46,10 +25,38 @@ from gui.mixins import EventPumpMixin, ServerCtlMixin
 from gui.page_bans import BansPage, ManualBanDialog
 from gui.page_events import EventsPage
 from gui.page_iplookup import IpLookupPage
+from gui.page_logs import LogsPage
 from gui.page_monitor import MonitorPage
 from gui.page_rules import RulesPage
 from gui.page_settings import SettingsPage
 from gui.theme import GLOBAL_STYLE, C
+from qtcompat import (
+    QAction,
+    QApplication,
+    QColor,
+    QDialog,
+    QDialogButtonBox,
+    QFont,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QIcon,
+    QLabel,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPainter,
+    QPixmap,
+    QPushButton,
+    QSpinBox,
+    QStackedWidget,
+    QStatusBar,
+    QSystemTrayIcon,
+    Qt,
+    QTimer,
+    QVBoxLayout,
+    QWidget,
+)
 
 log = get_logger(__name__)
 
@@ -59,13 +66,14 @@ NAV_ITEMS = [
     ("封禁管理", "封禁"),
     ("规则配置", "规则"),
     ("IP 查询", "查询"),
+    ("运行日志", "日志"),
     ("设置", "设置"),
 ]
 
-PAGE_MONITOR, PAGE_EVENTS, PAGE_BANS, PAGE_RULES, PAGE_LOOKUP, PAGE_SETTINGS = range(6)
+PAGE_MONITOR, PAGE_EVENTS, PAGE_BANS, PAGE_RULES, PAGE_LOOKUP, PAGE_LOGS, PAGE_SETTINGS = range(7)
 
 
-def _make_icon(color: str | None = None, size: int = 64) -> QIcon:
+def _make_icon(color: Optional[str] = None, size: int = 64) -> QIcon:
     """生成内置盾牌图标（避免依赖外部资源文件）"""
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
@@ -73,8 +81,7 @@ def _make_icon(color: str | None = None, size: int = 64) -> QIcon:
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setBrush(QColor(color or C.primary))
     p.setPen(Qt.PenStyle.NoPen)
-    from PySide6.QtCore import QPointF
-    from PySide6.QtGui import QPolygonF
+    from qtcompat import QPointF, QPolygonF
 
     w = size
     pts = [
@@ -165,6 +172,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self._load_geo_async()
         self._refresh_stats(force=True)
         self._maybe_start_server_on_launch()
+        self._maybe_start_watcher_on_launch()
 
         # 启动后延迟做一次离线库检查（后台线程，不阻塞界面）
         QTimer.singleShot(3000, lambda: self._maybe_sync_xdb(first_run=True))
@@ -204,6 +212,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self.page_bans = BansPage()
         self.page_rules = RulesPage()
         self.page_iplookup = IpLookupPage()
+        self.page_logs = LogsPage()
         self.page_settings = SettingsPage()
         for p in (
             self.page_monitor,
@@ -211,6 +220,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             self.page_bans,
             self.page_rules,
             self.page_iplookup,
+            self.page_logs,
             self.page_settings,
         ):
             self.stack.addWidget(p)
@@ -225,7 +235,10 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self.lbl_xdb.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
         self.lbl_server = QLabel("服务：未启动")
         self.lbl_server.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_watch = QLabel("本机观察：未启动")
+        self.lbl_watch.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
         sb.addWidget(self.lbl_status, 1)
+        sb.addPermanentWidget(self.lbl_watch)
         sb.addPermanentWidget(self.lbl_xdb)
         sb.addPermanentWidget(self.lbl_geo)
         sb.addPermanentWidget(self.lbl_server)
@@ -291,6 +304,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             self.page_iplookup._update_lib_info()
         elif idx == PAGE_SETTINGS:
             self.page_settings.refresh_xdb_state()
+        # PAGE_LOGS 无需特殊处理：QStackedWidget 切页时会触发 showEvent，
+        # 日志页在那里自己完成「铺底 + 重绘」
 
     # ═══════════════════════════════════════════════
     #  托盘
@@ -344,6 +359,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self.page_settings.xdb_sync_requested.connect(self._sync_xdb_now)
         self.page_settings.xdb_check_requested.connect(self._check_xdb_now)
         self.page_settings.logs_open_requested.connect(self._open_logs_dir)
+        self.page_settings.watch_changed.connect(self._on_watch_changed)
+        self.page_logs.logs_open_requested.connect(self._open_logs_dir)
         self.page_iplookup.xdb_sync_requested.connect(self._sync_xdb_now)
 
     def _goto_lookup(self, ip: str) -> None:
@@ -385,6 +402,55 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
 
     def _on_settings_saved(self) -> None:
         self._set_status("设置已保存（部分改动需重启服务）", C.success)
+        self._refresh_watch_label()
+
+    # ═══════════════════════════════════════════════
+    #  本机端口访问观察
+    # ═══════════════════════════════════════════════
+
+    def _maybe_start_watcher_on_launch(self) -> None:
+        """设置里打开了「启用本机观察」就随程序自动开始采集"""
+        try:
+            from core import port_watcher
+
+            if not cfg.get_bool("watch_enabled", False):
+                self._refresh_watch_label()
+                return
+            c = port_watcher.WatchConfig.from_settings()
+            if not c.ports:
+                log.warning("已开启本机观察但没有配置合法端口，跳过自动启动")
+                self._refresh_watch_label()
+                return
+            port_watcher.get_watcher().update_config(c, restart=False)
+            port_watcher.start_watcher()
+            self._set_status(
+                f"本机端口观察已启动，正在观察 {len(c.ports)} 个端口",
+                C.success,
+            )
+        except Exception:
+            log.exception("自动启动本机端口观察失败")
+        self._refresh_watch_label()
+
+    def _on_watch_changed(self) -> None:
+        self._refresh_watch_label()
+        self.page_settings._refresh_watch_state()
+
+    def _refresh_watch_label(self) -> None:
+        """状态栏上的「本机观察」指示（由统计定时器周期调用）"""
+        try:
+            from core import port_watcher
+
+            st = port_watcher.get_watcher().stats()
+            if st.get("running"):
+                self.lbl_watch.setText(
+                    f"本机观察：{len(st.get('ports') or [])} 端口 · 已采集 {st.get('emitted', 0)}"
+                )
+                self.lbl_watch.setStyleSheet(f"color:{C.success};font-size:12px;")
+            else:
+                self.lbl_watch.setText("本机观察：未启动")
+                self.lbl_watch.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        except Exception:
+            log.debug("刷新本机观察状态失败", exc_info=True)
 
     def _open_logs_dir(self) -> None:
         import os
@@ -568,6 +634,16 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
 
     def _shutdown(self) -> None:
         log.info("PortGuard 退出：正在停止后台服务与批量写入器")
+        try:
+            from core import port_watcher
+
+            port_watcher.stop_watcher()
+        except Exception:
+            log.exception("停止本机端口观察器失败")
+        try:
+            self.page_logs.shutdown()
+        except Exception:
+            log.exception("停止日志页定时器失败")
         try:
             server_ctl.stop()
         except Exception:

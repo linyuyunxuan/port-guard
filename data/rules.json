@@ -1,0 +1,119 @@
+{
+  "version": 2,
+  "description": "PortGuard 风险规则配置。enabled=是否启用，score=命中加分，level=风险等级，action=suggest_ban|alert。region_rules 是「区域访问白名单」规则，每条自选动作：allow(放行) | watch(仅关注) | downgrade(降级) | suggest_ban(判定风险)。target_ports 留空表示对所有端口生效。",
+  "rules": {
+    "blacklist": {
+      "enabled": true,
+      "score": 100,
+      "level": "critical",
+      "action": "suggest_ban"
+    },
+    "port_scan": {
+      "enabled": true,
+      "window_sec": 30,
+      "distinct_ports": 15,
+      "score": 80,
+      "level": "critical",
+      "action": "suggest_ban"
+    },
+    "sensitive_path_login": {
+      "enabled": true,
+      "window_sec": 60,
+      "threshold": 10,
+      "paths": ["/admin", "/login", "/wp-login", "/phpmyadmin", "/manager/html", "/.env"],
+      "status": [401, 403],
+      "score": 70,
+      "level": "high",
+      "action": "suggest_ban"
+    },
+    "foreign_sensitive_port": {
+      "enabled": true,
+      "require_not_china": true,
+      "ports": [22, 3389, 1433, 3306, 5432, 6379, 27017, 9200, 8080, 8443, 18080],
+      "score": 65,
+      "level": "high",
+      "action": "suggest_ban"
+    },
+    "rate_limit": {
+      "enabled": true,
+      "window_sec": 10,
+      "threshold": 50,
+      "score": 60,
+      "level": "high",
+      "action": "suggest_ban"
+    },
+    "scanner_ua": {
+      "enabled": true,
+      "patterns": ["nmap", "sqlmap", "masscan", "nikto", "dirbuster", "gobuster",
+                   "wpscan", "zap", "fuzz", "curl/", "python-requests", "hydra",
+                   "zgrab", "nuclei", "wget"],
+      "empty_ua": true,
+      "score": 45,
+      "level": "medium",
+      "action": "alert"
+    },
+    "error_storm": {
+      "enabled": true,
+      "window_sec": 60,
+      "min_samples": 20,
+      "error_ratio": 0.7,
+      "score": 40,
+      "level": "medium",
+      "action": "alert"
+    },
+    "suspicious_method": {
+      "enabled": true,
+      "methods": ["TRACE", "PUT", "DELETE", "CONNECT", "PATCH"],
+      "score": 30,
+      "level": "low",
+      "action": "alert"
+    },
+    "large_body": {
+      "enabled": true,
+      "min_bytes": 5242880,
+      "score": 25,
+      "level": "low",
+      "action": "alert"
+    }
+  },
+  "region_rules": [
+    {
+      "id": "r-demo-henan",
+      "name": "河南来源放行 18080",
+      "enabled": false,
+      "action": "allow",
+      "target_ports": [18080],
+      "score": 0,
+      "factor": 0.3,
+      "match": {
+        "provinces": ["河南省"],
+        "cities": [],
+        "countries": [],
+        "isp": [],
+        "cidrs": [],
+        "ip_keywords": [],
+        "not_china": false
+      },
+      "note": "示例：河南省来源的 IP 访问 18080 时完全豁免（不计风险、不建议封禁）。默认关闭，请按需启用或改写条件。"
+    },
+    {
+      "id": "r-demo-shanxi",
+      "name": "山西来源仅关注",
+      "enabled": false,
+      "action": "watch",
+      "target_ports": [18080],
+      "score": 0,
+      "factor": 0.3,
+      "match": {
+        "provinces": ["山西省"],
+        "cities": [],
+        "countries": [],
+        "isp": [],
+        "cidrs": [],
+        "ip_keywords": [],
+        "not_china": false
+      },
+      "note": "示例：山西来源不做放行、也不加分，只在事件与日志里打上「区域关注」标签，便于事后审计。"
+    }
+  ]
+}

@@ -30,8 +30,7 @@ def check(label: str, ok: bool, detail: str = "") -> None:
         _failures.append(label)
 
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from qtcompat import QApplication, QTimer
 
 app = QApplication(sys.argv)
 
@@ -42,7 +41,8 @@ from core import settings as cfg
 from core.config import APP_VERSION
 from core.database import count_today, query_access_logs, query_risk_events
 from core.geo_locator import get_locator
-from core.models import STATUS_PENDING
+from core.models import STATUS_PENDING, AccessRecord
+from core.rule_engine import get_engine
 
 app_main._init_backend()
 check("后端初始化（日志/数据库/设置缓存/批量写入器）", cfg.is_warmed())
@@ -140,7 +140,8 @@ check(
 )
 
 # ── 5. 主窗口与各页面 ──
-from gui.main_window import MainWindow
+from gui.main_window import PAGE_LOGS, PAGE_SETTINGS, MainWindow
+from gui.region_rules import new_rule_id
 
 win = MainWindow()
 check("MainWindow 构建", win is not None)
@@ -171,6 +172,26 @@ check(
 check("规则页卡片数", len(win.page_rules._cards) == 9, str(len(win.page_rules._cards)))
 win.page_rules.reload()
 
+# 区域访问白名单页签（本轮新增）：装填 / 回收 / ID 生成 / 引擎一致性
+tab_region = win.page_rules.tab_region
+check("区域规则页签已就绪", tab_region is not None)
+n_region = tab_region.table.rowCount()
+check("区域规则表已装填", n_region >= 1, f"行数={n_region}")
+collected = tab_region.collect()
+check(
+    "区域规则可回收",
+    len(collected) == n_region and all(r.get("id") for r in collected),
+    f"回收 {len(collected)} 条",
+)
+ids = {new_rule_id() for _ in range(5)}
+check("区域规则 ID 不重复", len(ids) == 5, ",".join(sorted(ids)))
+n_engine_region = len(get_engine().region_rules())
+check(
+    "引擎已装填区域规则",
+    n_engine_region == n_region,
+    f"引擎 {n_engine_region} 条 / 界面 {n_region} 条",
+)
+
 win._refresh_stats(force=True)
 check(
     "统计卡片刷新",
@@ -188,6 +209,60 @@ check(
     hasattr(win.page_settings, "btn_xdb_check") and hasattr(win.page_settings, "tg_xdb_auto"),
     f"自动同步={win.page_settings.tg_xdb_auto.isChecked()}",
 )
+# 设置页-本机端口观察组（本轮新增：自定义端口 + 双通道采集 + 区域规则配套）
+_watch_attrs = (
+    "tg_watch",
+    "ed_watch_ports",
+    "sp_watch_interval",
+    "sp_watch_dedupe",
+    "tg_watch_pid",
+    "tg_watch_skip",
+    "tg_watch_autoban",
+    "lbl_watch_state",
+)
+_watch_missing = [a for a in _watch_attrs if not hasattr(win.page_settings, a)]
+check(
+    "设置页-端口观察组已就绪",
+    not _watch_missing,
+    f"缺失={_watch_missing}"
+    if _watch_missing
+    else f"端口={win.page_settings.ed_watch_ports.text()!r} "
+    f"间隔={win.page_settings.sp_watch_interval.value()}s "
+    f"状态={win.page_settings.lbl_watch_state.text()!r}",
+)
+
+# 运行日志页（本轮新增）：切页 + 访问行在程序内渲染，不再只是「打开日志目录」
+from gui.page_logs import SOURCE_ACCESS, format_access_line
+
+win._switch_page(PAGE_LOGS)
+app.processEvents()
+check(
+    "运行日志页可切换",
+    win.page_logs is not None and win.page_logs.view is not None,
+    f"当前页={win.stack.currentIndex()}",
+)
+# 默认视图是「程序运行日志」，访问行走另一路；切过去才能看到访问行
+win.page_logs.source.setCurrentIndex(SOURCE_ACCESS)
+app.processEvents()
+rec_sample = AccessRecord(
+    ip="113.118.113.77",
+    remote_port=51000,
+    local_port=3000,
+    protocol="http",
+    method="GET",
+    path="/api/products",
+    status_code=200,
+)
+rec_sample.geo = geo_cn
+win.page_logs.append_access([rec_sample])
+app.processEvents()
+check(
+    "访问记录进日志页",
+    "113.118.113.77" in win.page_logs.view.document().toPlainText(),
+    format_access_line(rec_sample),
+)
+win._switch_page(PAGE_SETTINGS)
+app.processEvents()
 # 过滤与搜索（验证重建视图不丢原始数据）
 win.page_monitor.scope.setCurrentText("有风险")
 app.processEvents()

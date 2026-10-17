@@ -15,32 +15,39 @@ import contextlib
 import os
 import sys
 import traceback
+from typing import List
 
 # 保证以 `python main.py` 或打包 exe 方式运行时都能 import 到包内模块
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-# 单实例锁对象必须持有到进程结束：QSharedMemory 一旦被 GC 回收，
-# 共享内存段就被释放，"另一个实例" 的判断随之失效。
-_shm = None
-
 # 被替身流顶掉的 std 流名（窗口化运行时 stdout/stderr 为 None）
-_PATCHED_STREAMS: list[str] = []
+_PATCHED_STREAMS: List[str] = []
+
+
+def _importable(mod: str) -> bool:
+    try:
+        __import__(mod)
+        return True
+    except Exception:
+        return False
 
 
 def _check_deps(interactive: bool = True) -> bool:
     missing = []
     for mod, label in (
-        ("PySide6", "PySide6"),
         ("fastapi", "fastapi"),
         ("uvicorn", "uvicorn"),
         ("ip2region", "ip2region(py)"),
     ):
-        try:
-            __import__(mod)
-        except Exception:
+        if not _importable(mod):
             missing.append(label)
+
+    # Qt 绑定二选一：PySide6（Windows 10 1809+）/ PySide2（Windows 7 SP1+）。
+    # 具体选哪个由 qtcompat 决定，这里只确认至少有一个可用。
+    if not any(_importable(m) for m in ("PySide6", "PySide2")):
+        missing.append("PySide6 或 PySide2")
     if missing:
         msg = "缺少依赖：" + ", ".join(missing) + "\n\n请先执行：\npip install -r requirements.txt"
         if not interactive:
@@ -190,7 +197,7 @@ def _run_diag() -> int:
 
 
 def _qt_import_failed(exc: BaseException, detail: str) -> int:
-    """PySide6 导入失败时的兜底。
+    """Qt 绑定导入失败时的兜底。
 
     窗口化打包程序走到这里，默认是 PyInstaller 的英文崩溃框：「Failed to execute
     script 'main' due to unhandled exception」。现场看到这句话只能猜，所以改成
@@ -209,7 +216,7 @@ def _qt_import_failed(exc: BaseException, detail: str) -> int:
         from core.logger import get_logger, log_file
 
         log = get_logger("main")
-        log.error("PySide6 导入失败，界面无法启动：\n%s", detail)
+        log.error("Qt 绑定导入失败，界面无法启动：\n%s", detail)
         if report:
             log.error("依赖自诊断结果：\n%s", report)
         log.info("日志文件：%s", log_file())
@@ -220,15 +227,16 @@ def _qt_import_failed(exc: BaseException, detail: str) -> int:
     try:
         from core import diag
 
-        body = f"PySide6 导入失败，界面无法启动。\n\n{detail[:1500]}\n\n{report}"
+        body = f"Qt 绑定导入失败，界面无法启动。\n\n{detail[:1500]}\n\n{report}"
         path = diag.write_report(body)
         diag.show_message(
             "PortGuard 启动失败",
-            "无法加载界面组件（PySide6/Qt）。\n\n"
+            "无法加载界面组件（Qt）。\n\n"
             f"诊断结论：{summary}\n\n"
             "常见原因：\n"
             "  1) 目标电脑缺少 Microsoft Visual C++ 运行库\n"
-            "  2) 系统版本过低（需 Windows 10 1703 以上）\n"
+            "  2) 系统版本与 Qt 版本不匹配（Qt6 需 Windows 10 1809 以上；\n"
+            "     Windows 7 SP1 / Server 2008 R2 需使用 PySide2 版产物）\n"
             "  3) 拷贝不完整，缺 _internal 目录下的 DLL\n\n"
             + (f"完整报告：\n{path}" if path else "详情见日志"),
             error=True,
@@ -276,19 +284,19 @@ def main() -> int:
     if selfcheck:
         return _selfcheck()
 
-    # PySide6 导入必须单独兜住：这是「拷到别的电脑就跑不起来」的唯一现场。
+    # Qt 导入必须单独兜住：这是「拷到别的电脑就跑不起来」的唯一现场。
     # 走到这里说明 Python 与被打包的运行库都正常（否则连这个 try 都进不来），
     # 所以失败几乎必然出在 Qt 的依赖链上。
     try:
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QFont
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from qtcompat import QApplication, QFont, QMessageBox, Qt, exec_app
     except ImportError as exc:
         if selfcheck:
             print(traceback.format_exc(), file=sys.stderr)
             return 3
         return _qt_import_failed(exc, traceback.format_exc())
 
+    # 高分屏缩放：Qt5 需要显式打开，Qt6 默认已开（重复设置无害）。
+    # scoped enum 的容器层在 Qt5 上由 qtcompat 补齐，所以这里统一用 Qt6 写法。
     if hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
 
@@ -300,13 +308,13 @@ def main() -> int:
     app.setFont(QFont("Microsoft YaHei UI", 9))
     app.setStyle("Fusion")
 
-    # 单实例保护（避免重复占用上报端口）
+    # 单实例保护（避免重复占用上报端口）。
+    # 用 Windows 命名互斥体而不是 QSharedMemory —— PySide2（Qt5）没有导出
+    # QSharedMemory，而一套产物要同时支持 Qt5/Qt6，见 core/single_instance.py。
     try:
-        from PySide6.QtCore import QSharedMemory
+        from core.single_instance import acquire
 
-        global _shm
-        _shm = QSharedMemory("PortGuard_SingleInstance_v1")
-        if not _shm.create(1):
+        if not acquire():
             QMessageBox.information(
                 None, "PortGuard", "PortGuard 已经在运行中（请查看系统托盘图标）。"
             )
@@ -324,7 +332,7 @@ def main() -> int:
 
         win = MainWindow()
         win.show()
-        return app.exec()
+        return exec_app(app)
     except Exception:
         err = traceback.format_exc()
         try:

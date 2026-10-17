@@ -1,9 +1,36 @@
-# 桌面界面：PySide6 是 Qt 官方绑定，LGPL v3，允许闭源分发（见 NOTICE）。
-# 这里刻意只装 **PySide6-Essentials**：本项目仅用到 QtCore / QtGui / QtWidgets /
-# QtNetwork / QtSvg，全部属于 Essentials；完整版 PySide6 会额外拖入 Addons
-# （Qt3D / Charts / Multimedia / Quick3D / Sensors / TextToSpeech …）与 WebEngine /
-# Pdf，实测 site-packages/PySide6 从 656 MB 降到 215 MB（省 441 MB）。
-# 导入路径不变（仍是 PySide6.QtCore 等），所以代码零改动。
-PySide6-Essentials>=6.6.0
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
+# ═══════════════════════════════════════════════════════════
+#  PortGuard 依赖清单
+# ═══════════════════════════════════════════════════════════
+# 同一套源码支持两条运行栈，pip 按 Python 版本自动二选一。
+# 两代 Qt 的差异全部收口在 qtcompat.py，业务代码只 import qtcompat。
+#
+#   A. 交付栈 —— Python 3.8 + PySide2 / Qt 5.15
+#      打包给客户用的就是这条，覆盖 Windows 7 SP1 / Server 2008 R2 /
+#      Win8.1 / Win10 / Win11。理由：
+#        · Python 3.8 是最后一个支持 Windows 7 SP1 的 CPython（3.9 起要求 Win8.1）；
+#        · Qt 6 最低要求 Windows 10 1809 —— Qt6Core.dll 硬导入 icuuc.dll，
+#          而 icuuc.dll 是 Windows 10 1703 才加进系统的，所以交付栈只能落在 Qt 5.15。
+#
+#   B. 开发栈 —— Python 3.9+ + PySide6 / Qt 6
+#      在较新的开发机上跑测试与静态检查，省去为了改一行代码去维护老环境。
+#
+# 注意：新增依赖时两条栈都要能装上，否则会在打包交付栈时才暴露。
+# 验证方式见 README「运行环境要求」。
+
+# ── 桌面界面（二选一，由 Python 版本决定）──
+# 交付栈：LGPL v3，允许闭源分发（见 NOTICE）。
+# 精确锁版本而不是 >=：PySide2 已停止更新，5.15.2.1 是终版，
+# 一旦上游改动或被删包，交付栈就不可复现了。
+PySide2==5.15.2.1; python_version < "3.9"
+# 开发栈：刻意只装 Essentials —— 本项目只用到 QtCore / QtGui / QtWidgets / QtSvg，
+# 完整版会额外拖入 Addons（Qt3D/Charts/Multimedia/Quick3D…）与 WebEngine/Pdf，
+# 实测 site-packages/PySide6 从 215 MB 涨到 656 MB。导入路径不变，代码零改动。
+PySide6-Essentials>=6.6; python_version >= "3.9"
+
+# ── 业务系统上报接收服务 ──
+fastapi>=0.110
+uvicorn>=0.27
+# [standard] 附带 httptools / uvloop / watchfiles 等加速件。
+# 它们在 3.8 上已经不太好找轮子，所以只给开发栈装；纯 Python 的 h11 实现
+# 对本项目的上报量完全够用。
+uvicorn[standard]>=0.29; python_version >= "3.9"

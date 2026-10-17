@@ -4,30 +4,6 @@ import datetime
 from collections import deque
 from typing import List, Optional
 
-from PySide6.QtCore import (
-    QAbstractTableModel,
-    QModelIndex,
-    QPersistentModelIndex,
-    Qt,
-    Signal,
-)
-from PySide6.QtGui import QAction, QBrush, QColor, QFont
-from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QComboBox,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QMenu,
-    QMessageBox,
-    QPushButton,
-    QSpinBox,
-    QTableView,
-    QVBoxLayout,
-    QWidget,
-)
-
 from core import settings as cfg
 from core.config import (
     LEVEL_CRITICAL,
@@ -37,6 +13,30 @@ from core.config import (
 from core.models import AccessRecord
 from gui.theme import LEVEL_BG, LEVEL_COLORS, C
 from gui.widgets import StatCard, ToggleSwitch
+from qtcompat import (
+    QAbstractItemView,
+    QAbstractTableModel,
+    QAction,
+    QBrush,
+    QColor,
+    QComboBox,
+    QFont,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QModelIndex,
+    QPersistentModelIndex,
+    QPushButton,
+    QSpinBox,
+    Qt,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
+    Signal,
+)
 
 HEADERS = [
     "时间",
@@ -229,7 +229,9 @@ class AccessTableModel(QAbstractTableModel):
         self.endResetModel()
 
     # ── 过滤 ──
-    def set_filters(self, keyword: str | None = None, scope: str | None = None, port=None) -> None:
+    def set_filters(
+        self, keyword: Optional[str] = None, scope: Optional[str] = None, port=None
+    ) -> None:
         if keyword is not None:
             self._filters["keyword"] = keyword.lower().strip()
         if scope is not None:
@@ -444,7 +446,7 @@ class MonitorPage(QWidget):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _copy(self, text: str) -> None:
-        from PySide6.QtWidgets import QApplication
+        from qtcompat import QApplication
 
         QApplication.clipboard().setText(text or "")
 

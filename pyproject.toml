@@ -13,15 +13,20 @@
 name = "portguard"
 version = "1.1.0"
 description = "Windows 端口访问防御工具：HTTP 上报 → 离线 IP 归属地 → 规则打分 → 防火墙封禁"
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 readme = "README.md"
 
 # ── 依赖 ──
 # 运行时依赖的权威清单在 requirements.txt（PyInstaller 打包脚本也读它）。
 dependencies = [
-    # 只要 Essentials：Addons / WebEngine / Pdf 本项目一个都用不到，
-    # 装上会让 site-packages/PySide6 从 215 MB 涨到 656 MB。见 requirements.txt。
-    "PySide6-Essentials>=6.6",
+    # 两条运行栈由 Python 版本自动二选一，说明见 requirements.txt：
+    #   交付栈（打包给客户，覆盖 Win7 SP1 / Server 2008 R2 起）用 PySide2 + Qt 5.15；
+    #   开发栈（新机器上跑测试与静态检查）用 PySide6。
+    # PySide2 已停更，5.15.2.1 是终版，必须精确锁定。
+    "PySide2==5.15.2.1; python_version < '3.9'",
+    # 开发栈只要 Essentials：Addons / WebEngine / Pdf 一个都用不到，
+    # 装上会让 site-packages/PySide6 从 215 MB 涨到 656 MB。
+    "PySide6-Essentials>=6.6; python_version >= '3.9'",
     "fastapi>=0.110",
     "uvicorn>=0.27",
 ]
@@ -42,7 +47,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py38"
 # ip2region/ 是上游 vendored 代码（见 NOTICE），不做任何风格要求
 extend-exclude = ["ip2region", "build", "dist", "assets", "data"]
 
@@ -122,7 +127,11 @@ known-first-party = ["core", "app", "gui"]
 # ═══════════════════════════════════════════════════════════
 
 [tool.mypy]
-python_version = "3.11"
+# mypy 已不再支持 3.8 目标（最低只能到 3.10），所以这里取它的下限：
+# 至少还能挡住 3.11+ 才有的书写方式。
+# 3.8/3.9 的差异由 tests/test_py38_compat.py 用 AST 逐文件扫描兜底
+# （PEP 604 联合类型、内置泛型注解、3.9+ 新语法与标准库 API）。
+python_version = "3.10"
 # 注意：mypy 的 exclude 是正则，Windows 上路径会带反斜杠，
 # 故用「斜杠两侧可选」的写法，确保 vendored 的 ip2region 一定被排除。
 exclude = ["(^|[/\\\\])ip2region([/\\\\]|$)", "(^|[/\\\\])(build|dist)([/\\\\]|$)"]

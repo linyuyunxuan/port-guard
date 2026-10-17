@@ -73,4 +73,50 @@ RULE_PARAMS: Dict[str, List[Dict[str, Any]]] = {
 
 
 def rule_label(rule_id: str) -> str:
+    # 区域规则的 id 形如 region_allow:r-3f2a，这里解析成「区域放行：河南办公网」
+    if rule_id.startswith(REGION_PREFIX) and ":" in rule_id:
+        act, _, rid = rule_id[len(REGION_PREFIX) :].partition(":")
+        return f"{REGION_ACTION_LABEL.get(act, '区域规则')}：{region_name(rid)}"
     return RULE_LABELS.get(rule_id, rule_id)
+
+
+# ═══════════════════════════════════════════════════════════
+#  区域访问白名单规则（用户可手工增删）
+# ═══════════════════════════════════════════════════════════
+
+# 每条规则自己挑动作 —— 这是用户明确要求的能力：
+#   「河南区、山西区的 IP 可访问某端口」就是一条 action=allow 的区域规则
+REGION_ACTIONS = [
+    ("allow", "放行（完全豁免，不计风险、不建议封禁）"),
+    ("watch", "仅关注（不影响评分，只打标签留痕）"),
+    ("downgrade", "降级（把已累计的风险分打到很低，仍留记录）"),
+    ("suggest_ban", "判定风险（按分值加分，可生成封禁建议）"),
+]
+REGION_ACTION_LABEL = {k: v.split("（", 1)[0] for k, v in REGION_ACTIONS}
+REGION_ACTION_KEYS = [k for k, _ in REGION_ACTIONS]
+
+REGION_PREFIX = "region_"
+
+# 规则 id -> 用户起的名字。由 RuleEngine 每次编译配置后调用 register_region_rules 刷新，
+# 这样 models.AccessRecord.matched_str 里的 rule_label() 才能翻译出中文名，
+# 而不必让 models 反向依赖 rule_engine（会成环）。
+_REGION_NAMES: Dict[str, str] = {}
+
+
+def register_region_rules(rules) -> None:
+    _REGION_NAMES.clear()
+    for r in rules or []:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or "").strip()
+        if rid:
+            _REGION_NAMES[rid] = str(r.get("name") or rid).strip() or rid
+
+
+def region_name(rule_id: str) -> str:
+    return _REGION_NAMES.get(rule_id, rule_id)
+
+
+def region_rule_key(action: str, rule_id: str) -> str:
+    """命中标记：region_<action>:<id>"""
+    return f"{REGION_PREFIX}{action}:{rule_id}"

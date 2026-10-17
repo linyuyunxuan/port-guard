@@ -38,16 +38,14 @@ from core.config import (
 from core.database import (
     find_active_ban_by_ip,
     init_db,
-    insert_ban,
-    update_ban,
 )
 from core.db_writer import get_writer
-from core.event_bus import bus
 from core.geo_locator import get_locator
 from core.logger import get_logger, log_file, route_uvicorn_logs
-from core.models import STATUS_ACTIVE, AccessRecord, BanRecord, GeoInfo, RiskResult
+from core.models import AccessRecord, GeoInfo, RiskResult
+from core.pipeline import process_record, result_payload
 from core.ratelimit import TokenBucket
-from core.rule_engine import get_engine, is_never_ban
+from core.rule_engine import get_engine
 from core.validators import InvalidIP, normalize_ip
 
 log = get_logger(__name__)
@@ -204,108 +202,22 @@ def _process(body: Dict[str, Any], fallback_ip: str) -> Dict[str, Any]:
 
     rec = AccessRecord.from_payload(body, ip)
 
-    # 1. 归属地（整库入内存，微秒级）
-    geo = get_locator().lookup(ip)
-    rec.geo = geo
-
-    # 2. 规则评估
-    engine = get_engine()
-    result = engine.evaluate(rec, geo)
-    rec.risk_score = result.score
-    rec.risk_level = result.level
-    rec.matched_rules = result.matched_rules
-    rec.suggest_ban = result.suggest_ban
-
-    # 3. 投递落库（非阻塞：入队即返回，由单写线程批量提交）
-    writer = get_writer()
-    if result.is_risk:
-        # 风险条目：访问日志 + 风险事件在同一事务内写入并关联 access_id
-        writer.submit_risk(rec, result)
-    else:
-        writer.submit_access(rec)
-
-    # 4. 投递给 UI（实时监控）
-    bus.emit_access(rec)
-
-    # 5. 风险事件后续处理
-    if result.is_risk:
-        bus.emit_risk({"record": rec, "result": result})
-
-        bus.emit_alert(
-            {
-                "ip": ip,
-                "level": result.level,
-                "score": result.score,
-                "reason": result.reason or "命中风险规则",
-                "geo": geo.display,
-                "local_port": rec.local_port,
-            }
-        )
-
-        # 自动封禁模式（默认关闭）
-        if (
-            result.suggest_ban
-            and cfg.get_bool("auto_mode", False)
-            and result.score >= cfg.get_int("auto_ban_threshold", 90)
-        ):
-            _auto_ban(rec, result, geo)
-
-    return {
-        "id": None,
-        "ip": ip,
-        "geo": geo.display,
-        "risk_score": result.score,
-        "risk_level": result.level,
-        "matched_rules": result.matched_rules,
-        "suggest_ban": result.suggest_ban,
-    }
+    # 归属地 / 规则评估 / 落库 / UI 投递 / 告警 / 自动封禁 全部收在 core.pipeline，
+    # 与「本机端口访问采集」共用同一条链路 —— 两条来源的结论必须一致。
+    result = process_record(rec)
+    return result_payload(rec, result)
 
 
-def _auto_ban(rec: AccessRecord, result: RiskResult, geo: GeoInfo) -> None:
-    """自动模式：无需人工确认直接封禁（默认关闭）"""
-    from core.firewall import block_ip
+def _auto_ban(rec: AccessRecord, result: RiskResult, geo: Optional[GeoInfo] = None) -> None:
+    """
+    自动封禁。
 
-    if is_never_ban(rec.ip):
-        return
-    duration = cfg.get_int("default_ban_duration_sec", 3600)
-    expire = int(time.time() * 1000) + duration * 1000
-    rec_ban = BanRecord(
-        ip=rec.ip,
-        reason=f"[自动] {result.reason}",
-        risk_score=result.score,
-        source="auto",
-        status="pending",
-        duration_sec=duration,
-        expire_at=expire,
-    )
-    try:
-        ban_id = insert_ban(rec_ban)
-    except Exception:
-        log.exception("自动封禁：写入 pending 记录失败 ip=%s", rec.ip)
-        ban_id = None
-    ok, name, err = block_ip(rec.ip, duration, note=result.reason)
-    if ban_id:
-        try:
-            update_ban(
-                ban_id, status=(STATUS_ACTIVE if ok else "failed"), rule_name=name, error_msg=err
-            )
-        except Exception:
-            log.exception("自动封禁：回填记录失败 ban_id=%s", ban_id)
-    if ok:
-        log.warning("自动封禁生效 ip=%s rule=%s score=%d", rec.ip, name, result.score)
-    else:
-        log.error("自动封禁失败 ip=%s err=%s", rec.ip, err)
-    bus.emit_ban(
-        {
-            "ip": rec.ip,
-            "ok": ok,
-            "rule_name": name,
-            "error": err,
-            "source": "auto",
-            "ban_id": ban_id,
-            "auto": True,
-        }
-    )
+    实现已下沉到 core.pipeline.auto_ban_record（与「本机端口采集」共用），
+    这里保留同名薄封装是因为 selftest / 历史调用点仍在用它。
+    """
+    from core.pipeline import auto_ban_record
+
+    auto_ban_record(rec, result)
 
 
 # ═══════════════════════════════════════════════════════════

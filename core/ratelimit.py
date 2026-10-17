@@ -8,7 +8,7 @@ PortGuard — 轻量令牌桶限流
 
 import threading
 import time
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 from core.logger import get_logger
 
@@ -29,7 +29,7 @@ class TokenBucket:
         self._lock = threading.Lock()
         self.rejected = 0
 
-    def configure(self, rate: float | None = None, burst: int | None = None) -> None:
+    def configure(self, rate: Optional[float] = None, burst: Optional[int] = None) -> None:
         with self._lock:
             if rate is not None:
                 self._rate = max(0.1, float(rate))
@@ -75,7 +75,7 @@ class TokenBucket:
         with self._lock:
             self._buckets.clear()
 
-    def stats(self) -> dict:
+    def stats(self) -> Dict:
         with self._lock:
             return {
                 "keys": len(self._buckets),

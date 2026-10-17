@@ -241,6 +241,19 @@ DEFAULT_SETTINGS = {
     "monitor_buffer_size": "5000",  # 实时监控环形缓冲行数
     "db_batch_size": "200",  # 批量写入攒批条数
     "db_flush_ms": "200",  # 批量写入最大延迟（毫秒）
+    # ── 本机端口访问观察（双通道采集）──
+    "watch_enabled": "0",  # 1=启动程序时自动开启本机端口观察
+    "watch_ports": "3389,1433,3306,6379,18080",  # 要观察的本机端口列表
+    "watch_methods": "table,fwlog",  # 采集通道：table=TCP连接表 fwlog=防火墙日志
+    "watch_interval_sec": "5",  # 采样间隔（秒）
+    "watch_dedupe_sec": "120",  # 同一来源在多少秒内只上报一次
+    "watch_fwlog_path": "",  # 防火墙日志路径，留空用系统默认位置
+    "watch_resolve_pid": "1",  # 1=尝试解析监听进程名（需要权限）
+    "watch_skip_history": "1",  # 1=启动时跳过日志里的历史内容，避免洪水
+    "watch_auto_ban": "0",  # 1=允许本机采集的数据触发自动封禁（默认关闭）
+    # ── 程序内日志显示页 ──
+    "log_view_max_lines": "2000",  # 日志页保留的最大行数
+    "log_view_tail_ms": "1000",  # 日志页刷新间隔（毫秒）
     # 离线库在线同步
     "xdb_auto_sync": "1",  # 1=按间隔自动检查更新
     "xdb_sync_interval_hours": "24",  # 自动检查间隔（小时）

@@ -13,9 +13,7 @@ PortGuard — 主窗口的行为 Mixin
 """
 
 import contextlib
-from typing import TYPE_CHECKING
-
-from PySide6.QtCore import QTimer
+from typing import TYPE_CHECKING, Dict, Optional
 
 from app import ban_service, maintenance, server_ctl
 from app.xdb_service import get_service as get_xdb_service
@@ -26,18 +24,18 @@ from core.database import count_active_bans, count_risk_unhandled, count_today
 from core.event_bus import bus
 from core.logger import get_logger
 from gui.theme import C
+from qtcompat import QTimer
 
 if TYPE_CHECKING:
-    from PySide6.QtGui import QAction
-    from PySide6.QtWidgets import QLabel, QMainWindow, QStackedWidget
-
     from core.alerts import Alerter
     from core.geo_locator import GeoLocator
     from gui.page_bans import BansPage
     from gui.page_events import EventsPage
     from gui.page_iplookup import IpLookupPage
+    from gui.page_logs import LogsPage
     from gui.page_monitor import MonitorPage
     from gui.page_settings import SettingsPage
+    from qtcompat import QAction, QLabel, QMainWindow, QStackedWidget
 
     # 这两个 Mixin 运行时通过 MainWindow 组合成 QMainWindow 的子类，
     # 但单看 Mixin 自身，self 只是个 object —— 类型检查器因此既认不出
@@ -72,11 +70,13 @@ class EventPumpMixin(_HostBase):
     page_bans: "BansPage"
     page_settings: "SettingsPage"
     page_iplookup: "IpLookupPage"
+    page_logs: "LogsPage"
     alerter: "Alerter"
     lbl_status: "QLabel"
     lbl_ban_count: "QLabel"
     lbl_geo: "QLabel"
     lbl_xdb: "QLabel | None"
+    lbl_watch: "QLabel"
     _last_stats: float
 
     # 这两个方法由 MainWindow 实现（MainWindow 自身的定义优先于 Mixin），
@@ -86,6 +86,9 @@ class EventPumpMixin(_HostBase):
         raise NotImplementedError
 
     def _locator(self) -> "GeoLocator":
+        raise NotImplementedError
+
+    def _refresh_watch_label(self) -> None:
         raise NotImplementedError
 
     def _setup_timers(self) -> None:
@@ -123,6 +126,8 @@ class EventPumpMixin(_HostBase):
         records = bus.drain_access(500)
         if records:
             self.page_monitor.append_records(records)
+            # 同一批记录同时喂给「运行日志」页的端口访问日志流
+            self.page_logs.append_access(records)
 
         # 2) 风险事件
         risks = bus.drain_risk(200)
@@ -159,7 +164,7 @@ class EventPumpMixin(_HostBase):
         for ev in bus.drain_xdb(100):
             self._on_xdb_event(ev)
 
-    def _on_xdb_event(self, ev: dict) -> None:
+    def _on_xdb_event(self, ev: Dict) -> None:
         """离线库同步进度 → 状态栏 + 设置页进度条"""
         stage = ev.get("stage", "")
         msg = ev.get("message", "")
@@ -220,7 +225,13 @@ class EventPumpMixin(_HostBase):
             self.lbl_status.setText(f"有 {unhandled} 条风险事件待处理")
             self.lbl_status.setStyleSheet(f"color:{C.warning};font-size:12px;")
 
-    def _set_status(self, text: str, color: str | None = None) -> None:
+        # 状态栏上的本机观察指示 + 设置页的运行状态行
+        with contextlib.suppress(Exception):
+            self._refresh_watch_label()
+        with contextlib.suppress(Exception):
+            self.page_settings._refresh_watch_state()
+
+    def _set_status(self, text: str, color: Optional[str] = None) -> None:
         self.lbl_status.setText(text)
         self.lbl_status.setStyleSheet(f"color:{color or C.text_secondary};font-size:12px;")
 
@@ -284,7 +295,7 @@ class ServerCtlMixin(_HostBase):
     a_server: "QAction"
 
     # 由 EventPumpMixin 实现（MRO 中排在前面），在此声明仅供类型检查
-    def _set_status(self, text: str, color: str | None = None) -> None:
+    def _set_status(self, text: str, color: Optional[str] = None) -> None:
         raise NotImplementedError
 
     def _refresh_stats(self, force: bool = False) -> None:
@@ -300,7 +311,7 @@ class ServerCtlMixin(_HostBase):
         ok, msg = server_ctl.toggle(start)
         if not ok:
             self._set_status(msg.splitlines()[0], C.danger)
-            from PySide6.QtWidgets import QMessageBox
+            from qtcompat import QMessageBox
 
             QMessageBox.warning(self, "启动失败", msg)
         else:
@@ -308,7 +319,7 @@ class ServerCtlMixin(_HostBase):
             first = msg.splitlines()[0]
             self._set_status(first, color)
             if report_server.get_generated_key():
-                from PySide6.QtWidgets import QMessageBox
+                from qtcompat import QMessageBox
 
                 QMessageBox.information(
                     self,

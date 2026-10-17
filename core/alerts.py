@@ -67,7 +67,7 @@ class Alerter:
 
         if self.tray is not None:
             try:
-                from PySide6.QtWidgets import QSystemTrayIcon
+                from qtcompat import QSystemTrayIcon
 
                 icon = (
                     QSystemTrayIcon.MessageIcon.Critical
@@ -92,7 +92,7 @@ class Alerter:
         if self.parent is None:
             return
         try:
-            from PySide6.QtWidgets import QMessageBox
+            from qtcompat import QMessageBox
 
             QMessageBox.warning(self.parent, title, body)
         except Exception:

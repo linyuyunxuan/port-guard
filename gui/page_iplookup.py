@@ -3,10 +3,13 @@
 import csv
 from typing import List
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (
+from core.geo_locator import get_locator
+from core.logger import get_logger
+from core.models import ms_to_str
+from gui.theme import C
+from qtcompat import (
     QAbstractItemView,
+    QColor,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -17,16 +20,13 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    Qt,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    Signal,
 )
-
-from core.geo_locator import get_locator
-from core.logger import get_logger
-from core.models import ms_to_str
-from gui.theme import C
 
 log = get_logger(__name__)
 

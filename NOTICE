@@ -34,14 +34,24 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 
 ## 3. 运行时依赖（通过 pip 安装，未内置）
 
+同一套源码有**两条运行栈**，pip 按 Python 版本二选一（见 `requirements.txt`）。
+两条栈的 Qt 绑定都是 LGPL v3，闭源分发的义务完全一致。
+
 | 包 | 用途 | 许可 |
 | --- | --- | --- |
-| PySide6-Essentials | 桌面界面（QtCore / QtGui / QtWidgets 等） | **LGPL v3**（另有 Qt 商业许可可选） |
+| PySide6-Essentials | 桌面界面（Python 3.9+，开发栈 / Win10 1809+ 交付） | **LGPL v3**（另有 Qt 商业许可可选） |
 | shiboken6 | PySide6 的 C++/Python 绑定层 | LGPL v3 |
+| PySide2 | 桌面界面（Python 3.8，交付到 Win7 SP1 / Server 2008 R2 的线路） | **LGPL v3**（另有 Qt 商业许可可选） |
+| shiboken2 | PySide2 的 C++/Python 绑定层 | LGPL v3 |
 | FastAPI | 上报接收服务 | MIT |
 | Uvicorn | ASGI 服务器 | BSD-3-Clause |
 | Starlette（FastAPI 依赖） | ASGI 框架 | BSD-3-Clause |
 | Pydantic（FastAPI 依赖） | 数据校验 | MIT |
+
+> **为什么只有 PySide2 这一条能下到 Win7**：`PySide6` 所用的 `Qt6Core.dll` 把
+> `icuuc.dll` 列为硬导入，而该组件是 Windows 10 1703 才加入系统的；`PySide2` 的
+> `Qt5Core.dll` 不导入它，只依赖 VC++ 运行库。这是实测 PE 导入表得出的结论，
+> 不是版本传闻。两条栈的判定由 `qtcompat.py` 在导入期自动完成，业务代码零改动。
 
 > **为什么只装 PySide6-Essentials**：PySide6 拆成 Essentials / Addons / WebEngine / Pdf
 > 几个发行包。本项目界面只用到 QtCore / QtGui / QtWidgets / QtNetwork / QtSvg，**全部在
@@ -49,16 +59,17 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 > Sensors 等一批从没用过的模块，site-packages/PySide6 会从约 215 MB 涨到约 656 MB。
 > 因此依赖里写 `PySide6-Essentials`，**导入路径不变**（仍是 `PySide6.*`）。
 > 这不影响许可判断：Essentials 同样是 LGPL v3，下面的义务一字不变。
+> （PySide2 没有这种拆分，5.15.2.1 是官方终版，故精确锁版本以保证可复现。）
 
-> **为什么用 PySide6 而不是 PyQt6**：两者 API 基本同源，但许可差异决定了能怎么分发。
+> **为什么用 PySide / 不用 PyQt**：两者 API 基本同源，但许可差异决定了能怎么分发。
 > PyQt6 是 GPL v3 / 商业双许可 —— 闭源分发会直接触发 GPL 的传染性，必须购买商业许可。
-> PySide6 是 Qt 官方绑定，采用 **LGPL v3**，**允许闭源分发**，只要满足以下几项义务：
+> PySide6 / PySide2 是 Qt 官方绑定，采用 **LGPL v3**，**允许闭源分发**，只要满足以下几项义务：
 >
 > 1. 以**动态链接**方式使用（即按发行版原样 pip 安装 / 原样打包 Qt 的 DLL，不做静态链接）；
-> 2. 允许最终用户**替换**其中的 PySide6 / Qt 部分（例如随产品提供原版 wheel，
+> 2. 允许最终用户**替换**其中的 PySide / Qt 部分（例如随产品提供原版 wheel，
 >    或说明如何重新安装），使替换后的版本仍能与你的程序一起工作；
-> 3. 随产品附上 LGPL v3 全文与版权声明，并说明使用了 PySide6 / Qt；
-> 4. 若修改了 Qt / PySide6 源码本身（本项目未做任何修改），需公开这些修改。
+> 3. 随产品附上 LGPL v3 全文与版权声明，并说明使用了 PySide / Qt；
+> 4. 若修改了 Qt / PySide 源码本身（本项目未做任何修改），需公开这些修改。
 >
 > 本项目仅以动态链接方式使用，未修改 Qt 源码，也不对其做静态链接，
 > 因此上述 1、4 项自动满足；发布闭源产品时请补齐第 2、3 项材料。

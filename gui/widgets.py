@@ -1,27 +1,29 @@
 """PortGuard — 可复用控件"""
 
-from PySide6.QtCore import (
+from typing import Optional
+
+from gui.theme import LEVEL_COLORS, C
+from qtcompat import (
     Property,
+    QBrush,
+    QColor,
     QEasingCurve,
-    QPropertyAnimation,
-    QRect,
-    QSize,
-    Qt,
-    Signal,
-)
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter
-from PySide6.QtWidgets import (
+    QFont,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPainter,
+    QPropertyAnimation,
     QPushButton,
+    QRect,
+    QSize,
     QSizePolicy,
+    Qt,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    Signal,
 )
-
-from gui.theme import LEVEL_COLORS, C
 
 
 class ToggleSwitch(QWidget):
@@ -97,7 +99,7 @@ class ToggleSwitch(QWidget):
 class StatCard(QFrame):
     """统计卡片：大数字 + 说明文字"""
 
-    def __init__(self, label: str, value: str = "0", color: str | None = None, parent=None):
+    def __init__(self, label: str, value: str = "0", color: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.setObjectName("stat_card")
         self.setStyleSheet(
@@ -131,12 +133,12 @@ class StatCard(QFrame):
 class RiskBadge(QLabel):
     """风险等级徽章"""
 
-    def __init__(self, level: str = "normal", text: str | None = None, parent=None):
+    def __init__(self, level: str = "normal", text: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.set_level(level, text)
 
-    def set_level(self, level: str, text: str | None = None) -> None:
+    def set_level(self, level: str, text: Optional[str] = None) -> None:
         from core.config import LEVEL_LABEL
 
         color = LEVEL_COLORS.get(level, C.text_secondary)
@@ -151,7 +153,7 @@ class RiskBadge(QLabel):
 class Badge(QLabel):
     """通用小标签"""
 
-    def __init__(self, text: str = "", color: str | None = None, parent=None):
+    def __init__(self, text: str = "", color: Optional[str] = None, parent=None):
         super().__init__(text, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.set_color(color or C.text_secondary)
@@ -169,7 +171,7 @@ class WarnBanner(QFrame):
     action_clicked = Signal()
 
     def __init__(
-        self, text: str = "", action_text: str = "", color: str | None = None, parent=None
+        self, text: str = "", action_text: str = "", color: Optional[str] = None, parent=None
     ):
         super().__init__(parent)
         color = color or C.warning
@@ -218,7 +220,7 @@ class EmptyHint(QLabel):
 
 
 def make_item(
-    text: str, color: str | None = None, align=None, bold: bool = False
+    text: str, color: Optional[str] = None, align=None, bold: bool = False
 ) -> QTableWidgetItem:
     it = QTableWidgetItem(str(text if text is not None else ""))
     if color:

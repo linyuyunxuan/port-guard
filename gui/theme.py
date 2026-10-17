@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # 仅用于类型标注，运行时不需要 Qt
-    from PySide6.QtWidgets import QFrame, QLabel
+    from qtcompat import QFrame, QLabel
 
 
 @dataclass(frozen=True)
@@ -457,7 +457,7 @@ QProgressBar::chunk {{ background-color: {C.primary}; border-radius: 5px; }}
 
 def card_widget(child=None) -> "QFrame":
     """把内容包装成卡片"""
-    from PySide6.QtWidgets import QFrame, QVBoxLayout
+    from qtcompat import QFrame, QVBoxLayout
 
     card = QFrame()
     card.setObjectName("stat_card")
@@ -474,8 +474,7 @@ def card_widget(child=None) -> "QFrame":
 
 
 def section_header(text: str) -> "QLabel":
-    from PySide6.QtGui import QFont
-    from PySide6.QtWidgets import QLabel
+    from qtcompat import QFont, QLabel
 
     lbl = QLabel(text)
     f = QFont()

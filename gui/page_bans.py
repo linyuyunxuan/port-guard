@@ -2,28 +2,6 @@
 
 import datetime
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QComboBox,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPushButton,
-    QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
-
 from app import ban_service
 from core import firewall
 from core.config import LEVEL_CRITICAL, LEVEL_HIGH, LEVEL_LABEL
@@ -38,6 +16,28 @@ from core.models import STATUS_ACTIVE, STATUS_FAILED, STATUS_PENDING, STATUS_UNB
 from core.validators import InvalidIP, normalize_ip
 from gui.theme import C, small_button_style
 from gui.widgets import WarnBanner
+from qtcompat import (
+    QAbstractItemView,
+    QColor,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    Qt,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    Signal,
+)
 
 log = get_logger(__name__)
 
@@ -461,7 +461,7 @@ class BansPage(QWidget):
         if not ok:
             QMessageBox.warning(self, "提权失败", f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
         else:
-            from PySide6.QtWidgets import QApplication
+            from qtcompat import QApplication
 
             app = QApplication.instance()
             if app is not None:

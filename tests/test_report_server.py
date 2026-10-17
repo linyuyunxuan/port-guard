@@ -314,21 +314,23 @@ def test_rules_reload_endpoint(client):
 
 
 def test_process_failure_returns_500_without_crashing(client, monkeypatch):
-    import core.report_server as rs
+    from core import pipeline
 
     def boom(*a, **k):
         raise RuntimeError("模拟内部错误")
 
-    monkeypatch.setattr(rs, "get_locator", boom)
+    # 归属地查询在 core.pipeline 里（上报与「本机采集」共用同一条链路），
+    # 因此要把故障注入到那里，才是真正在测「处理链路内部炸了」而不是接口自己炸了
+    monkeypatch.setattr(pipeline, "get_locator", boom)
     r = client.post("/api/v1/access/report", json=GOOD)
     assert r.status_code == 500
     assert r.json()["detail"] == "服务内部错误"
 
 
 def test_health_after_failure_still_ok(client, monkeypatch):
-    import core.report_server as rs
+    from core import pipeline
 
-    monkeypatch.setattr(rs, "get_locator", lambda: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(pipeline, "get_locator", lambda: (_ for _ in ()).throw(RuntimeError("x")))
     client.post("/api/v1/access/report", json=GOOD)
     assert client.get("/api/v1/health").status_code == 200
 

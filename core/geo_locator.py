@@ -16,7 +16,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from core.config import v4_xdb_path, v6_xdb_path
 from core.logger import get_logger
@@ -38,7 +38,7 @@ def get_int_setting_safe(key: str, default: int) -> int:
 
 class GeoLocator:
     def __init__(
-        self, v4_path: str | None = None, v6_path: str | None = None, cache_size: int = 20000
+        self, v4_path: Optional[str] = None, v6_path: Optional[str] = None, cache_size: int = 20000
     ):
         self._lock = threading.Lock()
         self._reload_lock = threading.Lock()
@@ -85,7 +85,9 @@ class GeoLocator:
             )
         return ok
 
-    def reload(self, v4_path: str | None = None, v6_path: str | None = None) -> Tuple[bool, str]:
+    def reload(
+        self, v4_path: Optional[str] = None, v6_path: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """
         热换库：重新载入 xdb 并原子替换 searcher，同时清空归属地缓存。
         不重启进程、不打断正在处理的上报（新老 searcher 都是纯内存只读对象）。
@@ -226,11 +228,11 @@ class GeoLocator:
             while len(self._cache) > self._cache_size:
                 self._cache.popitem(last=False)
 
-    def cache_info(self) -> dict:
+    def cache_info(self) -> Dict:
         with self._lock:
             return {"size": len(self._cache), "capacity": self._cache_size, **self.stats}
 
-    def library_info(self) -> dict:
+    def library_info(self) -> Dict:
         """当前生效的库信息（含文件指纹与同步清单），供 UI 展示"""
         info = {
             "generation": self.generation,
@@ -254,7 +256,7 @@ def _mb(path: str) -> float:
         return 0.0
 
 
-def _file_info(path: str) -> dict:
+def _file_info(path: str) -> Dict:
     d = {"path": path, "name": os.path.basename(path or ""), "size": 0, "mtime": 0, "exists": False}
     try:
         st = os.stat(path)
