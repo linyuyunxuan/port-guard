@@ -8,7 +8,7 @@ PortGuard — 主窗口
 """
 
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 from app import ban_service, server_ctl
 from app.xdb_service import get_service as get_xdb_service
@@ -270,7 +270,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             btn.setObjectName("nav_btn")
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _, i=idx: self._switch_page(i))
+            btn.clicked.connect(self._nav_slot(idx))
             sl.addWidget(btn)
             self.nav_buttons.append(btn)
         self.nav_buttons[0].setChecked(True)
@@ -291,6 +291,24 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         ver.setObjectName("sidebar_footer")
         sl.addWidget(ver)
         return self.sidebar
+
+    def _nav_slot(self, idx: int) -> Callable[..., None]:
+        """导航按钮槽工厂。
+
+        ⚠️ 不要改成 `lambda _, i=idx: self._switch_page(i)` 这种**带默认参数的
+        lambda**：PySide2（shiboken2）会把它按 **0 参**调用，点击即抛
+        `TypeError: <lambda>() missing 1 required positional argument: '_'`，
+        且窗口化运行中该错误只写进 stderr、界面毫无反应 —— 交付线
+        （Server 2008 R2）整个左侧导航会全部失灵，此前的测试全绿是因为
+        selftest 只调 `_switch_page()` 从未真正点击过按钮。
+        带默认参数的 def 槽在 PySide2 / PySide6 两条栈上均验证过
+        （0 参或 1 参调用都正常）；回归锁见 selftest「导航按钮点击可切页」。
+        """
+
+        def slot(_checked: bool = False) -> None:
+            self._switch_page(idx)
+
+        return slot
 
     def _switch_page(self, idx: int) -> None:
         self.stack.setCurrentIndex(idx)
