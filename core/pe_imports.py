@@ -31,17 +31,15 @@ Windows 10 1703+），这类在旧系统上会变成 ``risk``，是「本机能�
 最隐蔽的一类原因。
 """
 
-from __future__ import annotations
-
 import os
 import struct
 from collections import defaultdict
-from typing import Iterable
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 PE_SUFFIXES = (".dll", ".pyd", ".exe")
 
 # Windows 自带模块（含 api-ms-win-* / ext-ms-* 系列）。这些不进产物也没关系。
-OS_KNOWN: frozenset[str] = frozenset(
+OS_KNOWN: FrozenSet[str] = frozenset(
     {
         "advapi32",
         "authz",
@@ -163,19 +161,100 @@ OS_KNOWN: frozenset[str] = frozenset(
 
 # 系统自带、但不是所有 Windows 版本都有的组件：DLL 名 → (最低系统要求说明,)
 # 命中时在报告里单独提醒，用于解释「本机能跑、目标机不能跑」。
-OS_MIN_VERSION: dict[str, str] = {
+OS_MIN_VERSION: Dict[str, str] = {
     "icuuc.dll": "Windows 10 1703（Creators Update）起才有",
     "icuin.dll": "Windows 10 1703（Creators Update）起才有",
     "icu.dll": "Windows 10 1903（May 2019 Update）起才有",
     "bcryptprimitives.dll": "Windows 8 起才有",
     "d3d12.dll": "Windows 10 起才有",
+    "dcomp.dll": "Windows 8 起才有",
+    "shcore.dll": "Windows 8 起才有",
     "api-ms-win-core-winrt-l1-1-0.dll": "Windows 8 起才有",
     "api-ms-win-core-winrt-error-l1-1-1.dll": "Windows 8 起才有",
     "api-ms-win-core-synch-l1-2-0.dll": "Windows 8 起才有",
 }
 
+# --------------------------------------------------------------------------- #
+# Windows 7 SP1 / Server 2008 R2 兼容闸门
+# --------------------------------------------------------------------------- #
+# 本项目的交付底线是 Win7 SP1 / Server 2008 R2，所以「产物引用了老系统上
+# 根本不存在的组件」必须是**硬失败**，而不是提醒。
+#
+# 这跟 OS_MIN_VERSION 的区别：OS_MIN_VERSION 是「有些机器上没有」，
+# 这里列的是「底线系统上一定没有」——出现即等于「支持 Win7」这句承诺不成立。
+#
+# 名单是实测出来的，不是抄的：PySide2 5.15.2 的 Qt5Core.dll 硬导入 25 个 DLL，
+# 其中**不含** icuuc / shcore / bcryptprimitives；而 PySide6 的 Qt6Core.dll
+# 硬导入 icuuc.dll 和 api-ms-win-core-synch-l1-2-0.dll —— 这正是 Qt6 永远
+# 跑不了 Win7 的根本原因（Qt6Core.dll 被静态绑定到 UCRT 的 ICU 上）。
+WIN7_BLOCKERS: Dict[str, str] = {
+    "icuuc.dll": "ICU 库，Windows 10 1703 起才随系统提供（Qt6 硬依赖 → Win7 必然加载失败）",
+    "icuin.dll": "ICU 库，Windows 10 1703 起才随系统提供",
+    "icu.dll": "ICU 合并库，Windows 10 1903 起才随系统提供",
+    "bcryptprimitives.dll": "Windows 8 起才随系统提供",
+    "d3d12.dll": "Windows 10 起才随系统提供",
+    "dcomp.dll": "Windows 8 起才随系统提供",
+    "shcore.dll": "Windows 8 起才随系统提供（Qt5 缩放 API 若改成硬导入会在这里暴露）",
+    "api-ms-win-core-synch-l1-2-0.dll": "Windows 8 起才有的 API set",
+    "api-ms-win-core-winrt-l1-1-0.dll": "Windows 8 起才有的 WinRT API set",
+    "api-ms-win-core-winrt-error-l1-1-1.dll": "Windows 8 起才有的 WinRT API set",
+}
 
-def system32_dirs() -> list[str]:
+# Win7 上「系统不提供、必须随包携带或预装」的运行时。
+# 这些是 VC++ 2015+ 运行库 / 通用 CRT，Win7 需要单独装 KB2999226 或
+# VC++ 2015-2022 可再发行组件；产物里没带就必然出现「找不到指定的模块」。
+LEGACY_REDIST: FrozenSet[str] = frozenset(
+    {
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "concrt140.dll",
+    }
+)
+
+# 通用 CRT 在 Win7 上以 api-ms-win-crt-*.dll 的形式被引用，同样需要 UCRT 更新
+REDIST_PREFIXES = ("api-ms-win-crt-",)
+
+# PortGuard 真正会加载的文件（按 basename 匹配，顺序即 Qt 的加载顺序）。
+#
+# 为什么需要这份清单：Qt 的 wheel 里塞了大量「装得到、用不上」的模块 ——
+# Qt5Bluetooth、qsgd3d12backend（Qt Quick 的 D3D12 后端）、sqldrivers、mediaservice…
+# 它们**只在用到对应功能时才被加载**，而本项目一个都不用。若不加区分，
+# 闸门会因为这些插件里引用了 d3d12/dcomp/api-ms-win-core-winrt-* 而整片飘红，
+# 真正的问题（核心 DLL 引用了 Win7 上没有的组件）反而被噪音埋掉。
+#
+# 不在清单里的照旧报出来，但归为「提示」而不是「阻断」——见 LegacyAudit.advisory。
+APP_LOAD_PATH: FrozenSet[str] = frozenset(
+    {
+        # Qt 核心（PySide6 线路）
+        "qt6core.dll",
+        "qt6gui.dll",
+        "qt6widgets.dll",
+        "qt6network.dll",
+        "qt6svg.dll",
+        # Qt 核心（PySide2 线路 —— 交付用的 Win7 线路）
+        "qt5core.dll",
+        "qt5gui.dll",
+        "qt5widgets.dll",
+        "qt5network.dll",
+        "qt5svg.dll",
+        # Python 绑定层
+        "shiboken2.abi3.dll",
+        "shiboken6.abi3.dll",
+        # 必定加载的 Qt 插件（平台插件与图片格式）
+        "qwindows.dll",
+        "qwindowsd.dll",
+        "qico.dll",
+        "qsvg.dll",
+        "qjpeg.dll",
+        "qgif.dll",
+    }
+)
+
+
+def system32_dirs() -> List[str]:
     root = os.environ.get("SYSTEMROOT", r"C:\Windows")
     return [os.path.join(root, "System32"), os.path.join(root, "SysWOW64")]
 
@@ -234,7 +313,7 @@ def _open_pe(path: str):
         dd_off = opt + 96
     else:
         return None
-    secs: list[tuple[int, int, int]] = []
+    secs: List[Tuple[int, int, int]] = []
     sec_off = opt + size_opt
     for i in range(n_sections):
         base = sec_off + i * 40
@@ -245,7 +324,7 @@ def _open_pe(path: str):
     return data, dd_off, secs
 
 
-def _import_directory(data: bytes, dd_off: int, secs, index: int) -> list[str]:
+def _import_directory(data: bytes, dd_off: int, secs, index: int) -> List[str]:
     """读取目录项 index 指向的导入表。index=1 硬导入，index=13 延迟导入。"""
     entry = dd_off + index * 8
     if entry + 8 > len(data):
@@ -254,7 +333,7 @@ def _import_directory(data: bytes, dd_off: int, secs, index: int) -> list[str]:
     if not rva or not size:
         return []
 
-    def rva_to_off(off_rva: int) -> int | None:
+    def rva_to_off(off_rva: int) -> Optional[int]:
         for v_addr, v_size, r_ptr in secs:
             if v_addr <= off_rva < v_addr + v_size:
                 return off_rva - v_addr + r_ptr
@@ -264,7 +343,7 @@ def _import_directory(data: bytes, dd_off: int, secs, index: int) -> list[str]:
     if table_off is None:
         return []
 
-    names: list[str] = []
+    names: List[str] = []
     # 延迟导入描述符的 DLL 名字段在 +4，步长 8；普通导入描述符在 +12，步长 20
     name_field = 4 if index == 13 else 12
     step = 8 if index == 13 else 20
@@ -282,7 +361,7 @@ def _import_directory(data: bytes, dd_off: int, secs, index: int) -> list[str]:
     return names
 
 
-def imports(path: str) -> tuple[set[str], set[str]]:
+def imports(path: str) -> Tuple[Set[str], Set[str]]:
     """返回 (硬导入集合, 延迟导入集合)，均为小写 DLL 名。失败时返回空集合。"""
     parsed = _open_pe(path)
     if not parsed:
@@ -294,7 +373,7 @@ def imports(path: str) -> tuple[set[str], set[str]]:
     )
 
 
-def hard_imports(path: str) -> set[str]:
+def hard_imports(path: str) -> Set[str]:
     """只返回硬导入（小写 DLL 名）。"""
     return imports(path)[0]
 
@@ -310,22 +389,22 @@ class DepIssue:
     def __init__(self, dep: str, kind: str) -> None:
         self.dep = dep
         self.kind = kind  # risk / weak / missing
-        self.callers: set[str] = set()
+        self.callers: Set[str] = set()
         self.note = OS_MIN_VERSION.get(dep, "")
 
     def __repr__(self) -> str:  # pragma: no cover - 调试用
         return f"<DepIssue {self.dep} {self.kind} x{len(self.callers)}>"
 
 
-def scan_bundle(root: str) -> tuple[dict[str, DepIssue], int]:
+def scan_bundle(root: str) -> Tuple[Dict[str, DepIssue], int]:
     """扫描打包目录，返回 (问题字典 {DLL 名: DepIssue}, 扫描到的 PE 文件数)。
 
     判定「稳定可解析」的目录：文件自身所在目录、``_internal``、产物根目录。
     其余情况按 risk / weak / missing 分类。
     """
     root = os.path.abspath(root)
-    where: dict[str, set[str]] = defaultdict(set)
-    files: list[tuple[str, str]] = []
+    where: Dict[str, Set[str]] = defaultdict(set)
+    files: List[Tuple[str, str]] = []
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
             if not name.lower().endswith(PE_SUFFIXES):
@@ -338,7 +417,7 @@ def scan_bundle(root: str) -> tuple[dict[str, DepIssue], int]:
 
     stable_extra = {"", "_internal"}
     sys_dirs = system32_dirs()
-    issues: dict[str, DepIssue] = {}
+    issues: Dict[str, DepIssue] = {}
 
     for rel_file, abs_path in files:
         own_dir = os.path.dirname(rel_file).replace("\\", "/")
@@ -363,12 +442,12 @@ def scan_bundle(root: str) -> tuple[dict[str, DepIssue], int]:
     return issues, len(files)
 
 
-def os_version_deps(root: str) -> dict[str, set[str]]:
+def os_version_deps(root: str) -> Dict[str, Set[str]]:
     """找出「依赖系统自带、但有最低版本要求」的组件，返回 {DLL: 谁在依赖}。
 
     这类依赖不算产物缺陷，但在旧系统上会直接导致加载失败，必须在报告里点名。
     """
-    result: dict[str, set[str]] = defaultdict(set)
+    result: Dict[str, Set[str]] = defaultdict(set)
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
             if not name.lower().endswith(PE_SUFFIXES):
@@ -384,9 +463,9 @@ def os_version_deps(root: str) -> dict[str, set[str]]:
     return dict(result)
 
 
-def bundled_names(root: str) -> set[str]:
+def bundled_names(root: str) -> Set[str]:
     """产物内所有 PE 文件名（小写）。"""
-    found: set[str] = set()
+    found: Set[str] = set()
     for _dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
             if name.lower().endswith(PE_SUFFIXES):
@@ -394,10 +473,146 @@ def bundled_names(root: str) -> set[str]:
     return found
 
 
-def format_issues(issues: Iterable[DepIssue], limit: int = 4) -> list[str]:
+class LegacyAudit:
+    """Windows 7 SP1 / Server 2008 R2 兼容性审计结果。"""
+
+    __slots__ = (
+        "advisory",
+        "blockers",
+        "load_path",
+        "needs_ucrt",
+        "redist_bundled",
+        "redist_missing",
+        "scanned",
+    )
+
+    def __init__(self, load_path: Optional[FrozenSet[str]] = None) -> None:
+        self.advisory: Dict[str, Set[str]] = {}
+        self.blockers: Dict[str, Set[str]] = {}
+        self.load_path: FrozenSet[str] = APP_LOAD_PATH if load_path is None else load_path
+        self.redist_bundled: Set[str] = set()
+        self.redist_missing: Set[str] = set()
+        self.needs_ucrt = False
+        self.scanned = 0
+
+    @property
+    def ok(self) -> bool:
+        """产物到底能不能在底线系统上跑。
+
+        只看两条硬性条件：**应用会加载的**文件不能引用 Win8+ 才有的组件，
+        以及不能缺需要随包携带的运行库。
+
+        两点说明：
+        · UCRT（``api-ms-win-crt-*``）属于**部署前置条件**而不是产物缺陷 ——
+          它在 Win7 上由 KB2999226 提供，不随包携带，因此只提示不判失败。
+        · 未被应用加载的 Qt 插件（scenegraph/qtbluetooth/sqldrivers…）里的
+          引用归到 ``advisory``，不判失败：那些 DLL 只在用到对应功能时才被加载，
+          拿它们卡死发布等于对着用不上的代码开罚单。
+        """
+        return not self.blockers and not self.redist_missing
+
+    def summary(self) -> str:
+        if not self.ok:
+            parts: List[str] = []
+            if self.blockers:
+                parts.append("引用了老系统不存在的组件：" + "、".join(sorted(self.blockers)))
+            if self.redist_missing:
+                parts.append("缺少需随包携带的运行库：" + "、".join(sorted(self.redist_missing)))
+            return "；".join(parts)
+        if self.needs_ucrt:
+            return "产物可在 Windows 7 SP1 / Server 2008 R2 及以上运行（Win7 需先装 KB2999226）"
+        return "产物可在 Windows 7 SP1 / Server 2008 R2 及以上运行"
+
+
+def legacy_audit(root: str, *, load_path: Optional[FrozenSet[str]] = None) -> LegacyAudit:
+    """审计产物能否在 Windows 7 SP1 / Server 2008 R2 上加载。
+
+    两条判定线（都能在**开发机**上跑出来，不依赖一台真的 Win7）：
+
+    1. **禁区组件**：应用加载路径上的 PE 硬导入了 ``WIN7_BLOCKERS`` 里的 DLL。
+       这些组件在底线上不存在，加补丁也变不出来，属于硬失败。
+       不在 ``load_path``（默认 ``APP_LOAD_PATH``）上的引用只记进 ``advisory``。
+    2. **缺运行库**：产物引用了 VC++ 运行库 / UCRT（``LEGACY_REDIST`` 与
+       ``api-ms-win-crt-*``），但产物内没带对应文件。开发机装了 VC++ 运行库
+       会把它兜住，所以本机永远看不出问题；干净 Win7 上必崩。
+
+    边界：这里**不判断** ``vcruntime140`` 这类由 ``scan_bundle`` 归到 ``risk``
+    的情况，两边结论可能重叠但角度不同 —— ``scan_bundle`` 关心「就近能不能解析」，
+    这里关心「系统版本来不来得及提供」。
+    """
+    audit = LegacyAudit(load_path)
+    names = bundled_names(root)
+
+    # 运行库是否随包携带：只看产物内有没有同名文件，不看本机 System32
+    wanted = set(LEGACY_REDIST)
+    for n in names:
+        if n in LEGACY_REDIST or n.startswith(REDIST_PREFIXES):
+            audit.redist_bundled.add(n)
+    wanted -= audit.redist_bundled
+
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if not name.lower().endswith(PE_SUFFIXES):
+                continue
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            audit.scanned += 1
+            # 判断这个文件是不是「应用真的会加载」的那批
+            on_path = name.lower() in audit.load_path
+            # 运行库自身（ucrtbase / vcruntime / api-ms-win-crt-*）引用的 API set
+            # 不单独报：它们的可操作项是「Win7 先装 KB2999226 / VC++ 运行库」，
+            # 已经由 needs_ucrt 那条提示覆盖；再说成「用不上的插件」反而误导。
+            importer_is_redist = name.lower() in LEGACY_REDIST or name.lower().startswith(
+                REDIST_PREFIXES
+            )
+            try:
+                deps = hard_imports(full)
+            except OSError:
+                continue
+            for dep in deps:
+                if dep in WIN7_BLOCKERS:
+                    if on_path:
+                        audit.blockers.setdefault(dep, set()).add(rel)
+                    elif not importer_is_redist:
+                        audit.advisory.setdefault(dep, set()).add(rel)
+                elif dep.startswith(REDIST_PREFIXES):
+                    audit.needs_ucrt = True
+                elif dep in wanted:
+                    # 有人在用、产物里又没带 → Win7 上解析不到
+                    audit.redist_missing.add(dep)
+
+    return audit
+
+
+def format_legacy_audit(audit: LegacyAudit, limit: int = 4) -> List[str]:
+    """把兼容性审计结果格式化成便于阅读的多行文本。"""
+    lines: List[str] = []
+    for dep in sorted(audit.blockers):
+        callers = sorted(audit.blockers[dep])
+        head = ", ".join(callers[:limit])
+        tail = "" if len(callers) <= limit else f"  等 {len(callers)} 处"
+        lines.append(f"[win7-阻断] {dep}（{WIN7_BLOCKERS[dep]}）← {head}{tail}")
+    for dep in sorted(audit.redist_missing):
+        lines.append(f"[win7-运行库] {dep} 产物内未携带，Win7 需预装 VC++ 2015-2022 运行库")
+    if audit.redist_bundled:
+        lines.append("  · 已随包携带：" + ", ".join(sorted(audit.redist_bundled)))
+    if audit.needs_ucrt:
+        lines.append("  · 依赖通用 C 运行库（api-ms-win-crt-*）：Win7 需先装 KB2999226")
+    for dep in sorted(audit.advisory):
+        callers = sorted(audit.advisory[dep])
+        head = ", ".join(callers[:limit])
+        tail = "" if len(callers) <= limit else f"  等 {len(callers)} 处"
+        lines.append(
+            f"[提示·不阻断] {dep} 被 {head}{tail} 引用；该模块不在应用加载路径上，"
+            "只在用到对应功能时才加载"
+        )
+    return lines
+
+
+def format_issues(issues: Iterable[DepIssue], limit: int = 4) -> List[str]:
     """把问题列表格式化成便于阅读的多行文本。"""
     order = {"risk": 0, "missing": 1, "weak": 2}
-    lines: list[str] = []
+    lines: List[str] = []
     for issue in sorted(issues, key=lambda i: (order.get(i.kind, 9), i.dep)):
         callers = sorted(issue.callers)
         head = ", ".join(callers[:limit])

@@ -22,18 +22,18 @@
     python main.py --diag       # 源码版
 """
 
-from __future__ import annotations
-
 import contextlib
 import ctypes
 import os
 import sys
 import time
-from typing import TypedDict
+from typing import List, Optional, Tuple, TypedDict
 
 from core.pe_imports import (
     format_issues,
+    format_legacy_audit,
     is_available,
+    legacy_audit,
     os_version_deps,
     scan_bundle,
     system32_dirs,
@@ -50,17 +50,8 @@ class WindowsInfo(TypedDict):
     name: str
 
 
-# Qt 关键库的加载顺序：前一个成功才说明后一个的依赖满足
-_QT_PROBE = [
-    "Qt6Core.dll",
-    "Qt6Gui.dll",
-    "Qt6Widgets.dll",
-    "Qt6Network.dll",
-    "Qt6Svg.dll",
-]
-
 # Windows 内部版本号 → 市场版本名（判断「系统是否够新」用）
-_BUILD_NAMES: list[tuple[int, str]] = [
+_BUILD_NAMES: List[Tuple[int, str]] = [
     (10240, "Windows 10 1507 (RTM)"),
     (10586, "Windows 10 1511"),
     (14393, "Windows 10 1607 / Server 2016"),
@@ -82,10 +73,48 @@ _BUILD_NAMES: list[tuple[int, str]] = [
     (26100, "Windows 11 24H2 / Server 2025"),
 ]
 
-# PySide6 6.12 所用的 Qt6Core.dll 硬导入 icuuc.dll，而 icuuc.dll 是
-# Windows 10 1703 才加入的系统组件；Qt 官方支持基线是 Windows 10 1809。
-_MIN_BUILD = 15063
-_RECOMMENDED_BUILD = 17763
+# 两条运行时线路的最低系统要求（内部版本号）。
+#
+# 差别来自 Qt 核心库的硬导入：
+#   · PySide6 6.12 的 Qt6Core.dll 硬导入 icuuc.dll，而 icuuc.dll 是
+#     Windows 10 1703 才加入的系统组件 → 最低 15063（Qt 官方支持基线 1809）
+#   · PySide2 5.15 的 Qt5Core.dll 只依赖 VC++ 运行库，**不导入 icuuc**，
+#     所以这条线能一路下到 Windows 7 SP1 / Server 2008 R2（内部版本 7601）
+# 数字是实测 PE 导入表得出的，不是查文档抄的。
+_QT6_MIN_BUILD = 15063
+_QT6_RECOMMENDED_BUILD = 17763
+_QT5_MIN_BUILD = 7601
+_QT5_RECOMMENDED_BUILD = 9600  # Windows 8.1 / Server 2012 R2
+
+# 兼容旧调用点：不传 binding 时按 Qt6 线路判定
+_MIN_BUILD = _QT6_MIN_BUILD
+_RECOMMENDED_BUILD = _QT6_RECOMMENDED_BUILD
+
+# 绑定名 → (核心 DLL 前缀, shiboken 目录名)
+_QT_LINES = {
+    "PySide6": ("Qt6", "shiboken6"),
+    "PySide2": ("Qt5", "shiboken2"),
+}
+
+
+def _detect_binding(app_dir: str) -> str:
+    """判断当前跑的是哪条 Qt 线路。产物内优先，其次看已安装的绑定。"""
+    for binding in ("PySide6", "PySide2"):
+        if _find_dir(app_dir, binding):
+            return binding
+    return ""
+
+
+def _qt_probe_names(binding: str) -> List[str]:
+    """按线路给出要实测加载的 Qt 库清单（前一个成功才说明后一个依赖满足）。"""
+    prefix = _QT_LINES.get(binding, _QT_LINES["PySide6"])[0]
+    return [
+        f"{prefix}Core.dll",
+        f"{prefix}Gui.dll",
+        f"{prefix}Widgets.dll",
+        f"{prefix}Network.dll",
+        f"{prefix}Svg.dll",
+    ]
 
 
 def _logs_dir() -> str:
@@ -153,16 +182,32 @@ def windows_info() -> WindowsInfo:
     return WindowsInfo(product=product, display=display, build=build, ubr=ubr, name=label)
 
 
-def os_verdict(build: int) -> tuple[bool, str]:
+def os_verdict(build: int, binding: str = "PySide6") -> Tuple[bool, str]:
+    """按线路判定系统版本是否满足要求。默认按 Qt6（PySide6）线路。"""
     if not build:
         return True, "无法确定系统版本，跳过版本判定"
-    if build < _MIN_BUILD:
+    qt5 = binding == "PySide2"
+    minimum = _QT5_MIN_BUILD if qt5 else _QT6_MIN_BUILD
+    recommended = _QT5_RECOMMENDED_BUILD if qt5 else _QT6_RECOMMENDED_BUILD
+
+    if build < minimum:
+        if qt5:
+            return False, (
+                f"系统过低（内部版本 {build}）——当前是 PySide2（Qt5）线路，"
+                "最低支持 Windows 7 SP1 / Server 2008 R2（内部版本 7601）。"
+                "本机无法运行，需升级系统或改用其它电脑。"
+            )
         return False, (
             f"系统过低（内部版本 {build}）——PySide6 所用的 Qt6Core.dll 硬依赖 "
             "icuuc.dll，而该组件从 Windows 10 1703（内部版本 15063）起才随系统提供。"
-            "本机无法运行，需升级系统或改用其它电脑。"
+            "本机无法运行，需升级系统，或改用 PySide2（Qt5）线路的产物。"
         )
-    if build < _RECOMMENDED_BUILD:
+    if build < recommended:
+        if qt5:
+            return True, (
+                f"可用（内部版本 {build}）——已达到 Windows 7 SP1 底线，"
+                "建议 Windows 8.1（9600）及以上，TLS 与高分屏缩放更稳。"
+            )
         return True, (
             f"勉强可用（内部版本 {build}），低于 Qt 官方支持的 Windows 10 1809（17763），"
             "可能出现界面异常，建议升级。"
@@ -178,7 +223,7 @@ def _find_file(name: str, *dirs: str) -> str:
     return ""
 
 
-def probe_load(path: str) -> tuple[bool, str]:
+def probe_load(path: str) -> Tuple[bool, str]:
     """按扩展模块的真实加载方式（LOAD_WITH_ALTERED_SEARCH_PATH）加载 DLL。
 
     关键点：Python 3.8+ 的 ctypes 默认用 LOAD_LIBRARY_SEARCH_DEFAULT_DIRS，
@@ -196,15 +241,17 @@ def probe_load(path: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def run(app_dir: str | None = None, *, deep: bool = True) -> tuple[int, str, str]:
+def run(app_dir: Optional[str] = None, *, deep: bool = True) -> Tuple[int, str, str]:
     """执行诊断。
 
     返回 ``(退出码, 完整报告, 结论摘要)``。退出码 0 表示未发现阻塞性问题。
     """
     app_dir = os.path.abspath(app_dir or os.environ.get("_MEIPASS") or _guess_app_dir())
     frozen = bool(getattr(sys, "frozen", False))
-    lines: list[str] = []
-    problems: list[str] = []
+    binding = _detect_binding(app_dir)
+    is_qt5 = binding == "PySide2"
+    lines: List[str] = []
+    problems: List[str] = []
 
     def add(text: str = "") -> None:
         lines.append(text)
@@ -220,6 +267,7 @@ def run(app_dir: str | None = None, *, deep: bool = True) -> tuple[int, str, str
     )
     add(f"  资源目录     : {app_dir}")
     add(f"  Python       : {sys.version.split()[0]} ({'64' if sys.maxsize > 2**32 else '32'} 位)")
+    add(f"  Qt 线路      : {binding or '未检测到（可能不是 GUI 进程）'}")
     try:
         from core.firewall import is_admin
 
@@ -234,36 +282,40 @@ def run(app_dir: str | None = None, *, deep: bool = True) -> tuple[int, str, str
     add(f"  产品         : {win['product']}")
     add(f"  版本         : {win['display'] or '-'}   内部版本 {win['build']}.{win['ubr']}")
     add(f"  识别为       : {win['name'] or '-'}")
-    ok_os, verdict = os_verdict(win["build"])
+    ok_os, verdict = os_verdict(win["build"], binding or "PySide6")
     add(f"  版本判定     : {'✓' if ok_os else '✗'} {verdict}")
     if not ok_os:
-        problems.append("系统版本过低，缺少 icuuc.dll 等系统组件")
+        problems.append("系统版本低于当前线路的最低要求")
     add()
 
     # ---- 关键运行库 ----
     add("【关键运行库】")
     sysdirs = system32_dirs()
-    pyside_dir = _find_dir(app_dir, "PySide6")
-    shiboken_dir = _find_dir(app_dir, "shiboken6")
+    qt_dir = _find_dir(app_dir, binding) if binding else ""
+    shiboken_dir = _find_dir(app_dir, _QT_LINES.get(binding, ("", ""))[1]) if binding else ""
     runtime = [
-        ("MSVCP140.dll", [pyside_dir, shiboken_dir, app_dir]),
-        ("MSVCP140_1.dll", [pyside_dir, app_dir]),
-        ("MSVCP140_2.dll", [pyside_dir, app_dir]),
-        ("VCRUNTIME140.dll", [app_dir, pyside_dir, shiboken_dir]),
-        ("VCRUNTIME140_1.dll", [app_dir, pyside_dir, shiboken_dir]),
+        ("MSVCP140.dll", [qt_dir, shiboken_dir, app_dir]),
+        ("MSVCP140_1.dll", [qt_dir, app_dir]),
+        ("MSVCP140_2.dll", [qt_dir, app_dir]),
+        ("VCRUNTIME140.dll", [app_dir, qt_dir, shiboken_dir]),
+        ("VCRUNTIME140_1.dll", [app_dir, qt_dir, shiboken_dir]),
     ]
     for name, dirs in runtime:
         where = _find_file(name, *[d for d in dirs if d])
         add(f"  {'✓' if where else '✗'} {name:<20} {where or '产物内缺失'}")
         if not where:
             problems.append(f"产物内缺少 {name}")
+    # 系统组件部分：icuuc 只对 Qt6 线路是必需的，Qt5 线路引用它反而是回归信号
     for name in ("icuuc.dll", "icuin.dll", "ucrtbase.dll", "msvcp140.dll", "vcruntime140.dll"):
         where = _find_file(name, *sysdirs)
         ok = bool(where) or is_available(name)
         tag = where or ("由系统提供（API set）" if ok else "系统也缺失")
-        add(f"  {'✓' if ok else '✗'} {name:<20} {tag}")
-        if not ok and name in ("icuuc.dll", "icuin.dll"):
+        need = not is_qt5 and name in ("icuuc.dll", "icuin.dll")
+        add(f"  {'✓' if ok else ('✗' if need else '·')} {name:<20} {tag}")
+        if need and not ok:
             problems.append(f"系统缺少 {name}（Windows 10 1703 以下没有）")
+    if is_qt5:
+        add("  · PySide2（Qt5）线路不依赖 icuuc.dll —— 这正是它能跑 Win7 的原因")
     add()
 
     # ---- 依赖闭包 ----
@@ -301,11 +353,30 @@ def run(app_dir: str | None = None, *, deep: bool = True) -> tuple[int, str, str
                     problems.append(f"本机缺少 {dep}")
             add()
 
+        # Windows 7 SP1 / Server 2008 R2 兼容性闸门。
+        # 与「依赖闭包」的区别：那一节问「产物内能不能就近解析」，这一节问
+        # 「底线系统到底有没有这个组件」——口径不同，结论可能不重叠。
+        try:
+            audit = legacy_audit(app_dir)
+        except Exception as exc:  # pragma: no cover
+            add(f"【Win7 兼容性】审计失败：{exc}")
+        else:
+            add(f"【Win7 兼容性】扫描 {audit.scanned} 个 PE 文件")
+            for line in format_legacy_audit(audit):
+                add(f"  {line}")
+            if audit.ok:
+                add(f"  ✓ {audit.summary()}")
+            for dep in audit.blockers:
+                problems.append(f"引用了 Win7 上不存在的 {dep}")
+            for dep in sorted(audit.redist_missing):
+                problems.append(f"缺少需随包携带的 {dep}")
+            add()
+
     # ---- 实际加载探测 ----
-    if deep and pyside_dir:
+    if deep and qt_dir:
         add("【实际加载探测】（按扩展模块的真实加载方式）")
-        for name in _QT_PROBE:
-            path = os.path.join(pyside_dir, name)
+        for name in _qt_probe_names(binding):
+            path = os.path.join(qt_dir, name)
             if not os.path.exists(path):
                 continue
             ok, detail = probe_load(path)
