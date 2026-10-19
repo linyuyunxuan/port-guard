@@ -494,7 +494,16 @@ def query_risk_events(
     level: str = "",
     handled: Optional[int] = None,
     keyword: str = "",
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
+    """按条件取风险事件。
+
+    `since_ts` / `until_ts` 是 epoch 毫秒的**左闭右开**区间
+    （`event_ts >= since_ts AND event_ts < until_ts`）。右端取开区间是为了让
+    「结束日期」能直接传「次日零点」——否则选到 10-19 这一天时，
+    10-19 23:59:59.999 的事件会漏掉，而毫秒精度下手写 +86399999 很容易算错。
+    """
     sql = "SELECT * FROM risk_event WHERE 1=1"
     args: List[Any] = []
     if level:
@@ -506,6 +515,12 @@ def query_risk_events(
     if keyword:
         sql += " AND (ip LIKE ? OR summary LIKE ?)"
         args += [f"%{keyword}%", f"%{keyword}%"]
+    if since_ts is not None:
+        sql += " AND event_ts >= ?"
+        args.append(int(since_ts))
+    if until_ts is not None:
+        sql += " AND event_ts < ?"
+        args.append(int(until_ts))
     sql += " ORDER BY event_ts DESC, id DESC LIMIT ? OFFSET ?"
     args += [limit, offset]
     conn = _connect()
@@ -529,6 +544,45 @@ def set_risk_handled(event_id: int, handled: int) -> None:
     try:
         conn.execute("UPDATE risk_event SET handled = ? WHERE id = ?", (handled, event_id))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def set_risk_handled_batch(event_ids: List[int], handled: int) -> int:
+    """批量改处理状态（确认 / 忽略），返回实际更新的行数。
+
+    一次事务 + executemany：勾选 2000 条时逐条提交会产生 2000 次 fsync，
+    在机械盘或杀软驻留的机器上能卡住界面好几秒。
+    """
+    ids = [int(i) for i in event_ids]
+    if not ids:
+        return 0
+    conn = _connect()
+    try:
+        cur = conn.executemany(
+            "UPDATE risk_event SET handled = ? WHERE id = ?", [(handled, i) for i in ids]
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
+def delete_risk_events(event_ids: List[int]) -> int:
+    """批量删除风险事件，返回删除行数。
+
+    只删 risk_event，**不动 access_log**：访问流水是原始事实（统计、报表、
+    「一共来过多少次」都靠它），事件是规则算出来的派生结论。删事件表示
+    「这条我不认」，不应该连带把访问记录也抹掉。
+    """
+    ids = [int(i) for i in event_ids]
+    if not ids:
+        return 0
+    conn = _connect()
+    try:
+        cur = conn.executemany("DELETE FROM risk_event WHERE id = ?", [(i,) for i in ids])
+        conn.commit()
+        return int(cur.rowcount or 0)
     finally:
         conn.close()
 
@@ -727,5 +781,23 @@ def delete_ban_record(ban_id: int) -> None:
     try:
         conn.execute("DELETE FROM ban_list WHERE id = ?", (ban_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_ban_records(ban_ids: List[int]) -> int:
+    """批量删除封禁记录，返回实际删除行数。
+
+    只删数据库记录，不动已经写入 Windows 防火墙的规则——前者是记账，
+    后者是既成事实。要撤规则必须走「解封」，否则防火墙里会留下无主规则。
+    """
+    ids = [int(i) for i in ban_ids]
+    if not ids:
+        return 0
+    conn = _connect()
+    try:
+        cur = conn.executemany("DELETE FROM ban_list WHERE id = ?", [(i,) for i in ids])
+        conn.commit()
+        return int(cur.rowcount or 0)
     finally:
         conn.close()

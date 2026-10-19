@@ -1,29 +1,47 @@
 """PortGuard — 封禁管理页"""
 
 import datetime
+import threading
+from typing import Any, Dict, List
 
 from app import ban_service
 from core import firewall
-from core.config import LEVEL_CRITICAL, LEVEL_HIGH, LEVEL_LABEL
+from core.config import LEVEL_CRITICAL, LEVEL_HIGH
 from core.database import (
     count_active_bans,
+    delete_ban_records,
     query_bans,
     query_risk_events,
     set_risk_handled,
+    set_risk_handled_batch,
 )
 from core.logger import get_logger
-from core.models import STATUS_ACTIVE, STATUS_FAILED, STATUS_PENDING, STATUS_UNBANNED
+from core.models import (
+    STATUS_ACTIVE,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    STATUS_UNBANNED,
+    ms_to_str,
+)
 from core.validators import InvalidIP, normalize_ip
+from gui.components import PageHeader, row_menu_button
+from gui.table_select import CheckColumn
 from gui.theme import C, small_button_style
-from gui.widgets import WarnBanner
+from gui.widgets import (
+    EmptyState,
+    RiskBadgeDelegate,
+    WarnBanner,
+    align_headers,
+    badge_item,
+    make_item,
+)
 from qtcompat import (
     QAbstractItemView,
-    QColor,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -31,9 +49,9 @@ from qtcompat import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QSplitter,
     Qt,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
     Signal,
@@ -42,11 +60,11 @@ from qtcompat import (
 log = get_logger(__name__)
 
 BAN_HEADERS = [
+    "",
     "ID",
     "IP",
-    "防火墙规则名",
-    "来源",
     "原因",
+    "来源",
     "评分",
     "状态",
     "时长",
@@ -54,7 +72,22 @@ BAN_HEADERS = [
     "创建时间",
     "操作",
 ]
-SUG_HEADERS = ["时间", "IP", "归属地", "端口", "评分", "等级", "原因", "操作"]
+SUG_HEADERS = ["", "时间", "等级", "IP", "归属地", "端口", "评分", "原因", "操作"]
+
+# 第 0 列都是勾选框（32px）。列宽按「实测文字 + 16 padding + 6 余量」定，
+# 两栈取大的那套（PySide2 的 YaHei / Consolas 度量比 PySide6 宽 6~20%）。
+# IP 列 120：`113.118.113.77` 实测 98px，早期给 108 已经开始截断；
+# IPv6 完整地址（147px）放不下，走 tooltip —— 但 IPv4 必须完整。
+# 到期 / 创建列 136：模型输出的是 `YYYY-MM-DD HH:MM`（112px），不能省年份，
+# 封禁最长 365 天会跨年。
+# 原因列是唯一的拉伸列。
+BAN_WIDTHS = [32, 48, 130, 180, 50, 46, 64, 66, 128, 128, 88]
+SUG_WIDTHS = [32, 120, 60, 130, 106, 56, 46, 160, 112]
+COL_SUG_CHECK = 0
+COL_SUG_LEVEL = 2
+COL_SUG_REASON = 7
+COL_BAN_CHECK = 0
+COL_BAN_REASON = 3
 
 
 class ManualBanDialog(QDialog):
@@ -123,32 +156,37 @@ class ManualBanDialog(QDialog):
 
 
 class BansPage(QWidget):
-    """封禁建议 + 封禁列表"""
+    """封禁建议 + 封禁列表（两张表都支持勾选批量处理）"""
 
     ask_ban = Signal(str, int, str)
+    # [(ip, score, reason, event_ids), ...] —— 批量确认封禁交给主窗口统一执行
+    ask_ban_many = Signal(list)
+    ask_lookup = Signal(str)
     request_refresh_stats = Signal()
+    # 批量解封在后台线程跑，结束后把结果送回 GUI 线程
+    batch_unban_done = Signal(int, int)  # (成功数, 失败数)
+
+    # 显式声明：勾选列在两个面板里各建一次，且建在按钮之后
+    sug_sel: CheckColumn
+    ban_sel: CheckColumn
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._sug_rows = []
+        self._ban_rows = []
         self._build()
+        self.batch_unban_done.connect(self._on_batch_unban_done)
         self.refresh()
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(24, 16, 24, 12)
+        root.setSpacing(12)
 
-        head = QHBoxLayout()
-        t = QLabel("封禁管理")
-        t.setObjectName("page_title")
-        d = QLabel("规则引擎给出建议，确认后才写入 Windows 防火墙")
-        d.setObjectName("page_desc")
-        head.addWidget(t)
-        head.addWidget(d)
-        head.addStretch(1)
-        root.addLayout(head)
+        head = PageHeader("封禁管理", "规则引擎给出建议，确认后才写入 Windows 防火墙")
+        root.addWidget(head)
 
-        # 权限警示条
+        # 权限警示条（仅普通权限时出现）
         self.banner = WarnBanner("", "以管理员身份重启", C.warning)
         self.banner.action_clicked.connect(self._restart_as_admin)
         self.banner.setVisible(not firewall.is_admin())
@@ -159,83 +197,179 @@ class BansPage(QWidget):
             )
         root.addWidget(self.banner)
 
-        # 待确认建议
-        self.grp_sug = QGroupBox("待确认的封禁建议")
-        sug_lay = QVBoxLayout(self.grp_sug)
-        sug_lay.setContentsMargins(12, 8, 12, 12)
-        self.sug_hint = QLabel("暂无待确认建议")
-        self.sug_hint.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        # 结果区：上「待确认建议」/ 下「封禁记录」，可拖拽分配高度
+        self.split = QSplitter(Qt.Orientation.Vertical)
+        self.split.setChildrenCollapsible(False)
+        self.split.addWidget(self._build_sug_panel())
+        self.split.addWidget(self._build_records_area())
+        self.split.setStretchFactor(0, 0)
+        self.split.setStretchFactor(1, 1)
+        self.split.setSizes([268, 386])
+        root.addWidget(self.split, 1)
+
+    @staticmethod
+    def _setup_table(table: QTableWidget) -> None:
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
+        table.setWordWrap(False)
+        table.setTabKeyNavigation(False)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(30)
+        # 常显竖滚动条：滚动条出现/消失会让可视宽在 15↔25px 之间跳，列宽跟着抖
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+    def _build_sug_panel(self) -> QFrame:
+        """待确认建议：有数据时 216 高，0 条时折叠成 56 的一行提示"""
+        self.sug_panel = QFrame()
+        self.sug_panel.setObjectName("panel")
+        lay = QVBoxLayout(self.sug_panel)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(16, 12, 16, 8)
+        head.setSpacing(8)
+        self.sug_title = QLabel("待确认的封禁建议")
+        self.sug_title.setObjectName("panel_title")
+        self.sug_hint = QLabel("规则引擎建议，需人工确认")
+        self.sug_hint.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        head.addWidget(self.sug_title)
+        head.addWidget(self.sug_hint)
+        head.addStretch(1)
+
+        # 批量操作放在面板标题行里：不额外占高度，上下面板的高度预算不用重算
+        self.lbl_sug_sel = QLabel("已选 0 条")
+        self.lbl_sug_sel.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.btn_sug_all = self._mini_button("全选", enabled=True)
+        self.btn_sug_ban = self._mini_button("批量封禁", "danger")
+        self.btn_sug_ignore = self._mini_button("批量忽略")
+        # 勾选列建在表格之后，lambda 延迟取值（不能提前绑定方法）
+        self.btn_sug_all.clicked.connect(lambda: self.sug_sel.toggle_all())  # noqa: PLW0108
+        self.btn_sug_ban.clicked.connect(self._batch_ban_suggestions)
+        self.btn_sug_ignore.clicked.connect(self._batch_ignore_suggestions)
+        for w in (self.lbl_sug_sel, self.btn_sug_all, self.btn_sug_ban, self.btn_sug_ignore):
+            head.addWidget(w)
+        lay.addLayout(head)
+
+        self.sug_empty = QLabel("没有待确认建议 · 规则引擎未发现需要封禁的高危 IP")
+        self.sug_empty.setStyleSheet(
+            f"color:{C.text_muted};font-size:12px;padding:0 16px 14px 16px;"
+        )
+        self.sug_empty.setVisible(False)
+        lay.addWidget(self.sug_empty)
+
         self.sug_table = QTableWidget(0, len(SUG_HEADERS))
         self.sug_table.setHorizontalHeaderLabels(SUG_HEADERS)
-        self.sug_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.sug_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.sug_table.setShowGrid(False)
-        self.sug_table.verticalHeader().setVisible(False)
-        self.sug_table.verticalHeader().setDefaultSectionSize(32)
-        self.sug_table.setMaximumHeight(232)
+        align_headers(self.sug_table, (2, 5, 6))
+        self._setup_table(self.sug_table)
+        self.sug_table.setItemDelegateForColumn(COL_SUG_LEVEL, RiskBadgeDelegate(self.sug_table))
+        self.sug_sel = CheckColumn(self.sug_table, COL_SUG_CHECK)
+        self.sug_sel.bind(self._on_sug_sel_changed)
         sh = self.sug_table.horizontalHeader()
-        for i, w in enumerate([130, 130, 130, 60, 56, 56, 300, 170]):
-            sh.resizeSection(i, w)
-        sh.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
-        sug_lay.addWidget(self.sug_hint)
-        sug_lay.addWidget(self.sug_table)
-        root.addWidget(self.grp_sug)
+        for i, width in enumerate(SUG_WIDTHS):
+            sh.resizeSection(i, width)
+        sh.setSectionResizeMode(COL_SUG_REASON, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.sug_table, 1)
+        return self.sug_panel
 
-        # 工具栏
+    @staticmethod
+    def _mini_button(text: str, kind: str = "", enabled: bool = False) -> QPushButton:
+        """标题行 / 批量条里的小按钮。
+
+        默认禁用：动作类按钮必须「先勾选才能点」，否则用户会点到一个什么都不做的
+        按钮。「全选」这类不依赖勾选的按钮要显式传 enabled=True。
+        """
+        b = QPushButton(text)
+        b.setFixedHeight(24)
+        b.setStyleSheet(small_button_style(kind or "outline"))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setEnabled(enabled)
+        return b
+
+    def _build_records_area(self) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
         bar = QHBoxLayout()
         bar.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索 IP / 原因…")
         self.search.setClearButtonEnabled(True)
+        self.search.setFixedWidth(280)
         self.search.textChanged.connect(self.refresh)
 
         self.status_filter = QComboBox()
         self.status_filter.addItems(["全部状态", "已封禁", "已解封", "失败", "处理中"])
+        self.status_filter.setFixedWidth(110)
         self.status_filter.currentIndexChanged.connect(self.refresh)
 
-        btn_manual = QPushButton("＋ 手动封禁")
+        btn_manual = QPushButton("手动封禁")
         btn_manual.setObjectName("btn_primary")
         btn_manual.clicked.connect(lambda: self.ask_ban.emit("", 0, "手动封禁"))
-
-        btn_unban_all = QPushButton("一键全部解封")
-        btn_unban_all.setObjectName("btn_outline")
-        btn_unban_all.clicked.connect(self._unban_all)
-
-        btn_sync = QPushButton("与防火墙对账")
-        btn_sync.setObjectName("btn_outline")
-        btn_sync.clicked.connect(self._sync)
 
         btn_refresh = QPushButton("刷新")
         btn_refresh.setObjectName("btn_outline")
         btn_refresh.clicked.connect(self.refresh)
 
-        self.lbl_info = QLabel("")
-        self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.btn_more = row_menu_button(
+            [("与防火墙对账", self._sync), ("一键全部解封", self._unban_all)], self, size=32
+        )
+        self.btn_more.setToolTip("更多操作：与防火墙对账 / 一键全部解封")
 
-        bar.addWidget(self.search, 1)
+        self.lbl_info = QLabel("")
+        self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+
+        bar.addWidget(self.search)
         bar.addWidget(self.status_filter)
         bar.addWidget(btn_manual)
-        bar.addWidget(btn_unban_all)
-        bar.addWidget(btn_sync)
         bar.addWidget(btn_refresh)
+        bar.addWidget(self.btn_more)
+        bar.addStretch(1)
         bar.addWidget(self.lbl_info)
-        root.addLayout(bar)
+        lay.addLayout(bar)
 
-        # 封禁列表
+        # 记录表的批量条：只对已解封/已封禁的记录生效，与上面建议表互不影响
+        bb = QHBoxLayout()
+        bb.setSpacing(8)
+        self.lbl_ban_sel = QLabel("已选 0 条")
+        self.lbl_ban_sel.setStyleSheet(f"color:{C.text_secondary};font-size:12px;")
+        self.lbl_ban_sel.setFixedWidth(84)
+        self.btn_ban_all = self._mini_button("全选本页", enabled=True)
+        self.btn_ban_unban = self._mini_button("批量解封")
+        self.btn_ban_del = self._mini_button("删除记录")
+        self.btn_ban_all.clicked.connect(lambda: self.ban_sel.toggle_all())  # noqa: PLW0108
+        self.btn_ban_unban.clicked.connect(self._batch_unban)
+        self.btn_ban_del.clicked.connect(self._batch_delete_bans)
+        self.btn_ban_del.setToolTip("仅删除数据库记录，不会改动已生效的防火墙规则")
+        bb.addWidget(self.lbl_ban_sel)
+        bb.addWidget(self.btn_ban_all)
+        bb.addSpacing(6)
+        bb.addWidget(self.btn_ban_unban)
+        bb.addWidget(self.btn_ban_del)
+        bb.addStretch(1)
+        lay.addLayout(bb)
+
+        self.empty = EmptyState("尚无封禁记录", "确认封禁后，记录会出现在这里")
+        self.empty.setVisible(False)
+        lay.addWidget(self.empty)
+
         self.table = QTableWidget(0, len(BAN_HEADERS))
         self.table.setHorizontalHeaderLabels(BAN_HEADERS)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(32)
+        align_headers(self.table, (1, 4, 5, 6, 7, 8, 9))
+        self._setup_table(self.table)
+        self.ban_sel = CheckColumn(self.table, COL_BAN_CHECK)
+        self.ban_sel.bind(self._on_ban_sel_changed)
         h = self.table.horizontalHeader()
-        for i, w in enumerate([44, 118, 190, 52, 190, 48, 66, 70, 116, 128, 148]):
-            h.resizeSection(i, w)
-        h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        h.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        root.addWidget(self.table, 1)
+        for i, width in enumerate(BAN_WIDTHS):
+            h.resizeSection(i, width)
+        h.setSectionResizeMode(COL_BAN_REASON, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.table, 1)
+        return box
 
     # ── 数据 ──
     def _status_filter(self) -> str:
@@ -257,53 +391,93 @@ class BansPage(QWidget):
             for r in query_risk_events(limit=200, handled=0)
             if r.get("risk_level") in (LEVEL_HIGH, LEVEL_CRITICAL)
         ]
-        self.sug_table.setRowCount(0)
-        self.sug_table.setRowCount(len(rows))
-        self.grp_sug.setTitle(f"待确认的封禁建议（{len(rows)}）")
-        self.sug_hint.setVisible(not rows)
-        if not rows:
-            self.sug_hint.setText("暂无待确认建议 — 规则引擎未发现需要封禁的风险 IP")
+        self._sug_rows = rows
+        self.sug_title.setText(f"待确认的封禁建议（{len(rows)}）")
 
-        for i, r in enumerate(rows):
-            ts = r.get("event_ts")
-            time_str = (
-                datetime.datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M:%S") if ts else "-"
-            )
-            geo = r.get("geo")
-            level = r.get("risk_level", "normal")
-            reason = r.get("summary") or "命中风险规则"
+        empty = not rows
+        self.sug_empty.setVisible(empty)
+        self.sug_table.setVisible(not empty)
+        if empty:
+            # 0 条时整区折叠成一行提示，把高度让给封禁记录表
+            # 折叠态也要装得下「标题行 40 + 一句空态 26 + 下留白 14」
+            self.sug_panel.setMinimumHeight(80)
+            self.sug_panel.setMaximumHeight(80)
+        else:
+            # 208 / 328 = 面板开销 88 + 4 行 / 8 行，正好不露半行
+            self.sug_panel.setMinimumHeight(208)
+            self.sug_panel.setMaximumHeight(328)
 
-            self.sug_table.setItem(i, 0, QTableWidgetItem(time_str))
-            self.sug_table.setItem(i, 1, QTableWidgetItem(r.get("ip", "")))
-            self.sug_table.setItem(i, 2, QTableWidgetItem(geo.region_short if geo else "未知"))
-            self.sug_table.setItem(i, 3, QTableWidgetItem(str(r.get("local_port") or "-")))
-            self.sug_table.setItem(i, 4, QTableWidgetItem(str(r.get("risk_score", 0))))
-            self.sug_table.setItem(i, 5, QTableWidgetItem(LEVEL_LABEL.get(level, level)))
-            self.sug_table.setItem(i, 6, QTableWidgetItem(reason))
-            self.sug_table.setCellWidget(i, 7, self._sug_actions(r, reason))
+        self.sug_sel.begin_render()
+        try:
+            self.sug_table.setRowCount(0)
+            self.sug_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                ts = r.get("event_ts")
+                time_str = (
+                    datetime.datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M:%S")
+                    if ts
+                    else "-"
+                )
+                geo = r.get("geo")
+                level = r.get("risk_level", "normal")
+                reason = r.get("summary") or "命中风险规则"
+                ip_text = str(r.get("ip") or "")
+
+                self.sug_sel.fill(i)
+                self.sug_table.setItem(i, 1, make_item(time_str, mono=True, tip=ms_to_str(ts)))
+                self.sug_table.setItem(i, 2, badge_item(level))
+                self.sug_table.setItem(i, 3, make_item(ip_text, C.text_link, tip=ip_text))
+                geo_text = geo.display if geo else "未知"
+                self.sug_table.setItem(
+                    i, 4, make_item(geo.region_short if geo else "未知", tip=geo_text)
+                )
+                self.sug_table.setItem(
+                    i,
+                    5,
+                    make_item(
+                        r.get("local_port") or "-",
+                        align=Qt.AlignmentFlag.AlignCenter,
+                        mono=True,
+                    ),
+                )
+                self.sug_table.setItem(
+                    i,
+                    6,
+                    make_item(
+                        r.get("risk_score", 0),
+                        align=Qt.AlignmentFlag.AlignCenter,
+                        bold=True,
+                        mono=True,
+                    ),
+                )
+                self.sug_table.setItem(i, COL_SUG_REASON, make_item(reason, tip=reason))
+                self.sug_table.setCellWidget(i, 8, self._sug_actions(r, reason))
+        finally:
+            self.sug_sel.end_render()
 
     def _sug_actions(self, r, reason: str) -> QWidget:
         w = QWidget()
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(4)
         ip = r.get("ip", "")
         score = r.get("risk_score", 0)
 
         b_ban = QPushButton("确认封禁")
-        b_ban.setFixedHeight(24)
+        b_ban.setFixedHeight(22)
         b_ban.setStyleSheet(small_button_style("danger"))
         b_ban.setCursor(Qt.CursorShape.PointingHandCursor)
         b_ban.clicked.connect(lambda: self.ask_ban.emit(ip, score, reason))
 
-        b_ig = QPushButton("忽略")
-        b_ig.setFixedHeight(24)
-        b_ig.setStyleSheet(small_button_style("outline"))
-        b_ig.setCursor(Qt.CursorShape.PointingHandCursor)
-        b_ig.clicked.connect(lambda: self._ignore(r))
+        more = row_menu_button(
+            [
+                ("忽略该建议", lambda: self._ignore(r)),
+                ("查询该 IP 归属地", lambda: self.ask_lookup.emit(ip)),
+            ]
+        )
 
         lay.addWidget(b_ban)
-        lay.addWidget(b_ig)
+        lay.addWidget(more)
         lay.addStretch(1)
         return w
 
@@ -314,65 +488,232 @@ class BansPage(QWidget):
             log.exception("忽略风险事件失败 id=%s", r.get("id"))
         self.refresh()
 
+    # ── 勾选与批量处理 ──
+    def _on_sug_sel_changed(self, n: int) -> None:
+        self.lbl_sug_sel.setText(f"已选 {n} 条")
+        self.lbl_sug_sel.setStyleSheet(f"color:{C.primary if n else C.text_muted};font-size:11px;")
+        for b in (self.btn_sug_ban, self.btn_sug_ignore):
+            b.setEnabled(n > 0)
+        self.btn_sug_all.setText("取消全选" if n and n == len(self._sug_rows) else "全选")
+
+    def _on_ban_sel_changed(self, n: int) -> None:
+        self.lbl_ban_sel.setText(f"已选 {n} 条")
+        self.lbl_ban_sel.setStyleSheet(
+            f"color:{C.primary if n else C.text_secondary};font-size:12px;"
+            f"font-weight:{'600' if n else '400'};"
+        )
+        for b in (self.btn_ban_unban, self.btn_ban_del):
+            b.setEnabled(n > 0)
+        self.btn_ban_all.setText("取消全选" if n and n == len(self._ban_rows) else "全选本页")
+
+    def _checked_suggestions(self) -> list:
+        return [self._sug_rows[i] for i in self.sug_sel.checked_rows() if i < len(self._sug_rows)]
+
+    def _checked_bans(self) -> list:
+        return [self._ban_rows[i] for i in self.ban_sel.checked_rows() if i < len(self._ban_rows)]
+
+    def _batch_ban_suggestions(self) -> None:
+        rows = self._checked_suggestions()
+        if not rows:
+            return
+        # 与风险事件页同一套去重口径：一个 IP 可能命中几十条事件，
+        # 但防火墙只该多一条规则
+        uniq: Dict[str, Any] = {}
+        ids_by_ip: Dict[str, List[int]] = {}
+        for r in rows:
+            ip = str(r.get("ip") or "")
+            if not ip:
+                continue
+            ids_by_ip.setdefault(ip, []).append(int(r["id"]))
+            old = uniq.get(ip)
+            if old is None or int(r.get("risk_score") or 0) > int(old.get("risk_score") or 0):
+                uniq[ip] = r
+        items = [
+            {
+                "ip": ip,
+                "score": int(r.get("risk_score") or 0),
+                "reason": r.get("summary") or "命中风险规则",
+                "event_ids": ids_by_ip.get(ip, []),
+            }
+            for ip, r in uniq.items()
+        ]
+        if items:
+            self.ask_ban_many.emit(items)
+
+    def _batch_ignore_suggestions(self) -> None:
+        rows = self._checked_suggestions()
+        if not rows:
+            return
+        ids = [int(r["id"]) for r in rows]
+        try:
+            n = set_risk_handled_batch(ids, 2)
+        except Exception as e:
+            QMessageBox.warning(self, "操作失败", str(e))
+            return
+        self.refresh()
+        # 不弹模态框：列表当场变短就是最好的反馈
+        self.sug_hint.setText(f"已忽略 {n} 条建议")
+
+    def _batch_unban(self) -> None:
+        rows = [b for b in self._checked_bans() if b.status == STATUS_ACTIVE]
+        if not rows:
+            QMessageBox.information(self, "无需解封", "选中的记录里没有处于「已封禁」状态的记录。")
+            return
+        if not firewall.is_admin():
+            QMessageBox.warning(
+                self, "权限不足", "批量解封需要管理员权限，请以管理员身份重启程序。"
+            )
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "批量解封",
+                f"将删除这 {len(rows)} 条记录对应的防火墙规则，并把记录标记为已解封。\n\n确认继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        self.btn_ban_unban.setEnabled(False)
+        self.lbl_info.setText(f"正在解封 {len(rows)} 条…")
+        targets = list(rows)
+
+        def work():
+            ok = 0
+            fail = 0
+            for b in targets:
+                good, err = ban_service.unban(b)
+                if good:
+                    ok += 1
+                else:
+                    fail += 1
+                    log.warning("批量解封失败 id=%s ip=%s err=%s", b.id, b.ip, err)
+            self.batch_unban_done.emit(ok, fail)
+
+        threading.Thread(target=work, daemon=True, name="unban-batch").start()
+
+    def _on_batch_unban_done(self, ok: int, fail: int) -> None:
+        self.refresh()
+        self.request_refresh_stats.emit()
+        if fail:
+            QMessageBox.warning(
+                self, "批量解封完成", f"成功 {ok} 条，失败 {fail} 条。\n详情见运行日志。"
+            )
+        else:
+            QMessageBox.information(self, "批量解封完成", f"已解封 {ok} 条记录。")
+
+    def _batch_delete_bans(self) -> None:
+        rows = self._checked_bans()
+        if not rows:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "删除封禁记录",
+                f"仅从数据库删除选中的 {len(rows)} 条记录，"
+                "**不会**改动已生效的防火墙规则。\n\n确认删除？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            n = delete_ban_records([int(b.id) for b in rows])
+        except Exception as e:
+            QMessageBox.warning(self, "删除失败", str(e))
+            return
+        self.refresh()
+        self.request_refresh_stats.emit()
+        self.lbl_info.setText(f"已删除 {n} 条记录 · 共 {len(self._ban_rows)} 条")
+
     def _load_bans(self) -> None:
         rows = query_bans(status=self._status_filter(), keyword=self.search.text().strip())
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(rows))
-        for i, b in enumerate(rows):
+        self._ban_rows = rows
+        self.empty.setVisible(not rows)
+        self.table.setVisible(bool(rows))
 
-            def mk(text, color=None, align=None):
-                it = QTableWidgetItem(str(text))
-                if color:
-                    it.setForeground(QColor(color))
-                if align:
-                    it.setTextAlignment(align)
-                return it
+        self.ban_sel.begin_render()
+        try:
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(rows))
+            for i, b in enumerate(rows):
+                status_color = {
+                    STATUS_ACTIVE: C.danger,
+                    STATUS_UNBANNED: C.text_muted,
+                    STATUS_FAILED: C.danger,
+                    STATUS_PENDING: C.info,
+                }.get(b.status, C.text_secondary)
 
-            status_color = {
-                STATUS_ACTIVE: C.danger,
-                STATUS_UNBANNED: C.text_muted,
-                STATUS_FAILED: C.warning,
-                STATUS_PENDING: C.info,
-            }.get(b.status, C.text_secondary)
+                self.ban_sel.fill(i)
+                self.table.setItem(
+                    i, 1, make_item(b.id, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                )
+                self.table.setItem(i, 2, make_item(b.ip, C.text_link, tip=b.ip))
+                self.table.setItem(
+                    i, COL_BAN_REASON, make_item(b.reason or "-", tip=b.reason or "")
+                )
+                self.table.setItem(
+                    i, 4, make_item(b.source_label, align=Qt.AlignmentFlag.AlignCenter)
+                )
+                self.table.setItem(
+                    i, 5, make_item(b.risk_score, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                )
+                self.table.setItem(
+                    i, 6, make_item(b.status_label, status_color, Qt.AlignmentFlag.AlignCenter)
+                )
+                self.table.setItem(
+                    i,
+                    7,
+                    make_item(b.duration_label, align=Qt.AlignmentFlag.AlignCenter, mono=True),
+                )
+                self.table.setItem(
+                    i, 8, make_item(b.expire_min, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                )
+                self.table.setItem(
+                    i, 9, make_item(b.created_min, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                )
 
-            self.table.setItem(i, 0, mk(b.id, align=Qt.AlignmentFlag.AlignCenter))
-            self.table.setItem(i, 1, mk(b.ip, C.text_link))
-            self.table.setItem(i, 2, mk(b.rule_name or "-"))
-            self.table.setItem(i, 3, mk(b.source_label, align=Qt.AlignmentFlag.AlignCenter))
-            self.table.setItem(i, 4, mk(b.reason or "-"))
-            self.table.setItem(i, 5, mk(b.risk_score, align=Qt.AlignmentFlag.AlignCenter))
-            self.table.setItem(i, 6, mk(b.status_label, status_color, Qt.AlignmentFlag.AlignCenter))
-            self.table.setItem(i, 7, mk(b.duration_label, align=Qt.AlignmentFlag.AlignCenter))
-            self.table.setItem(i, 8, mk(b.expire_label, align=Qt.AlignmentFlag.AlignCenter))
-            self.table.setItem(i, 9, mk(b.created_at or "-"))
-
-            self.table.setCellWidget(i, 10, self._ban_actions(b))
+                self.table.setCellWidget(i, 10, self._ban_actions(b))
+        finally:
+            self.ban_sel.end_render()
 
         self.lbl_info.setText(f"共 {len(rows)} 条 · 当前生效 {count_active_bans()} 条")
 
     def _ban_actions(self, b) -> QWidget:
         w = QWidget()
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(4)
 
         b_unban = QPushButton("解封")
-        b_unban.setFixedHeight(24)
+        b_unban.setFixedHeight(22)
         b_unban.setStyleSheet(small_button_style("success"))
         b_unban.setCursor(Qt.CursorShape.PointingHandCursor)
         b_unban.setEnabled(b.status == STATUS_ACTIVE)
         b_unban.clicked.connect(lambda: self._unban(b))
 
-        b_del = QPushButton("删记录")
-        b_del.setFixedHeight(24)
-        b_del.setStyleSheet(small_button_style("outline"))
-        b_del.setCursor(Qt.CursorShape.PointingHandCursor)
-        b_del.clicked.connect(lambda: self._delete(b))
+        more = row_menu_button(
+            [
+                ("查询该 IP 归属地", lambda: self.ask_lookup.emit(b.ip)),
+                ("复制 IP", lambda: self._copy(b.ip)),
+                None,
+                ("删除记录…", lambda: self._delete(b)),
+            ]
+        )
 
         lay.addWidget(b_unban)
-        lay.addWidget(b_del)
+        lay.addWidget(more)
         lay.addStretch(1)
         return w
+
+    @staticmethod
+    def _copy(text: str) -> None:
+        from qtcompat import QApplication
+
+        QApplication.clipboard().setText(text or "")
 
     def _unban(self, b) -> None:
         ok, err = ban_service.unban(b)
