@@ -92,7 +92,7 @@
         "isp": [],
         "cidrs": [],
         "ip_keywords": [],
-        "not_china": false
+        "only_china": false
       },
       "note": "示例：河南省来源的 IP 访问 18080 时完全豁免（不计风险、不建议封禁）。默认关闭，请按需启用或改写条件。"
     },
@@ -111,7 +111,7 @@
         "isp": [],
         "cidrs": [],
         "ip_keywords": [],
-        "not_china": false
+        "only_china": false
       },
       "note": "示例：山西来源不做放行、也不加分，只在事件与日志里打上「区域关注」标签，便于事后审计。"
     }

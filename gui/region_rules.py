@@ -88,8 +88,10 @@ def summarize(rule: Dict[str, Any]) -> str:
         bits.append("网段 " + "、".join(str(x) for x in m["cidrs"]))
     if m.get("ip_keywords"):
         bits.append("IP 前缀 " + "、".join(str(x) for x in m["ip_keywords"]))
-    if m.get("not_china"):
-        bits.append("非中国境内")
+    if m.get("only_china"):
+        bits.append("仅限中国境内")
+    elif m.get("not_china"):
+        bits.append("非中国境内")  # 兼容旧配置：该字段已由「仅限境内」取代
     return "；".join(bits) or "（未设置条件，规则不会生效）"
 
 
@@ -162,7 +164,8 @@ class RegionRuleDialog(QDialog):
         self.ed_keywords = QLineEdit(_join(m.get("ip_keywords")))
         self.ed_keywords.setPlaceholderText("按 IP 文本前缀匹配，如 113.118. ，多个用逗号分隔")
 
-        self.tg_not_china = ToggleSwitch(bool(m.get("not_china", False)))
+        # 仅限境内：归属地确认为中国（含港澳台按库的实际归属）才命中
+        self.tg_only_china = ToggleSwitch(bool(m.get("only_china", False)))
 
         self.sp_factor = QDoubleSpinBox()
         self.sp_factor.setRange(0.0, 1.0)
@@ -189,7 +192,7 @@ class RegionRuleDialog(QDialog):
         f.addRow("运营商", self.ed_isp)
         f.addRow("IP / 网段", self.ed_cidrs)
         f.addRow("IP 前缀", self.ed_keywords)
-        f.addRow("仅限境外", self._wrap(self.tg_not_china))
+        f.addRow("仅限境内", self._wrap(self.tg_only_china))
         f.addRow("降级系数", self.sp_factor)
         f.addRow("风险加分", self.sp_score)
         f.addRow("备注", self.ed_note)
@@ -247,7 +250,7 @@ class RegionRuleDialog(QDialog):
                 self,
                 "无法保存",
                 "至少要填一个有效的匹配条件（省份 / 城市 / 国家 / 运营商 / IP 网段 / "
-                "IP 前缀 / 仅限境外），否则这条规则会匹配所有地址。",
+                "IP 前缀 / 仅限境内），否则这条规则会匹配所有地址。",
             )
             return
         self.accept()
@@ -261,7 +264,7 @@ class RegionRuleDialog(QDialog):
             or m["isp"]
             or m["cidrs"]
             or m["ip_keywords"]
-            or m["not_china"]
+            or m["only_china"]
         )
 
     def values(self) -> Dict[str, Any]:
@@ -281,7 +284,7 @@ class RegionRuleDialog(QDialog):
                 "isp": _split_items(self.ed_isp.text()),
                 "cidrs": _split_items(self.ed_cidrs.toPlainText()),
                 "ip_keywords": _split_items(self.ed_keywords.text()),
-                "not_china": self.tg_not_china.isChecked(),
+                "only_china": self.tg_only_china.isChecked(),
             },
             "note": self.ed_note.text().strip(),
         }

@@ -259,7 +259,15 @@ class RuleEngine:
                     "isps": cls._as_str_list(match, "isp"),
                     "nets": nets,
                     "ip_keywords": cls._as_str_list(match, "ip_keywords"),
-                    "not_china": bool(match.get("not_china", False)),
+                    # 归属地范围（单一维度，二选一）：
+                    #   china    = 仅限境内（只有归属地确定为中国才命中）
+                    #   overseas = 仅限境外（兼容旧的 not_china 字段，配置可平滑迁移）
+                    #   ""       = 不限定
+                    "geo_scope": (
+                        "china"
+                        if match.get("only_china", False)
+                        else ("overseas" if match.get("not_china", False) else "")
+                    ),
                 }
             )
         return out
@@ -294,11 +302,16 @@ class RuleEngine:
                     continue
             if r["ip_keywords"] and not any(ip.startswith(k) for k in r["ip_keywords"]):
                 continue
-            if r["not_china"] and not (geo.found and not geo.is_china):
+            # 归属地范围：境内 / 境外都必须「归属地已确定」才判定，
+            # 未知（内网、保留地址、库未收录）既不当作境内，也不当作境外
+            scope = r["geo_scope"]
+            if scope == "china" and not (geo.found and geo.is_china):
+                continue
+            if scope == "overseas" and not (geo.found and not geo.is_china):
                 continue
 
             geo_dims = r["provinces"] or r["cities"] or r["countries"] or r["isps"]
-            ip_dims = r["nets"] or r["ip_keywords"] or r["not_china"]
+            ip_dims = r["nets"] or r["ip_keywords"] or bool(scope)
             # 一条什么维度都没配的规则等价于"匹配全部地址"，属于误配，直接不生效
             if not geo_dims and not ip_dims:
                 continue

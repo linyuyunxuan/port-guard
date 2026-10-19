@@ -8,7 +8,7 @@
 覆盖重点：
 · 四种动作各自的语义（放行短路、仅关注不影响分数、降级打折、判风险加分）
 · 生效端口限定（只对某端口放行，换个端口不能连带放行）
-· 多种匹配维度（省 / 市 / 国家 / 运营商 / CIDR / IP 前缀 / 仅境外）
+· 多种匹配维度（省 / 市 / 国家 / 运营商 / CIDR / IP 前缀 / 仅限境内）
 · 边界：归属地未知、规则未启用、条件为空的误配规则、非法 CIDR / 非法动作
 """
 
@@ -134,10 +134,10 @@ def test_watch_keeps_existing_score(tmp_path):
     """仅关注不能把已有风险分抹掉"""
     eng = _engine(
         tmp_path,
-        [{**ALLOW_HENAN, "action": "watch", "target_ports": [], "match": {"not_china": True}}],
+        [{**ALLOW_HENAN, "action": "watch", "target_ports": [], "match": {"only_china": True}}],
     )
-    r = eng.evaluate(_rec("4.4.4.4", 3389), RUSSIA)  # 境外 + 管理端口 → 65
-    assert r.score == 65
+    r = eng.evaluate(_scanner_rec(), HENAN)  # 中国 + 扫描器 UA → 45
+    assert r.score == 45
     assert region_rule_key("watch", "r-hn") in r.matched_rules
 
 
@@ -185,12 +185,12 @@ def test_suggest_ban_adds_score_and_flags(tmp_path):
                 "action": "suggest_ban",
                 "score": 95,
                 "target_ports": [3389],
-                "match": {"not_china": True},
+                "match": {"only_china": True},
             }
         ],
     )
-    r = eng.evaluate(_rec("4.4.4.4", 3389), RUSSIA)
-    assert r.score == 100  # 65 + 95，封顶 100
+    r = eng.evaluate(_scanner_rec(), HENAN)  # 45 + 95，封顶 100
+    assert r.score == 100
     assert r.level == "critical"
     assert r.suggest_ban is True
 
@@ -254,12 +254,20 @@ def test_match_by_ip_keyword(tmp_path):
     assert eng.evaluate(_rec("113.119.1.1"), HENAN).whitelisted is False
 
 
-def test_match_not_china(tmp_path):
+def test_match_only_china(tmp_path):
+    """仅限境内：只有归属地确定为中国才命中"""
+    eng = _engine(tmp_path, [{**ALLOW_HENAN, "match": {"only_china": True}}])
+    assert eng.evaluate(_rec("2.2.2.2"), HENAN).whitelisted is True
+    assert eng.evaluate(_rec("4.4.4.4"), RUSSIA).whitelisted is False
+    # 归属地未知时不能算「境内」
+    assert eng.evaluate(_rec("5.5.5.5"), UNKNOWN).whitelisted is False
+
+
+def test_match_legacy_not_china_still_works(tmp_path):
+    """旧配置的 not_china 字段仍按「仅限境外」生效，升级后不会静默失效"""
     eng = _engine(tmp_path, [{**ALLOW_HENAN, "match": {"not_china": True}}])
     assert eng.evaluate(_rec("4.4.4.4"), RUSSIA).whitelisted is True
     assert eng.evaluate(_rec("2.2.2.2"), HENAN).whitelisted is False
-    # 归属地未知时不能算「境外」
-    assert eng.evaluate(_rec("5.5.5.5"), UNKNOWN).whitelisted is False
 
 
 def test_multi_dimension_requires_all(tmp_path):
