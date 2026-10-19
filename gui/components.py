@@ -1,0 +1,273 @@
+"""PortGuard — 窗口外壳级组合控件
+
+与 `gui/widgets.py`（通用原子控件：圆点 / 开关 / 徽章 / 空态 …）的分工：
+本文件只放「一整个窗口外壳才会用到」的拼装件 —— 侧栏品牌盾牌、页面标题区、
+顶部状态条、行内「更多操作」。这些部件的尺寸由设计规范直接钉死（56 / 44 / 22），
+所以不提供自由布局参数。
+
+约束（同 theme.py，见 _design/01_visual_direction.md §5、§7）：
+- 颜色只从 `gui.theme.C` 取，不自造第 5 个色相；
+- 图标一律 QPainter 自绘，不使用 emoji —— `🛡` 在 Win10 上是彩色字形（破坏
+  「单一强调色」调性），在 Server 2008 R2 上可能缺字形显示成豆腐块；
+- QSS 没有 box-shadow / transition，故需要「状态点 + 文字」的地方靠自绘；
+- 注解必须写成 Python 3.8 当场可求值的形式（typing.List / Optional）。
+"""
+
+from typing import Callable, List, Optional, Tuple
+
+from gui.theme import C
+from gui.widgets import StatusItem
+from qtcompat import (
+    QColor,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPainter,
+    QPen,
+    QPointF,
+    QPolygonF,
+    Qt,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+    Signal,
+)
+
+# 行内菜单项：(显示文字, 无参回调)。回调返回值被忽略，允许 ``int`` 之类的顺带返回。
+MenuEntry = Tuple[str, Callable[[], object]]
+
+
+class ShieldMark(QWidget):
+    """20×20 自绘盾牌（侧栏品牌区图标）
+
+    用自绘而不是 `🛡`/图标字体：emoji 在 Win10 上是彩色字形、无法着色，
+    也违反「颜色只表达语义」；图标字体又会引入新依赖。
+    """
+
+    def __init__(self, size: int = 20, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._size = size
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, e) -> None:
+        w = float(self._size)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(C.primary))
+        p.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(w * 0.50, w * 0.04),
+                    QPointF(w * 0.92, w * 0.20),
+                    QPointF(w * 0.92, w * 0.52),
+                    QPointF(w * 0.50, w * 0.96),
+                    QPointF(w * 0.08, w * 0.52),
+                    QPointF(w * 0.08, w * 0.20),
+                ]
+            )
+        )
+
+        # 对勾是「挖空」效果：用 bg_sidebar(#0A0C10) 压 primary 得 5.44:1，
+        # 比 accent_on 更实；笔画 2.4（20px 下 1px 会糊成灰线），RoundCap 保圆头。
+        pen = QPen(QColor(C.bg_sidebar))
+        pen.setWidthF(max(2.4, w * 0.12))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # 两段分别 ≈5.9px / ≈11.4px（20px 下），短臂再长就会戳出盾牌轮廓
+        p.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(w * 0.195, w * 0.485),
+                    QPointF(w * 0.400, w * 0.700),
+                    QPointF(w * 0.765, w * 0.260),
+                ]
+            )
+        )
+        p.end()
+
+
+class PageHeader(QWidget):
+    """页面标题区（高 56）
+
+    结构：标题 20/600 `text_on_dark` + 说明 12 `text_muted`（同行、间距 10、
+    与标题下缘对齐）+ 右侧动作区（间距 8、右对齐、垂直居中）。
+
+    说明与标题在同一行而不是换行：`02_ux_spec.md` P1-1 要求 7 页标题基线一致，
+    说明一旦换行，各页标题区的实际高度就会随文案长短浮动。
+    """
+
+    HEIGHT = 56
+
+    def __init__(self, title: str, desc: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addStretch(1)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+
+        self.title_lbl = QLabel(title)
+        self.title_lbl.setObjectName("page_title")
+        self.title_lbl.setFixedHeight(26)
+        row.addWidget(self.title_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.desc_lbl = QLabel(desc)
+        self.desc_lbl.setObjectName("page_desc")
+        self.desc_lbl.setFixedHeight(26)
+        # 固定同高 + 底对齐 ≈ 同基线（20px 与 12px 的 descent 差约 2px）
+        self.desc_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        self.desc_lbl.setVisible(bool(desc))
+        row.addSpacing(10)
+        row.addWidget(self.desc_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        row.addStretch(1)
+
+        self._actions = QHBoxLayout()
+        self._actions.setContentsMargins(0, 0, 0, 0)
+        self._actions.setSpacing(8)
+        self._actions.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addLayout(self._actions)
+
+        outer.addLayout(row)
+        outer.addStretch(1)
+
+    def add_action(self, w: QWidget) -> QWidget:
+        """追加一个右侧动作控件（页面级按钮高 32，组内间距 8）"""
+        self._actions.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
+        return w
+
+    def set_desc(self, text: str) -> None:
+        self.desc_lbl.setText(text)
+        self.desc_lbl.setVisible(bool(text))
+
+
+class ClickableStatusItem(StatusItem):
+    """可点击的顶部状态项 = `StatusItem` + `clicked` 信号
+
+    `StatusItem` 在 `gui/widgets.py`（通用控件，本轮不动），这里只加一层点击
+    能力：Qt 的虚拟函数必须靠子类重写才生效，实例级打补丁（`w.mouseReleaseEvent
+    = ...`）在 PySide 上不会改变 C++ 侧的分发。
+    """
+
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+
+class TopStatusBar(QFrame):
+    """顶部持久健康态条（高 44）
+
+    接收服务 / 本机观察 / 权限 三项 —— 这三个「是否真在防护」的状态原先被压在
+    26px 状态栏最右端，等于没有（`02_ux_spec.md` P0-8）。项间的 1px 竖线由本控件
+    负责插入，调用方只 `add_item()`，不用关心分隔线位置。
+    """
+
+    HEIGHT = 44
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("topbar")
+        self.setFixedHeight(self.HEIGHT)
+
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(16, 0, 16, 0)
+        self._lay.setSpacing(10)
+        # 项一律左对齐：末尾留 stretch，insertWidget 时插在它前面
+        self._lay.addStretch(1)
+
+        self.items: List[ClickableStatusItem] = []
+
+    def add_item(self, label: str) -> ClickableStatusItem:
+        """追加一项，返回可继续 `set_state()` / 连 `clicked` 的项对象"""
+        item = ClickableStatusItem(label)
+        item.setAccessibleName(label)
+        if self.items:
+            sep = QFrame()
+            sep.setObjectName("topbar_sep")
+            sep.setFixedWidth(1)
+            sep.setFixedHeight(14)
+            self._lay.insertWidget(self._lay.count() - 1, sep, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._lay.insertWidget(self._lay.count() - 1, item, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.items.append(item)
+        return item
+
+
+class DotsButton(QToolButton):
+    """三点「更多」按钮：三个 3px 圆点**自绘**，不依赖 `⋯` 字形
+
+    U+22EF / U+22EE 在 Windows 7 / Server 2008 R2 的微软雅黑里**没有字形**，
+    会渲染成方框；Win10 上是细窄的居中点，视觉重心偏高。三个小圆点既保证
+    两代系统一致，也能自己控制直径与间距（22px 方按钮内：3 点 + 2 间距 = 15px 宽）。
+    """
+
+    def __init__(self, size: int = 22, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName("更多操作")
+        self.setToolTip("更多操作")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+
+    def paintEvent(self, e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = C.text_primary if (self.underMouse() or self.isDown()) else C.text_secondary
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        cx, cy = self.width() / 2, self.height() / 2
+        r = 1.5
+        gap = 5.0
+        for i in (-1, 0, 1):
+            p.drawEllipse(QPointF(cx + i * gap, cy), r, r)
+
+
+def _menu_slot(callback: Callable[[], object]) -> Callable[..., None]:
+    """把无参回调包成 Qt 槽。
+
+    ⚠️ 不要用 `lambda _checked=False: cb()` 这种**带默认参数的 lambda**：
+    shiboken2（PySide2）会按 0 参调用它并抛 TypeError，而窗口化运行时该错误
+    只进看不见的 stderr，表现为「点了没反应」（详见 `MainWindow._nav_slot`）。
+    带默认参数的 `def` 在 PySide2 / PySide6 上都已验证 0 参、1 参均可。
+    """
+
+    def slot(_checked: bool = False) -> None:
+        callback()
+
+    return slot
+
+
+def row_menu_button(
+    entries: List[Optional[MenuEntry]], parent: Optional[QWidget] = None, size: int = 22
+) -> DotsButton:
+    """「更多操作」按钮：默认 22×22（表格行内），工具条传 size=32
+
+    entries: [(菜单文字, 无参回调), ...]；列表里的 `None` 表示一条分隔线。
+    纯图标按钮必须同时具备 accessibleName 与 tooltip（`02_ux_spec.md` §6 规则 ④）；
+    但**不给它发明文字** —— 菜单里每一项才是有意义的动作名。
+    """
+    btn = DotsButton(size, parent)
+
+    menu = QMenu(btn)
+    for entry in entries:
+        if entry is None:
+            menu.addSeparator()
+            continue
+        text, callback = entry
+        act = menu.addAction(text)
+        act.triggered.connect(_menu_slot(callback))
+    btn.setMenu(menu)
+    btn.setEnabled(bool(entries))
+    return btn

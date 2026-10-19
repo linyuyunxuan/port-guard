@@ -49,7 +49,8 @@ dev = [
 line-length = 100
 target-version = "py38"
 # ip2region/ 是上游 vendored 代码（见 NOTICE），不做任何风格要求
-extend-exclude = ["ip2region", "build", "dist", "assets", "data"]
+# _design/ 是设计验证脚手架（离屏渲染探针），不进产物，也不参与门禁
+extend-exclude = ["ip2region", "build", "dist", "assets", "data", "_design"]
 
 [tool.ruff.lint]
 select = [
@@ -134,7 +135,11 @@ known-first-party = ["core", "app", "gui"]
 python_version = "3.10"
 # 注意：mypy 的 exclude 是正则，Windows 上路径会带反斜杠，
 # 故用「斜杠两侧可选」的写法，确保 vendored 的 ip2region 一定被排除。
-exclude = ["(^|[/\\\\])ip2region([/\\\\]|$)", "(^|[/\\\\])(build|dist)([/\\\\]|$)"]
+exclude = [
+    "(^|[/\\\\])ip2region([/\\\\]|$)",
+    "(^|[/\\\\])(build|dist)([/\\\\]|$)",
+    "(^|[/\\\\])_design([/\\\\]|$)",
+]
 # PySide6-Essentials / uvicorn 等未必带完整类型存根
 ignore_missing_imports = true
 # 即使函数没写注解也检查函数体（能抓出真实的类型错用）

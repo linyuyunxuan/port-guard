@@ -1,4 +1,14 @@
-"""PortGuard — 规则配置页"""
+"""PortGuard — 规则配置页
+
+三块内容用下划线 tab 分：风险规则 / 黑·白名单 / 区域访问白名单。
+
+本轮只改呈现（_design/02_ux_spec.md P1-12、P2-3）：
+  · 每张规则卡 = `#panel` 无边框 r8，标题区 14/600 + 说明 12 muted；
+  · 参数一行栅格：标签在上、控件在下，控件宽度按类型固定，右端留空吸收余量；
+  · 任一改动在标题区亮起「● 未保存」，保存后熄灭 —— 之前只有区域 tab 有圆点；
+  · 停用的规则整卡降一级明度（标题变 muted + 「已停用」标记），
+    而不是只把控件 setEnabled(False) 后看起来像坏了。
+"""
 
 from typing import Dict, List, Tuple
 
@@ -12,6 +22,7 @@ from core.config import (
 )
 from core.rule_engine import get_engine
 from core.rules_meta import RULE_DESCS, RULE_LABELS, RULE_PARAMS
+from gui.components import PageHeader
 from gui.region_rules import RegionRulesTab
 from gui.theme import C
 from gui.widgets import ToggleSwitch
@@ -20,7 +31,6 @@ from qtcompat import (
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,40 +53,44 @@ ACTION_ITEMS = [("suggest_ban", "生成封禁建议"), ("alert", "仅告警")]
 class RuleCard(QFrame):
     """单条规则配置卡片"""
 
+    changed = Signal()  # 任一参数变化（用于页面级「未保存」标记）
+
     def __init__(self, rule_id: str, cfg: Dict, parent=None):
         super().__init__(parent)
         self.rule_id = rule_id
         self.cfg = dict(cfg)
         self._fields: Dict[str, Tuple[QWidget, str]] = {}
-        self.setObjectName("stat_card")
-        self.setStyleSheet(
-            f"#stat_card{{background:{C.bg_card};border:1px solid {C.border};border-radius:10px;}}"
-        )
+        self.setObjectName("panel")
         self._build()
 
     def _build(self) -> None:
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 12)
-        lay.setSpacing(8)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(6)
 
         top = QHBoxLayout()
-        top.setSpacing(8)
+        top.setSpacing(10)
         self.toggle = ToggleSwitch(bool(self.cfg.get("enabled", True)))
-        name = QLabel(RULE_LABELS.get(self.rule_id, self.rule_id))
-        name.setStyleSheet(f"color:{C.text_on_dark};font-size:14px;font-weight:600;")
-        desc = QLabel(RULE_DESCS.get(self.rule_id, ""))
-        desc.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
-        desc.setWordWrap(True)
+        self.name = QLabel(RULE_LABELS.get(self.rule_id, self.rule_id))
+        self.name.setStyleSheet(f"color:{C.text_on_dark};font-size:14px;font-weight:600;")
+        self.tag_off = QLabel("已停用")
+        self.tag_off.setStyleSheet(f"color:{C.text_muted};font-size:11.5px;")
 
         top.addWidget(self.toggle)
-        top.addWidget(name)
+        top.addWidget(self.name)
+        top.addWidget(self.tag_off)
         top.addStretch(1)
         lay.addLayout(top)
+
+        desc = QLabel(RULE_DESCS.get(self.rule_id, ""))
+        desc.setObjectName("hint")
+        desc.setWordWrap(True)
         lay.addWidget(desc)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(8)
+        grid.setVerticalSpacing(4)
+        grid.setContentsMargins(0, 6, 0, 0)
 
         col = 0
         # 分值
@@ -163,8 +177,24 @@ class RuleCard(QFrame):
 
         grid.setColumnStretch(col, 1)
         lay.addLayout(grid)
+
+        for w2 in (self.sp_score, self.cb_level, self.cb_action):
+            self._connect(w2)
+        for w3, _typ in self._fields.values():
+            self._connect(w3)
         self.toggle.toggled.connect(self._on_toggle)
         self._on_toggle(self.toggle.isChecked())
+
+    def _connect(self, w: QWidget) -> None:
+        if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+            w.valueChanged.connect(self._emit_changed)
+        elif isinstance(w, QComboBox):
+            w.currentIndexChanged.connect(self._emit_changed)
+        elif isinstance(w, QLineEdit):
+            w.textChanged.connect(self._emit_changed)
+
+    def _emit_changed(self, *_args) -> None:
+        self.changed.emit()
 
     @staticmethod
     def _lbl(text: str) -> QLabel:
@@ -178,6 +208,11 @@ class RuleCard(QFrame):
         self.sp_score.setEnabled(on)
         self.cb_level.setEnabled(on)
         self.cb_action.setEnabled(on)
+        # 停用态：降明度 + 明说「已停用」，而不是让控件看起来像坏了
+        self.name.setStyleSheet(
+            f"color:{C.text_on_dark if on else C.text_muted};font-size:14px;font-weight:600;"
+        )
+        self.tag_off.setVisible(not on)
 
     def collect(self) -> Dict:
         out = {
@@ -212,41 +247,43 @@ class RulesPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cards: Dict[str, RuleCard] = {}
+        self._dirty = False
+        self._loading = True
         self._build()
         self.reload()
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 12)
+        root.setContentsMargins(24, 16, 24, 12)
         root.setSpacing(12)
 
-        head = QHBoxLayout()
-        t = QLabel("规则配置")
-        t.setObjectName("page_title")
-        d = QLabel("修改后点击保存，规则引擎即时生效，无需重启")
-        d.setObjectName("page_desc")
-        head.addWidget(t)
-        head.addWidget(d)
-        head.addStretch(1)
+        head = PageHeader("规则配置", "修改后保存，规则引擎即时生效，无需重启")
+        self.lbl_dirty = QLabel("")
+        self.lbl_dirty.setStyleSheet(f"color:{C.warning};font-size:12px;")
+        self.lbl_dirty.setVisible(False)
+        head.add_action(self.lbl_dirty)
 
-        btn_reload = QPushButton("重新载入")
-        btn_reload.setObjectName("btn_outline")
-        btn_reload.clicked.connect(self.reload)
-        btn_save = QPushButton("保存并生效")
-        btn_save.setObjectName("btn_primary")
-        btn_save.clicked.connect(self.save)
-        head.addWidget(btn_reload)
-        head.addWidget(btn_save)
-        root.addLayout(head)
+        self.btn_reload = QPushButton("重新载入")
+        self.btn_reload.setObjectName("btn_outline")
+        self.btn_reload.clicked.connect(self.reload)
+        head.add_action(self.btn_reload)
+
+        self.btn_save = QPushButton("保存并生效")
+        self.btn_save.setObjectName("btn_primary")
+        self.btn_save.clicked.connect(self.save)
+        head.add_action(self.btn_save)
+        root.addWidget(head)
 
         self.tabs = QTabWidget()
 
         # Tab1 规则
         self.rules_area = QScrollArea()
         self.rules_area.setWidgetResizable(True)
+        self.rules_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.rules_area.setStyleSheet("QScrollArea{background:transparent;}")
         self.rules_host = QWidget()
         self.rules_lay = QVBoxLayout(self.rules_host)
-        self.rules_lay.setContentsMargins(2, 8, 8, 8)
+        self.rules_lay.setContentsMargins(0, 4, 8, 8)
         self.rules_lay.setSpacing(10)
         self.rules_lay.addStretch(1)
         self.rules_area.setWidget(self.rules_host)
@@ -257,61 +294,104 @@ class RulesPage(QWidget):
 
         # Tab3 区域规则（区域访问白名单）
         self.tab_region = RegionRulesTab()
-        self.tab_region.changed.connect(self._mark_region_dirty)
+        self.tab_region.changed.connect(self._mark_dirty)
         self.tabs.addTab(self.tab_region, "区域访问白名单")
 
         root.addWidget(self.tabs, 1)
 
-    def _mark_region_dirty(self) -> None:
-        """区域规则一改动就给标签加个圆点，提示「有尚未保存的改动」"""
+    # ═══════════════════════════════════════════════
+    #  「未保存」标记
+    # ═══════════════════════════════════════════════
+    def _mark_dirty(self, *_args) -> None:
+        """任一改动点亮标题区标记；区域规则另给 tab 加圆点（定位到哪个 tab）"""
+        if self._loading:
+            return
+        if self._dirty:
+            return
+        self._dirty = True
+        self.lbl_dirty.setText("● 未保存")
+        self.lbl_dirty.setVisible(True)
+        self._dot_region_tab(True)
+
+    def _clear_dirty(self) -> None:
+        self._dirty = False
+        self.lbl_dirty.setVisible(False)
+        self.lbl_dirty.setText("")
+        self._dot_region_tab(False)
+
+    def _dot_region_tab(self, on: bool) -> None:
         i = self.tabs.indexOf(self.tab_region)
         if i >= 0:
-            self.tabs.setTabText(i, "区域访问白名单 •")
+            self.tabs.setTabText(i, "区域访问白名单 •" if on else "区域访问白名单")
 
     def _build_lists(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 12, 8, 8)
+        lay.setContentsMargins(0, 8, 8, 8)
         lay.setSpacing(10)
 
         tip = QLabel(
             "每行一条，支持单个 IP 或 CIDR 网段（如 203.0.113.0/24）。"
             "白名单优先于一切规则，命中即豁免且永不封禁。"
         )
-        tip.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        tip.setObjectName("hint")
         tip.setWordWrap(True)
         lay.addWidget(tip)
 
         row = QHBoxLayout()
         row.setSpacing(12)
 
-        g1 = QGroupBox("黑名单（命中直接判为严重风险）")
-        l1 = QVBoxLayout(g1)
-        self.txt_black = QPlainTextEdit()
-        self.txt_black.setPlaceholderText("203.0.113.10\n198.51.100.0/24")
-        l1.addWidget(self.txt_black)
-
-        g2 = QGroupBox("白名单（永不封禁）")
-        l2 = QVBoxLayout(g2)
-        self.txt_white = QPlainTextEdit()
-        self.txt_white.setPlaceholderText("127.0.0.1\n192.168.1.0/24")
-        l2.addWidget(self.txt_white)
-
-        row.addWidget(g1)
-        row.addWidget(g2)
-        lay.addLayout(row)
+        p1, self.txt_black = self._list_panel(
+            "黑名单", "命中直接判为严重风险", "203.0.113.10\n198.51.100.0/24"
+        )
+        p2, self.txt_white = self._list_panel(
+            "白名单", "命中即豁免，永不封禁", "127.0.0.1\n192.168.1.0/24"
+        )
+        for _ed in (self.txt_black, self.txt_white):
+            _ed.textChanged.connect(self._mark_dirty)
+        row.addWidget(p1)
+        row.addWidget(p2)
+        lay.addLayout(row, 1)
 
         b = QHBoxLayout()
-        btn = QPushButton("保存名单")
-        btn.setObjectName("btn_primary")
-        btn.clicked.connect(self._save_lists)
         b.addStretch(1)
-        b.addWidget(btn)
+        self.btn_save_lists = QPushButton("保存名单")
+        self.btn_save_lists.setObjectName("btn_primary")
+        self.btn_save_lists.clicked.connect(self._save_lists)
+        b.addWidget(self.btn_save_lists)
         lay.addLayout(b)
         return w
 
+    @staticmethod
+    def _list_panel(title: str, hint: str, placeholder: str) -> Tuple[QFrame, QPlainTextEdit]:
+        """一栏地址清单：标题 + 一句说明 + 等宽编辑器（两栏等高 stretch）"""
+        p = QFrame()
+        p.setObjectName("panel")
+        lay = QVBoxLayout(p)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(4)
+
+        t = QLabel(title)
+        t.setObjectName("panel_title")
+        lay.addWidget(t)
+        h = QLabel(hint)
+        h.setObjectName("hint")
+        lay.addWidget(h)
+
+        ed = QPlainTextEdit()
+        ed.setPlaceholderText(placeholder)
+        ed.setStyleSheet(
+            f"QPlainTextEdit{{background:{C.bg_input};color:{C.text_primary};"
+            f"border:1px solid {C.border};border-radius:6px;padding:8px;"
+            f'font-family:"Consolas","Microsoft YaHei UI",monospace;font-size:12px;}}'
+            f"QPlainTextEdit:focus{{border-color:{C.primary};}}"
+        )
+        lay.addWidget(ed, 1)
+        return p, ed
+
     # ── 数据 ──
     def reload(self) -> None:
+        self._loading = True
         eng = get_engine()
         eng.reload()
         cfg = eng.get_config().get("rules", {})
@@ -329,6 +409,7 @@ class RulesPage(QWidget):
             if rule_id not in cfg:
                 continue
             card = RuleCard(rule_id, cfg[rule_id], self.rules_host)
+            card.changed.connect(self._mark_dirty)
             self.rules_lay.insertWidget(self.rules_lay.count() - 1, card)
             self._cards[rule_id] = card
 
@@ -336,9 +417,8 @@ class RulesPage(QWidget):
 
         # 区域规则
         self.tab_region.load(eng.get_config().get("region_rules") or [])
-        i = self.tabs.indexOf(self.tab_region)
-        if i >= 0:
-            self.tabs.setTabText(i, "区域访问白名单")
+        self._loading = False
+        self._clear_dirty()
 
     def _load_lists(self) -> None:
         eng = get_engine()
@@ -360,9 +440,7 @@ class RulesPage(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "保存失败", str(e))
             return
-        i = self.tabs.indexOf(self.tab_region)
-        if i >= 0:
-            self.tabs.setTabText(i, "区域访问白名单")
+        self._clear_dirty()
         self.rules_saved.emit()
         enabled = sum(1 for r in region_rules if r.get("enabled", True))
         QMessageBox.information(
@@ -420,6 +498,6 @@ def _valid(entry: str) -> bool:
             ipaddress.ip_network(entry, strict=False)
         else:
             ipaddress.ip_address(entry)
-        return True
     except Exception:
         return False
+    return True

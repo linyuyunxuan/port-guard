@@ -7,7 +7,7 @@ import datetime
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from core.config import LEVEL_LABEL, LEVEL_NORMAL, LEVEL_ORDER
 
@@ -23,6 +23,35 @@ def ms_to_str(ms: Optional[int]) -> str:
         return "-"
     try:
         return datetime.datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "-"
+
+
+def ms_to_short(ms: Optional[int]) -> str:
+    """毫秒时间戳 -> 表格用短时间 `MM-DD HH:MM`
+
+    19 字符的完整时间在 30px 行高里要占 153px（Consolas 12 + 内边距），
+    1200 宽窗口下光时间列就要吃掉六分之一。列表只用来判断「什么时候」，
+    年份与秒数在 tooltip 和详情对话框里仍然是完整的。
+    """
+    if not ms:
+        return "-"
+    try:
+        return datetime.datetime.fromtimestamp(ms / 1000).strftime("%m-%d %H:%M")
+    except Exception:
+        return "-"
+
+
+def ms_to_min(ms: Optional[int]) -> str:
+    """毫秒时间戳 -> `YYYY-MM-DD HH:MM`（去掉秒，保留年份）
+
+    封禁到期时间可以跨年（最长 365 天 / 也可以是永久），
+    所以这里不能像事件列表那样省掉年份。
+    """
+    if not ms:
+        return "-"
+    try:
+        return datetime.datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return "-"
 
@@ -80,16 +109,38 @@ class GeoInfo:
         parts = [p for p in (self.country, self.province, self.city, self.isp) if p and p != "0"]
         return "·".join(parts) if parts else "未知"
 
+    # 离线库里对保留 / 内网段的 country 字段是英文标记，列表里统一成中文短词，
+    # 免得一列里中英混排（完整原文仍在 tooltip 的 display 里）
+    _SPECIAL: ClassVar[Dict[str, str]] = {
+        "reserved": "保留地址",
+        "lan": "内网",
+        "localhost": "本机",
+        "loopback": "回环",
+        "private": "内网",
+    }
+
     @property
     def region_short(self) -> str:
         """表格用的紧凑归属地：广东省 深圳市（境外则为 国家 城市）"""
         if not self.found:
             return "未知"
         if self.is_china:
+            # 去重：直辖市 / 特别行政区常出现「香港 香港」，省与市同名时只留一个
             parts = [p for p in (self.province, self.city) if p and p != "0"]
+            if len(parts) == 2 and parts[0] == parts[1]:
+                parts = parts[:1]
             return " ".join(parts) or "中国"
-        parts = [p for p in (self.country, self.city) if p and p != "0"]
-        return " ".join(parts) or self.country or "未知"
+        country = self._SPECIAL.get(self.country.strip().lower(), self.country)
+        city = self.city
+        # 保留段常见「Reserved Reserved」：国家与城市同名时只留一个
+        if city and city.lower() == self.country.strip().lower():
+            city = ""
+        label = " ".join(p for p in (country, city) if p and p != "0")
+        # 境外长名（United States Fremont / Australia Brisbane）在表格里会吃掉 160px：
+        # 列表只保证「哪个国家」可读，城市留给 tooltip 的完整 display
+        if len(label) > 16 and country:
+            label = country
+        return label or country or "未知"
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -271,3 +322,20 @@ class BanRecord:
         if not self.expire_at:
             return "永久"
         return ms_to_str(self.expire_at)
+
+    @property
+    def expire_min(self) -> str:
+        """表格用到期时间（`YYYY-MM-DD HH:MM`）；文字态（永久 / 已解封）原样保留"""
+        if self.status == STATUS_UNBANNED:
+            return "-"
+        if not self.expire_at:
+            return "永久"
+        return ms_to_min(self.expire_at)
+
+    @property
+    def created_min(self) -> str:
+        """`created_at` 是库里的 `YYYY-MM-DD HH:MM:SS` 字符串，表格里去掉秒"""
+        text = (self.created_at or "").strip()
+        if len(text) >= 16 and text[4] == "-" and text[7] == "-":
+            return text[:16]
+        return text or "-"

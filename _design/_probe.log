@@ -1,0 +1,2 @@
+2026-10-19 16:27:45 INFO    [MainThread] portguard.geo_locator: 定位库加载完成：v4=ip2region_v4.xdb（10.6 MB） v6=ip2region_v6.xdb（35.6 MB）
+2026-10-19 16:27:46 INFO    [pg-watch] portguard.port_watcher: 本机端口观察器已启动：端口=[3389, 1433, 3306, 6379, 18080] 通道=TCP 连接表轮询、防火墙日志 间隔=5.0s 去重=120s

@@ -62,3 +62,8 @@ _smoke.spec
 *~
 Thumbs.db
 Desktop.ini
+
+# ── 设计稿 / 离屏探针的产物（脚本入库，图片与快照不入）──
+_design/*.png
+_design/after/
+_design/before/

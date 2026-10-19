@@ -29,6 +29,7 @@ from core.config import LEVEL_LABEL
 from core.logger import get_logger, log_file
 from core.logtail import LogLine, LogTailer
 from core.models import AccessRecord
+from gui.components import PageHeader, row_menu_button
 from gui.theme import LEVEL_COLORS, C
 from gui.widgets import ToggleSwitch
 from qtcompat import (
@@ -39,6 +40,7 @@ from qtcompat import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    Qt,
     QTimer,
     QVBoxLayout,
     QWidget,
@@ -116,23 +118,18 @@ class LogsPage(QWidget):
     # ═══════════════════════════════════════════════
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(24, 16, 24, 12)
+        root.setSpacing(12)
 
-        head = QHBoxLayout()
-        t = QLabel("运行日志")
-        t.setObjectName("page_title")
-        d = QLabel("日志直接显示在程序内，可过滤、搜索、暂停")
-        d.setObjectName("page_desc")
-        head.addWidget(t)
-        head.addWidget(d)
-        head.addStretch(1)
-        root.addLayout(head)
+        head = PageHeader("运行日志", "日志直接显示在程序内，可过滤、搜索、暂停")
+        root.addWidget(head)
 
-        # ── 工具条 ──
+        # ── 工具条（左：筛选簇 / 右：查看簇，簇间 24、簇内 8）──
         bar = QHBoxLayout()
-        bar.setSpacing(8)
+        bar.setSpacing(0)
 
+        left = QHBoxLayout()
+        left.setSpacing(8)
         self.source = QComboBox()
         self.source.addItems(["程序运行日志", "端口访问日志"])
         self.source.setFixedWidth(140)
@@ -146,36 +143,43 @@ class LogsPage(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索关键字（IP / 端口 / 规则 / 异常信息）…")
         self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(200)
+        self.search.setMinimumWidth(240)
         self.search.textChanged.connect(self._render)
 
+        left.addWidget(self.source)
+        left.addWidget(self.level)
+        left.addWidget(self.search, 1)
+
+        right = QHBoxLayout()
+        right.setSpacing(8)
         self.toggle_pause = ToggleSwitch(False)
         self.toggle_pause.toggled.connect(self._on_pause)
-        lbl_pause = QLabel("暂停")
-        lbl_pause.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
+        right.addWidget(self.toggle_pause)
+        right.addWidget(self._sub_label("暂停"))
 
         self.toggle_scroll = ToggleSwitch(True)
-        lbl_scroll = QLabel("自动滚动")
-        lbl_scroll.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
+        right.addWidget(self.toggle_scroll)
+        right.addWidget(self._sub_label("自动滚动"))
 
         btn_clear = QPushButton("清空显示")
         btn_clear.setObjectName("btn_outline")
         btn_clear.clicked.connect(self.clear_view)
+        right.addWidget(btn_clear)
 
-        btn_dir = QPushButton("打开日志文件夹")
-        btn_dir.setObjectName("btn_outline")
-        btn_dir.setToolTip("次要入口：需要在资源管理器里核对原始文件时使用")
-        btn_dir.clicked.connect(self.logs_open_requested.emit)
+        # 「打开日志文件夹」是次要入口 —— 收进「⋯」，工具条不再平铺 9 个控件
+        self.btn_more = row_menu_button(
+            [
+                ("打开日志文件夹", self.logs_open_requested.emit),
+                ("跳到最新一行", self._scroll_to_end),
+            ],
+            self,
+            size=32,
+        )
+        right.addWidget(self.btn_more)
 
-        bar.addWidget(self.source)
-        bar.addWidget(self.level)
-        bar.addWidget(self.search, 1)
-        bar.addWidget(lbl_pause)
-        bar.addWidget(self.toggle_pause)
-        bar.addWidget(lbl_scroll)
-        bar.addWidget(self.toggle_scroll)
-        bar.addWidget(btn_clear)
-        bar.addWidget(btn_dir)
+        bar.addLayout(left, 1)
+        bar.addSpacing(24)
+        bar.addLayout(right)
         root.addLayout(bar)
 
         # ── 日志视图 ──
@@ -183,25 +187,38 @@ class LogsPage(QWidget):
         self.view.setReadOnly(True)
         self.view.setUndoRedoEnabled(False)
         self.view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        # 不换行就必须有横向滚动条：日志对常用空格对齐，折行会彻底破坏可读性
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         f = QFont("Consolas")
         f.setStyleHint(QFont.StyleHint.Monospace)
-        f.setPixelSize(13)
+        f.setPixelSize(12)
         self.view.setFont(f)
         self.view.setStyleSheet(
-            f"QPlainTextEdit{{background:{C.bg_body};color:{C.text_primary};"
+            f"QPlainTextEdit{{background:{C.bg_input};color:{C.text_primary};"
             f"border:1px solid {C.border};border-radius:8px;padding:8px;}}"
+            f"QPlainTextEdit:focus{{border-color:{C.primary};}}"
         )
         root.addWidget(self.view, 1)
 
-        # ── 状态行 ──
+        # ── 页脚（11px 单行，只放页内统计）──
         self.lbl_info = QLabel("")
-        self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_info.setObjectName("hint")
         root.addWidget(self.lbl_info)
 
         self._timer = QTimer(self)
         self._timer.setInterval(max(200, cfg.get_int("log_view_tail_ms", 1000)))
         self._timer.timeout.connect(self._poll_file)
         self._timer.start()
+
+    @staticmethod
+    def _sub_label(text: str) -> QLabel:
+        lb = QLabel(text)
+        lb.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
+        return lb
+
+    def _scroll_to_end(self) -> None:
+        sb = self.view.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     # ═══════════════════════════════════════════════
     #  外部驱动：端口访问日志（来自主窗口事件泵）
@@ -363,7 +380,7 @@ class LogsPage(QWidget):
                 bits.append("（文件尚未生成）")
         if self._paused:
             bits.append("已暂停")
-        self.lbl_info.setText("　·　".join(bits))
+        self.lbl_info.setText(" · ".join(bits))
 
     # ═══════════════════════════════════════════════
     #  生命周期

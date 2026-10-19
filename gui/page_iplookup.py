@@ -6,7 +6,9 @@ from typing import List
 from core.geo_locator import get_locator
 from core.logger import get_logger
 from core.models import ms_to_str
+from gui.components import PageHeader
 from gui.theme import C
+from gui.widgets import EmptyState
 from qtcompat import (
     QAbstractItemView,
     QColor,
@@ -43,43 +45,45 @@ class IpLookupPage(QWidget):
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 12)
+        root.setContentsMargins(24, 16, 24, 12)
         root.setSpacing(12)
 
-        head = QHBoxLayout()
-        t = QLabel("IP 查询工具")
-        t.setObjectName("page_title")
-        d = QLabel("离线 ip2region 库（IPv4 + IPv6），10 微秒级查询")
-        d.setObjectName("page_desc")
-        head.addWidget(t)
-        head.addWidget(d)
-        head.addStretch(1)
-
+        head = PageHeader("IP 查询工具", "离线 ip2region 库（IPv4 + IPv6），10 微秒级查询")
         self.lbl_lib = QLabel("")
-        self.lbl_lib.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
-        head.addWidget(self.lbl_lib)
+        self.lbl_lib.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_lib.setToolTip("离线库版本与缓存命中情况")
+        head.add_action(self.lbl_lib)
 
         b_sync = QPushButton("同步离线库")
         b_sync.setObjectName("btn_outline")
         b_sync.clicked.connect(lambda: self.xdb_sync_requested.emit(False))
-        head.addWidget(b_sync)
-        root.addLayout(head)
+        head.add_action(b_sync)
+        root.addWidget(head)
 
         # 单条查询
         grp1 = QGroupBox("单条查询")
-        l1 = QHBoxLayout(grp1)
-        l1.setContentsMargins(12, 8, 12, 12)
+        l1 = QVBoxLayout(grp1)
+        l1.setContentsMargins(16, 8, 16, 16)
+        l1.setSpacing(10)
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
         self.single = QLineEdit()
         self.single.setPlaceholderText("输入 IP，例如 113.118.113.77 或 2400:3200::1，回车查询")
         self.single.returnPressed.connect(self._query_single)
         b1 = QPushButton("查询")
         b1.setObjectName("btn_primary")
         b1.clicked.connect(self._query_single)
+        row1.addWidget(self.single, 1)
+        row1.addWidget(b1)
+        l1.addLayout(row1)
+
+        # 结果独立一行：长 IPv6 结果不会和输入框抢宽度
         self.single_result = QLabel("—")
-        self.single_result.setStyleSheet(f"color:{C.text_on_dark};font-size:13px;")
-        l1.addWidget(self.single, 3)
-        l1.addWidget(b1)
-        l1.addWidget(self.single_result, 4)
+        self.single_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.single_result.setStyleSheet(
+            f"color:{C.text_secondary};font-size:12.5px;padding:2px 0;"
+        )
+        l1.addWidget(self.single_result)
         root.addWidget(grp1)
 
         # 批量查询
@@ -132,6 +136,10 @@ class IpLookupPage(QWidget):
         h.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         rl.addWidget(self.table, 1)
 
+        self.empty = EmptyState("尚未查询", "输入 IP 后点查询，结果会显示在这里")
+        self.empty.setVisible(self.table.rowCount() == 0)
+        rl.addWidget(self.empty, 1)
+
         split.addWidget(left_w)
         split.addWidget(right_w)
         split.setStretchFactor(0, 2)
@@ -181,14 +189,22 @@ class IpLookupPage(QWidget):
             geo = get_locator().lookup(ip)
         except Exception as e:
             self.single_result.setText(f"查询失败：{e}")
+            self.single_result.setStyleSheet(f"color:{C.danger};font-size:12.5px;padding:2px 0;")
             return
         if geo.found:
+            scope = "境内" if geo.is_china else "境外"
             self.single_result.setText(
-                f"{geo.display}　（{geo.country}/{geo.province}/{geo.city}/{geo.isp}/"
-                f"{geo.iso or '-'}）"
+                f"归属地：{geo.display}　·　国家码 {geo.iso or '-'}　·　"
+                f"ISP {geo.isp if geo.isp and geo.isp != '0' else '-'}　·　{scope}"
+            )
+            self.single_result.setStyleSheet(
+                f"color:{C.text_secondary};font-size:12.5px;padding:2px 0;"
             )
         else:
             self.single_result.setText("未命中任何数据段（可能是内网 / 保留 / 未收录地址）")
+            self.single_result.setStyleSheet(
+                f"color:{C.text_muted};font-size:12.5px;padding:2px 0;"
+            )
 
     def _query_batch(self) -> None:
         lines = [x.strip() for x in self.batch_input.toPlainText().splitlines()]
@@ -218,9 +234,16 @@ class IpLookupPage(QWidget):
         self._render(results)
         self._update_lib_info()
 
+    def _toggle_empty(self) -> None:
+        """结果区在「没查」和「查了」之间切换时，空态与表格互斥显示"""
+        has = self.table.rowCount() > 0
+        self.table.setVisible(has)
+        self.empty.setVisible(not has)
+
     def _render(self, results) -> None:
         self.table.setRowCount(0)
         self.table.setRowCount(len(results))
+        self._toggle_empty()
         for i, g in enumerate(results):
 
             def mk(text, color=None, align=None):
@@ -258,6 +281,7 @@ class IpLookupPage(QWidget):
         self.batch_input.clear()
         self.table.setRowCount(0)
         self._results = []
+        self._toggle_empty()
 
     def _export(self) -> None:
         if not self._results:

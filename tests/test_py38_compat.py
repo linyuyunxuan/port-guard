@@ -33,6 +33,9 @@ SKIP_DIRS = {
     "build_smoke",
     "dist",
     "dist_smoke",
+    "envs",  # 本地虚拟环境（第三方依赖），不是项目代码
+    ".venv",
+    "venv",
     ".git",
     "__pycache__",
     ".mypy_cache",

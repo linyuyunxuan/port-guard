@@ -11,8 +11,18 @@ from core.config import (
     LEVEL_LABEL,
 )
 from core.models import AccessRecord
-from gui.theme import LEVEL_BG, LEVEL_COLORS, C
-from gui.widgets import StatCard, ToggleSwitch
+from gui.components import PageHeader
+from gui.theme import C
+from gui.widgets import (
+    BADGE_ROLE,
+    EmptyState,
+    RiskBadgeDelegate,
+    StatCard,
+    ToggleSwitch,
+    WarnBanner,
+    labeled_toggle,
+    number_font,
+)
 from qtcompat import (
     QAbstractItemView,
     QAbstractTableModel,
@@ -20,7 +30,6 @@ from qtcompat import (
     QBrush,
     QColor,
     QComboBox,
-    QFont,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -40,19 +49,24 @@ from qtcompat import (
 
 HEADERS = [
     "时间",
+    "风险",
     "来源 IP",
     "归属地",
     "端口",
     "协议",
-    "方法",
-    "路径",
+    "请求",
     "状态",
-    "大小",
-    "User-Agent",
     "命中规则",
-    "风险",
     "服务器",
 ]
+
+# 列宽基线：1360 下固定列合计 788，请求列吃掉剩余（@1360≈312 / @1200≈152）。
+# 每个宽度都用 _design/cell_probe.py 按「文字宽 + 单元格内边距 16」实测过，
+# 不再按设计稿估数：归属地要装下「加利福尼亚州 弗里蒙特」(140)，
+# 端口要装下 5 位数 18080 (51)，协议要装下 HTTPS (37+16=53)，
+# 命中规则要装下「管理端口归属地检测」(108+16=124)。
+COL_WIDTHS = [72, 60, 120, 146, 58, 60, 150, 52, 140, 80]
+COL_REQUEST = 6
 
 
 class AccessTableModel(QAbstractTableModel):
@@ -79,8 +93,13 @@ class AccessTableModel(QAbstractTableModel):
         return len(HEADERS)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+        if orientation != Qt.Orientation.Horizontal:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
             return HEADERS[section]
+        # 表头跟数据同轴：居中列的列头也居中
+        if role == Qt.ItemDataRole.TextAlignmentRole and section in (1, 4, 5, 7):
+            return int(Qt.AlignmentFlag.AlignCenter)
         return None
 
     def data(
@@ -96,21 +115,18 @@ class AccessTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return self._cell_text(rec, col)
 
+        if role == BADGE_ROLE and col == 1:
+            return rec.risk_level
+
         if role == Qt.ItemDataRole.ForegroundRole:
-            if col in (11,):
-                return QBrush(QColor(LEVEL_COLORS.get(rec.risk_level, C.text_secondary)))
-            if col == 1:
+            if col == 2:
                 return QBrush(QColor(C.text_link))
             return None
 
-        if role == Qt.ItemDataRole.BackgroundRole:
-            bg = LEVEL_BG.get(rec.risk_level)
-            return QBrush(QColor(bg)) if bg else None
-
-        if role == Qt.ItemDataRole.FontRole and col == 11:
-            f = QFont()
-            f.setBold(rec.risk_level in (LEVEL_HIGH, LEVEL_CRITICAL))
-            return f
+        if role == Qt.ItemDataRole.FontRole:
+            if col in (0, 4, 5, 7):
+                return number_font(12)
+            return None
 
         if role == Qt.ItemDataRole.ToolTipRole:
             return self._tooltip(rec)
@@ -118,7 +134,7 @@ class AccessTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.UserRole:
             return rec
 
-        if role == Qt.ItemDataRole.TextAlignmentRole and col in (3, 7, 8, 11):
+        if role == Qt.ItemDataRole.TextAlignmentRole and col in (1, 4, 5, 7):
             return int(Qt.AlignmentFlag.AlignCenter)
 
         return None
@@ -128,29 +144,24 @@ class AccessTableModel(QAbstractTableModel):
         if col == 0:
             return datetime.datetime.fromtimestamp(rec.event_ts / 1000).strftime("%H:%M:%S")
         if col == 1:
-            return rec.ip
+            return ""  # 风险列由 RiskBadgeDelegate 自绘徽章
         if col == 2:
-            return rec.geo.region_short if rec.geo else "未知"
+            return rec.ip
         if col == 3:
-            return str(rec.local_port or "-")
+            return rec.geo.region_short if rec.geo else "未知"
         if col == 4:
-            return rec.protocol.upper()
+            return str(rec.local_port or "-")
         if col == 5:
-            return rec.method or "-"
+            return rec.protocol.upper()
         if col == 6:
-            return rec.path or "/"
+            method = rec.method or ""
+            path = rec.path or "/"
+            return f"{method} {path}".strip()
         if col == 7:
             return str(rec.status_code) if rec.status_code else "-"
         if col == 8:
-            return _fmt_size(rec.size)
-        if col == 9:
-            ua = rec.user_agent or "(空)"
-            return ua if len(ua) <= 60 else ua[:57] + "..."
-        if col == 10:
             return rec.matched_str or "-"
-        if col == 11:
-            return LEVEL_LABEL.get(rec.risk_level, rec.risk_level)
-        if col == 12:
+        if col == 9:
             return rec.server_name or rec.host or "-"
         return ""
 
@@ -299,10 +310,14 @@ class MonitorPage(QWidget):
     ask_lookup = Signal(str)  # 请求切到 IP 查询页并查询
     ask_blacklist = Signal(str)  # 请求把 IP 加入黑名单
     ask_ban = Signal(str, int, str)  # 请求封禁 ip / score / reason
+    ask_settings = Signal()  # 请求跳到设置页（空态「去启动」）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._paused = False
+        self._server_on = False
+        self._server_port = 0
+        self._empty_kind = ""
         self._capacity = cfg.get_int("monitor_buffer_size", 5000)
         self._provinces = set()
         self._build()
@@ -310,36 +325,24 @@ class MonitorPage(QWidget):
     # ── UI ──
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 12)
+        root.setContentsMargins(24, 16, 24, 12)
         root.setSpacing(12)
 
-        # 标题
-        head = QHBoxLayout()
-        t = QLabel("实时监控")
-        t.setObjectName("page_title")
-        d = QLabel("业务系统上报的每一次端口访问")
-        d.setObjectName("page_desc")
-        head.addWidget(t)
-        head.addWidget(d)
-        head.addStretch(1)
-
+        # 标题区（56，7 页统一）
+        head = PageHeader("实时监控", "业务系统上报的每一次端口访问")
         self.toggle_pause = ToggleSwitch(False)
         self.toggle_pause.toggled.connect(self._on_pause)
-        lbl_pause = QLabel("暂停滚动")
-        lbl_pause.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
-        head.addWidget(lbl_pause)
-        head.addWidget(self.toggle_pause)
-        root.addLayout(head)
+        head.add_action(labeled_toggle(self.toggle_pause, "暂停滚动"))
+        root.addWidget(head)
 
-        # 统计卡片
+        # 统计卡片（3 张等宽；「接收服务」健康态已上移到顶部状态条）
         cards = QHBoxLayout()
         cards.setSpacing(12)
         self.card_total = StatCard("今日访问", "0")
         self.card_risk = StatCard("今日风险", "0", C.warning)
         self.card_ban = StatCard("当前封禁", "0", C.danger)
-        self.card_status = StatCard("接收服务", "未启动", C.text_muted)
-        for c in (self.card_total, self.card_risk, self.card_ban, self.card_status):
-            cards.addWidget(c)
+        for c in (self.card_total, self.card_risk, self.card_ban):
+            cards.addWidget(c, 1)
         root.addLayout(cards)
 
         # 过滤栏
@@ -348,17 +351,18 @@ class MonitorPage(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索 IP / 路径 / User-Agent / 服务器…")
         self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(260)
+        self.search.setFixedWidth(280)
         self.search.textChanged.connect(self._on_filter)
 
         self.scope = QComboBox()
         self.scope.addItems(["全部", "中国", "境外", "有风险", "高风险"])
+        self.scope.setFixedWidth(110)
         self.scope.currentTextChanged.connect(self._on_filter)
 
         self.port_filter = QSpinBox()
         self.port_filter.setRange(0, 65535)
         self.port_filter.setSpecialValueText("全部端口")
-        self.port_filter.setFixedWidth(120)
+        self.port_filter.setFixedWidth(110)
         self.port_filter.valueChanged.connect(self._on_filter)
 
         self.btn_clear = QPushButton("清空列表")
@@ -366,14 +370,22 @@ class MonitorPage(QWidget):
         self.btn_clear.clicked.connect(self._clear_view)
 
         self.lbl_count = QLabel("共 0 条")
-        self.lbl_count.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_count.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
 
-        bar.addWidget(self.search, 1)
+        bar.addWidget(self.search)
         bar.addWidget(self.scope)
         bar.addWidget(self.port_filter)
         bar.addWidget(self.btn_clear)
+        bar.addStretch(1)
         bar.addWidget(self.lbl_count)
         root.addLayout(bar)
+
+        # 暂停提示（仅暂停时出现）
+        self.pause_banner = WarnBanner(
+            "已暂停：新访问暂不进入列表（判定与入库不受影响）", level="info"
+        )
+        self.pause_banner.setVisible(False)
+        root.addWidget(self.pause_banner)
 
         # 表格
         self.model = AccessTableModel(self._capacity, self)
@@ -384,26 +396,40 @@ class MonitorPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
+        self.table.setTabKeyNavigation(False)
         self.table.verticalHeader().setVisible(False)
+        # 常显竖滚动条：滚动条出现/消失会让表格可视宽在 15↔25px 之间跳，
+        # 结果列宽度每次翻页都变，读数时眼睛要重新找位置
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._ctx_menu)
         self.table.doubleClicked.connect(self._on_double_click)
+        self.table.setItemDelegateForColumn(1, RiskBadgeDelegate(self.table))
+
+        # 三态空态（无流量 / 服务未启动 / 筛选无结果）——之前这里只有一行灰字
+        self.empty = EmptyState("等待访问", "", "复制上报地址")
+        self.empty.setVisible(False)
+        if self.empty.btn is not None:
+            self.empty.btn.clicked.connect(self._on_empty_action)
+        root.addWidget(self.empty, 1)
 
         hh = self.table.horizontalHeader()
-        widths = [70, 116, 116, 52, 50, 54, 150, 48, 60, 170, 166, 54, 96]
-        for i, w in enumerate(widths):
+        for i, w in enumerate(COL_WIDTHS):
             hh.resizeSection(i, w)
         hh.setStretchLastSection(False)
-        hh.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(12, QHeaderView.ResizeMode.Interactive)
+        hh.setSectionResizeMode(COL_REQUEST, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(9, QHeaderView.ResizeMode.Interactive)
 
         root.addWidget(self.table, 1)
+        self._update_count()
 
     # ── 交互 ──
     def _on_pause(self, checked: bool) -> None:
         self._paused = checked
+        self.pause_banner.setVisible(checked)
+        self._update_count()
 
     def _on_filter(self) -> None:
         port = self.port_filter.value() or None
@@ -413,6 +439,19 @@ class MonitorPage(QWidget):
         self._update_count()
 
     def _clear_view(self) -> None:
+        if self.model.total == 0:
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("清空列表")
+        box.setText("清空列表后将无法恢复。")
+        box.setInformativeText("只清空界面显示，不影响已入库的记录与风险判定。")
+        btn_yes = box.addButton("清空", QMessageBox.ButtonRole.DestructiveRole)
+        btn_no = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_no)
+        box.exec()
+        if box.clickedButton() is not btn_yes:
+            return
         self.model.clear()
         self._update_count()
 
@@ -508,18 +547,66 @@ class MonitorPage(QWidget):
 
     def _update_count(self) -> None:
         view, total = self.model.rowCount(), self.model.total
+        prefix = "已暂停 · " if self._paused else ""
         if view == total:
-            self.lbl_count.setText(f"共 {total} 条")
+            self.lbl_count.setText(f"{prefix}共 {total} 条")
         else:
-            self.lbl_count.setText(f"显示 {view} / 共 {total} 条")
+            self.lbl_count.setText(f"{prefix}显示 {view} / 共 {total} 条")
+        self.btn_clear.setEnabled(total > 0)
+        self._update_empty()
 
-    def set_stats(self, total: int, risk: int, bans: int, server_on: bool, port: int = 0) -> None:
+    def _on_empty_action(self) -> None:
+        """空态按钮按当前状态分流：复制上报地址 / 去启动 / 重置筛选"""
+        if self._empty_kind == "norisk":
+            self.search.clear()
+            self.scope.setCurrentIndex(0)
+            self.port_filter.setValue(0)
+        elif self._empty_kind == "stopped":
+            self.ask_settings.emit()
+        else:
+            from qtcompat import QApplication
+
+            port = self._server_port or 18080
+            QApplication.clipboard().setText(f"http://127.0.0.1:{port}/api/v1/access/report")
+
+    def _update_empty(self, *_args) -> None:
+        """表格与空态互斥：有行就显示表格。
+
+        三种「空」的原因完全不同，混成一句「暂无数据」等于什么都没说：
+          · 服务未启动 —— 根本不是「没流量」，是没在收
+          · 一条都没收到 —— 等服务在收，给出上报地址
+          · 有数据但筛不出来 —— 引导重置筛选
+        """
+        total = self.model.total
+        view = self.model.rowCount()
+        if view > 0:
+            self.table.setVisible(True)
+            self.empty.setVisible(False)
+            return
+
+        self.table.setVisible(False)
+        if total > 0:
+            self._empty_kind = "norisk"
+            self.empty.set_state("没有匹配记录", "换个关键字，或把范围改回「全部」", "重置筛选")
+        elif self._server_on:
+            self._empty_kind = "wait"
+            port = self._server_port or "监听端口"
+            self.empty.set_state("等待访问", f"接收服务已启动，{port} 尚未收到上报", "复制上报地址")
+        else:
+            self._empty_kind = "stopped"
+            self.empty.set_state("接收服务未启动", "启动后业务系统才能把访问记录发到本机", "去启动")
+        self.empty.setVisible(True)
+
+    def set_stats(self, total: int, risk: int, bans: int, server_on: bool = False, port: int = 0):
+        # 服务运行态由顶部状态条统一表达；这里只留空态判定需要的信息（不额外显示）
+        self._server_on = server_on
+        self._server_port = port
         self.card_total.set_value(total)
         self.card_risk.set_value(risk)
         self.card_ban.set_value(bans)
-        if server_on:
-            self.card_status.set_value(f"运行中 :{port}")
-            self.card_status.set_color(C.success)
-        else:
-            self.card_status.set_value("未启动")
-            self.card_status.set_color(C.text_muted)
+        # 计数为 0 时不染色：红色 0 是纯噪声，留着会削弱真正有数时的语义
+        self.card_risk.set_color(C.warning if risk else C.text_on_dark)
+        self.card_ban.set_color(C.danger if bans else C.text_on_dark)
+        self.card_risk.dot.set_color(C.warning if risk else C.text_muted)
+        self.card_ban.dot.set_color(C.danger if bans else C.text_muted)
+        self._update_empty()

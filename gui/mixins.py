@@ -76,7 +76,6 @@ class EventPumpMixin(_HostBase):
     lbl_ban_count: "QLabel"
     lbl_geo: "QLabel"
     lbl_xdb: "QLabel | None"
-    lbl_watch: "QLabel"
     _last_stats: float
 
     # 这两个方法由 MainWindow 实现（MainWindow 自身的定义优先于 Mixin），
@@ -89,6 +88,14 @@ class EventPumpMixin(_HostBase):
         raise NotImplementedError
 
     def _refresh_watch_label(self) -> None:
+        raise NotImplementedError
+
+    # 顶部 44 状态条的两项：服务运行态 / 本机观察态。
+    # 状态栏已不再承担健康态（P0-8），文本与颜色由这里的调用方决定。
+    def _set_watch_state(self, text: str, color: str) -> None:
+        raise NotImplementedError
+
+    def _set_ban_count(self, n: int) -> None:
         raise NotImplementedError
 
     def _setup_timers(self) -> None:
@@ -183,8 +190,9 @@ class EventPumpMixin(_HostBase):
             color = C.warning
         self._set_status(f"离线库同步：{msg}", color)
         if self.lbl_xdb is not None:
-            self.lbl_xdb.setText(f"IP 库：{msg[:24]}")
-            self.lbl_xdb.setStyleSheet(f"color:{color};font-size:12px;")
+            self.lbl_xdb.setText(f"IP 库 {msg[:24]}")
+            self.lbl_xdb.setStyleSheet(f"color:{color};font-size:11px;")
+            self.lbl_xdb.setToolTip(msg)
 
         if stage == "done":
             with contextlib.suppress(Exception):
@@ -195,10 +203,12 @@ class EventPumpMixin(_HostBase):
     def _poll_geo_after_update(self) -> None:
         try:
             loc = self._locator()
-            self.lbl_geo.setText(
-                f"定位库：已加载 v{loc.generation}（缓存 {loc.cache_info().get('size', 0)}）"
+            # 与 main_window._poll_geo 同一口径：状态栏只写「已加载」，细节进 tooltip
+            self.lbl_geo.setText("定位库 已加载")
+            self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:11px;")
+            self.lbl_geo.setToolTip(
+                f"离线定位库 v{loc.generation} · 缓存 {loc.cache_info().get('size', 0)} 条"
             )
-            self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:12px;")
         except Exception:
             log.exception("刷新定位库状态失败")
 
@@ -221,9 +231,11 @@ class EventPumpMixin(_HostBase):
             total, risk, bans, report_server.is_running(), report_server.get_port()
         )
         self.lbl_ban_count.setText(f"已封禁 {bans}")
+        # 圆点颜色随计数切换：有数 danger / 0 时 success（P2-1）
+        self._set_ban_count(bans)
         if unhandled:
             self.lbl_status.setText(f"有 {unhandled} 条风险事件待处理")
-            self.lbl_status.setStyleSheet(f"color:{C.warning};font-size:12px;")
+            self.lbl_status.setStyleSheet(f"color:{C.warning};font-size:11px;")
 
         # 状态栏上的本机观察指示 + 设置页的运行状态行
         with contextlib.suppress(Exception):
@@ -233,7 +245,7 @@ class EventPumpMixin(_HostBase):
 
     def _set_status(self, text: str, color: Optional[str] = None) -> None:
         self.lbl_status.setText(text)
-        self.lbl_status.setStyleSheet(f"color:{color or C.text_secondary};font-size:12px;")
+        self.lbl_status.setStyleSheet(f"color:{color or C.text_secondary};font-size:11px;")
 
     # ── 到期巡检 / 清理 ──
     def _check_expired(self) -> None:
@@ -291,7 +303,6 @@ class ServerCtlMixin(_HostBase):
     """上报服务启停"""
 
     page_settings: "SettingsPage"
-    lbl_server: "QLabel"
     a_server: "QAction"
 
     # 由 EventPumpMixin 实现（MRO 中排在前面），在此声明仅供类型检查
@@ -299,6 +310,9 @@ class ServerCtlMixin(_HostBase):
         raise NotImplementedError
 
     def _refresh_stats(self, force: bool = False) -> None:
+        raise NotImplementedError
+
+    def _set_server_state(self, text: str, color: str) -> None:
         raise NotImplementedError
 
     def _maybe_start_server_on_launch(self) -> None:
@@ -334,12 +348,10 @@ class ServerCtlMixin(_HostBase):
         st = server_ctl.state()
         if st["running"]:
             suffix = "" if st["loopback"] else "（局域网）"
-            self.lbl_server.setText(f"服务：运行中 :{st['port']}{suffix}")
-            self.lbl_server.setStyleSheet(f"color:{C.success};font-size:12px;")
+            self._set_server_state(f"接收服务 :{st['port']}{suffix}", C.success)
             self.a_server.setText("停止接收服务")
         else:
-            self.lbl_server.setText("服务：未启动")
-            self.lbl_server.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+            self._set_server_state("接收服务 未启动", C.text_muted)
             self.a_server.setText("启动接收服务")
         try:
             self.page_settings.refresh_server_state()

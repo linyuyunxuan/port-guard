@@ -70,6 +70,7 @@ Property = QtCore.Property
 QTimer = QtCore.QTimer
 QSize = QtCore.QSize
 QRect = QtCore.QRect
+QDate = QtCore.QDate
 QPointF = QtCore.QPointF
 QModelIndex = QtCore.QModelIndex
 QPersistentModelIndex = QtCore.QPersistentModelIndex
@@ -86,8 +87,10 @@ QPropertyAnimation = QtCore.QPropertyAnimation
 QBrush = QtGui.QBrush
 QColor = QtGui.QColor
 QFont = QtGui.QFont
+QFontMetrics = QtGui.QFontMetrics
 QIcon = QtGui.QIcon
 QPainter = QtGui.QPainter
+QPen = QtGui.QPen
 QPixmap = QtGui.QPixmap
 QPolygonF = QtGui.QPolygonF
 
@@ -98,6 +101,7 @@ QPolygonF = QtGui.QPolygonF
 QAbstractItemView = QtWidgets.QAbstractItemView
 QApplication = QtWidgets.QApplication
 QComboBox = QtWidgets.QComboBox
+QDateEdit = QtWidgets.QDateEdit
 QDialog = QtWidgets.QDialog
 QDialogButtonBox = QtWidgets.QDialogButtonBox
 QDoubleSpinBox = QtWidgets.QDoubleSpinBox
@@ -123,14 +127,19 @@ QSpinBox = QtWidgets.QSpinBox
 QSplitter = QtWidgets.QSplitter
 QStackedWidget = QtWidgets.QStackedWidget
 QStatusBar = QtWidgets.QStatusBar
+QStyle = QtWidgets.QStyle
+QStyledItemDelegate = QtWidgets.QStyledItemDelegate
+QStyleOptionViewItem = QtWidgets.QStyleOptionViewItem
 QSystemTrayIcon = QtWidgets.QSystemTrayIcon
 QTabWidget = QtWidgets.QTabWidget
 QTableView = QtWidgets.QTableView
 QTableWidget = QtWidgets.QTableWidget
 QTableWidgetItem = QtWidgets.QTableWidgetItem
 QTextEdit = QtWidgets.QTextEdit
+QToolButton = QtWidgets.QToolButton
 QVBoxLayout = QtWidgets.QVBoxLayout
 QWidget = QtWidgets.QWidget
+QKeySequence = QtGui.QKeySequence
 
 # ═══════════════════════════════════════════════════════════
 #  模块归属有差异的两个类：Qt6 在 QtGui，Qt5 在 QtWidgets
