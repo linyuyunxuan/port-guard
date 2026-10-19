@@ -46,6 +46,9 @@ htmlcov/
 build/
 dist/
 *.spec.bak
+# 虚拟环境：install.bat 会在 envs\ 下建 portguard / portguard38
+# （venv 自带的 .gitignore 只在自家目录生效，换版本重建就漏了）
+envs/
 # 自动化冒烟用的临时产物（做法见 port_guard.spec 顶部说明）：
 # copy port_guard.spec _smoke.spec → 改 uac_admin=False → 单独构建，避免污染正式产物
 build_smoke/

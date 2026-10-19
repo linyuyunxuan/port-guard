@@ -19,16 +19,22 @@ start.bat
 start_as_admin.bat
 ```
 
-或直接用虚拟环境运行：
+或直接用虚拟环境运行（**别用 PATH 上那个 `python`** —— 这台机器上通常有多个，
+随手 `python main.py` 命中的多半没装本项目的依赖）：
 
 ```bat
-C:\Users\Administrator\.workbuddy\binaries\python\envs\portguard\Scripts\python.exe main.py
+envs\portguard\Scripts\python.exe main.py
 ```
 
-> `install.bat` 读的是 `requirements.txt`，其中 GUI 依赖写的是 **PySide6-Essentials**
-> （Qt 官方绑定，LGPL v3，允许闭源分发）。**不要**再手工 `pip install PySide6` ——
-> 完整版会额外拉入 Addons / WebEngine / Pdf 约 380 MB，本项目一个都用不到。
-> 两个包的导入路径相同，都是 `PySide6.*`。
+启动器（`start.bat` / `start_as_admin.bat`）会自己做三件事：逐个探测候选解释器 →
+**真的去 import PySide2 / PySide6 验证** → 挑第一个能用的。探测顺序是
+仓库内 `envs\portguard38` → 仓库内 `envs\portguard` → 用户目录下的托管 venv →
+`py -3.8` → `py -3` → PATH 上的 `python`。全都不行时会打印逐个尝试过的路径并给出装法。
+
+> `install.bat` 读的是 `requirements.txt`，其中 GUI 依赖按 Python 版本自动二选一：
+> `PySide6-Essentials`（≥3.9）或 `PySide2==5.15.2.1`（<3.9）。两者都是 LGPL v3，
+> 允许闭源分发。**不要**再手工 `pip install PySide6` —— 完整版会额外拉入
+> Addons / WebEngine / Pdf 约 380 MB，本项目一个都用不到。
 
 ### 要装到 Windows 7 / Server 2008 R2 上？
 
@@ -36,12 +42,19 @@ C:\Users\Administrator\.workbuddy\binaries\python\envs\portguard\Scripts\python.
 同一套代码，`qtcompat.py` 会自动选绑定，业务代码零改动：
 
 ```bat
-C:\Users\Administrator\.workbuddy\binaries\python\envs\portguard38\Scripts\python.exe main.py
+install.bat delivery     :: 建 envs\portguard38（Python 3.8 + PySide2）
+start.bat                :: 启动器会优先选中它
 ```
 
 两条线路的支持范围、以及**打包前必跑的 Win7 兼容闸门**见
 「十二、打包为 exe → 运行环境要求」。一句话版本：Qt6 线需要 Win10 1703+，
 Qt5 线从 Win7 SP1 起（Win7 上要先装 KB2999226）。
+
+> **维护批处理的硬约束**：`*.bat` 必须是 **CRLF 换行 + 纯 ASCII**。
+> 只有 LF 时 cmd 会把一行拆成两段执行（典型症状：`'08' 不是内部或外部命令`
+> 后面跟一个裸 Python REPL）；文件里出现中文时 cmd 的字节偏移会错位，
+> 中段开始整行乱飞。中文文案一律放 `launcher_help.txt` 或 Python 层。
+> 这两条由 `tests/test_launcher_scripts.py` 守着，改完跑一遍 pytest 即可。
 
 ---
 
@@ -332,6 +345,8 @@ port-guard/
 ├── requirements.txt        运行时依赖
 ├── requirements-dev.txt    开发依赖（pytest / ruff / mypy / httpx）
 ├── install.bat / start.bat / start_as_admin.bat
+├── _find_python.bat        启动器共用的解释器探测（CRLF + 纯 ASCII，勿加中文）
+├── launcher_help.txt       找不到运行环境时的中文说明（UTF-8，由 type 输出）
 ├── app.manifest            PyInstaller 用的管理员权限清单
 ├── port_guard.spec         PyInstaller 打包配置
 ├── assets/                 图标等资源

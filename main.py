@@ -34,6 +34,16 @@ def _importable(mod: str) -> bool:
         return False
 
 
+def _local_venvs() -> List[str]:
+    """列出本目录下已经存在的 venv 解释器（用于「你用错 Python 了」的提示）。"""
+    found = []
+    for name in ("portguard38", "portguard"):
+        exe = os.path.join(_HERE, "envs", name, "Scripts", "python.exe")
+        if os.path.exists(exe):
+            found.append(exe)
+    return found
+
+
 def _check_deps(interactive: bool = True) -> bool:
     missing = []
     for mod, label in (
@@ -49,7 +59,26 @@ def _check_deps(interactive: bool = True) -> bool:
     if not any(_importable(m) for m in ("PySide6", "PySide2")):
         missing.append("PySide6 或 PySide2")
     if missing:
-        msg = "缺少依赖：" + ", ".join(missing) + "\n\n请先执行：\npip install -r requirements.txt"
+        # 这一屏是本项目最常见的「起不来」：机器上装了多个 Python，
+        # 随手 `python main.py` 命中的那个没装依赖。只说「缺少依赖」会让人
+        # 去 pip install，结果装到另一个解释器里，越修越乱。所以把当前
+        # 解释器和本目录里现成的环境一起列出来。
+        lines = [
+            "缺少依赖：" + "、".join(missing),
+            "",
+            f"当前解释器：{sys.executable}",
+        ]
+        local = _local_venvs()
+        if local:
+            lines += ["", "本目录里已装好的环境（用这里的解释器跑）："]
+            lines += [f"  {p}" for p in local]
+        lines += [
+            "",
+            "推荐做法：",
+            "  · 双击 start.bat / start_as_admin.bat —— 启动器会自动挑对解释器",
+            "  · 或在本目录执行 install.bat 自动创建环境",
+        ]
+        msg = "\n".join(lines)
         if not interactive:
             # 自动化场景（如 --selfcheck）不弹窗：模态对话框会让流水线直接挂住
             print(msg, file=sys.stderr)
@@ -295,9 +324,12 @@ def main() -> int:
             return 3
         return _qt_import_failed(exc, traceback.format_exc())
 
-    # 高分屏缩放：Qt5 需要显式打开，Qt6 默认已开（重复设置无害）。
-    # scoped enum 的容器层在 Qt5 上由 qtcompat 补齐，所以这里统一用 Qt6 写法。
-    if hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
+    # 高分屏缩放：Qt5 需要显式打开，Qt6 默认已开。
+    # 注意 Qt6 里这个枚举虽然还在，但已标记 deprecated，设了会打一条
+    # DeprecationWarning 到 stderr（控制台启动时可见，纯噪音），所以按栈判断。
+    from qtcompat import IS_QT6 as _IS_QT6
+
+    if not _IS_QT6 and hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
 
     app = QApplication(sys.argv)

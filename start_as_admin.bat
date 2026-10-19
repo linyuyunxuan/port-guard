@@ -1,30 +1,78 @@
 @echo off
-chcp 65001 >nul
-title PortGuard 端口访问防御工具（管理员）
+rem ============================================================
+rem  PortGuard launcher - administrator (can write firewall).
+rem  Self-elevates through UAC, then starts the app in the
+rem  elevated console.
+rem
+rem  This file must stay pure ASCII + CRLF. See _find_python.bat
+rem  header for why.
+rem ============================================================
+
+title PortGuard (admin)
 cd /d "%~dp0"
 
-rem 双栈运行时：交付栈（portguard38，PySide2，Server 2008 R2+）优先，
-rem 找不到再退回开发栈（portguard，PySide6）。两条栈跑的是同一套源码。
-set PY=C:\Users\Administrator\.workbuddy\binaries\python\envs\portguard38\Scripts\python.exe
-if not exist "%PY%" set PY=C:\Users\Administrator\.workbuddy\binaries\python\envs\portguard\Scripts\python.exe
-if not exist "%PY%" (
-    echo [错误] 未找到虚拟环境（portguard38 / portguard）
-    echo 请先执行 install.bat 创建环境
-    pause
-    exit /b 1
-)
-
+rem -- need elevation? -------------------------------------------------
 net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo 正在请求管理员权限...
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
-    exit /b
-)
+if errorlevel 1 goto :elevate
+goto :run
+
+:elevate
+echo Requesting administrator rights...
+powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+if errorlevel 1 goto :elevate_failed
+exit /b 0
+
+:elevate_failed
+echo.
+echo [START FAILED] elevation was cancelled or refused.
+echo For monitor-only mode just run start.bat instead.
+echo.
+chcp 65001 >nul 2>&1
+if exist "%~dp0launcher_help.txt" type "%~dp0launcher_help.txt"
+chcp 936 >nul 2>&1
+if "%~1"=="" pause
+exit /b 3
+
+:run
+call "%~dp0_find_python.bat"
+if errorlevel 1 goto :nopy
 
 echo ============================================
-echo   PortGuard - 管理员启动（封禁功能可用）
+echo   PortGuard - administrator (blocking enabled)
+echo   Python: %PY%
+echo   Stack : %PY_SRC%
 echo ============================================
 echo.
 
-"%PY%" main.py
-pause
+"%PY%" main.py %*
+set "CODE=%ERRORLEVEL%"
+if "%CODE%"=="0" goto :end
+
+echo.
+echo [START FAILED] exit code %CODE%
+echo.
+echo Log file (fastest way to locate the cause):
+echo   %~dp0data\logs\portguard.log
+if not exist "%~dp0data\logs\portguard.log" echo   (no log yet - failure happened before logging was up)
+echo.
+echo Or run the built-in environment check:
+echo   "%PY%" main.py --diag
+goto :end
+
+:nopy
+echo.
+echo [START FAILED] no usable Python runtime was found.
+echo A plain Python is not enough - it must import PySide2 or PySide6.
+echo.
+echo Tried:
+echo   %TRIED%
+echo.
+chcp 65001 >nul 2>&1
+if exist "%~dp0launcher_help.txt" type "%~dp0launcher_help.txt"
+chcp 936 >nul 2>&1
+if "%~1"=="" pause
+exit /b 2
+
+:end
+if "%~1"=="" pause
+exit /b %CODE%
