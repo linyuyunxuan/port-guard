@@ -240,12 +240,26 @@ def test_repeated_login_probing_escalates_to_ban(client):
     assert last["suggest_ban"] is True
 
 
-def test_foreign_probe_of_report_port_is_banned(client):
-    """境外 IP 直接打上报端口（18080）属于典型扫描，应立刻建议封禁"""
-    rec = dict(GOOD, ip="45.33.32.156", local_port=18080, path="/")
+def test_domestic_probe_of_report_port_is_banned(client):
+    """境内 IP 直接打上报端口（18080）属于典型扫描，应立刻建议封禁（默认范围=仅限境内）"""
+    rec = dict(GOOD, ip="113.118.113.77", local_port=18080, path="/")
     d = client.post("/api/v1/access/report", json=rec).json()["data"]
-    assert "foreign_sensitive_port" in d["matched_rules"]
+    assert "geo_sensitive_port" in d["matched_rules"]
     assert d["suggest_ban"] is True
+
+
+def test_overseas_probe_not_scored_under_china_scope(client):
+    """
+    默认「仅限境内」时境外来源不再自动加分 —— 这是本次按需求调整的刻意行为。
+    需要同时覆盖境外，到规则页把「归属地范围」改成「境内+境外」即可。
+
+    用 .157 而不是 .156：规则引擎是进程级单例，滑动窗口跨用例保留，
+    .156 在本文件前面的爆破用例里已经刷过一遍记录，直接复用会带进无关分数。
+    """
+    rec = dict(GOOD, ip="45.33.32.157", local_port=18080, path="/")
+    d = client.post("/api/v1/access/report", json=rec).json()["data"]
+    assert "geo_sensitive_port" not in d["matched_rules"]
+    assert d["risk_score"] == 0
 
 
 def test_benign_domestic_request_is_not_flagged(client):

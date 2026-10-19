@@ -167,9 +167,9 @@ if __name__ == "__main__":
             "user_agent": "sqlmap/1.7#stable",
             "size": 512,
         },
-        # 境外访问数据库端口
+        # 境内来源访问数据库管理端口（管理端口规则默认范围=仅限境内）
         {
-            "client_ip": "8.8.8.8",
+            "client_ip": "113.118.113.78",
             "local_port": 1433,
             "path": "/",
             "status_code": 200,

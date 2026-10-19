@@ -143,6 +143,18 @@ class RuleCard(QFrame):
                 le2 = QLineEdit(",".join(str(x) for x in (val or [])))
                 le2.setFixedWidth(280)
                 w = le2
+            elif typ == "choice":
+                cb = QComboBox()
+                opts = list(p.get("options") or [])
+                for ov, ol in opts:
+                    cb.addItem(str(ol), str(ov))
+                cur = str(val if val is not None else (p.get("default") or ""))
+                # 配置里的值不在选项里（手改过 rules.json）时回落到第一项，
+                # 避免下拉框停在空位、用户一保存就把非法值写回去
+                idx = next((i for i, (ov, _ol) in enumerate(opts) if str(ov) == cur), 0)
+                cb.setCurrentIndex(idx)
+                cb.setFixedWidth(140)
+                w = cb
             else:
                 w = QLineEdit(str(val or ""))
             grid.addWidget(w, 1, col)
@@ -177,6 +189,8 @@ class RuleCard(QFrame):
         for key, (w, typ) in self._fields.items():
             if isinstance(w, (QSpinBox, QDoubleSpinBox)):
                 out[key] = w.value()
+            elif isinstance(w, QComboBox):
+                out[key] = w.currentData()
             elif isinstance(w, QLineEdit):
                 text = w.text().strip()
                 if typ == "list_int":

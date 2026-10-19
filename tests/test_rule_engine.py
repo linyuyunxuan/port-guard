@@ -1,10 +1,13 @@
 """规则引擎测试"""
 
+import json
+
 import pytest
 
 from core.database import init_db
 from core.models import AccessRecord, GeoInfo, now_ms
-from core.rule_engine import _MAX_WINDOW_ITEMS, RuleEngine, is_never_ban
+from core.rule_engine import _MAX_WINDOW_ITEMS, RuleEngine, _migrate_rules, is_never_ban
+from core.rules_meta import rule_label
 
 
 @pytest.fixture
@@ -25,7 +28,12 @@ def engine(isolated_env):
                 "paths": ["/admin", "/login"],
                 "status": [401, 403],
             },
-            "foreign_sensitive_port": {"enabled": True, "score": 65, "ports": [3389, 22, 1433]},
+            "geo_sensitive_port": {
+                "enabled": True,
+                "score": 65,
+                "ports": [3389, 22, 1433],
+                "geo_scope": "china",
+            },
             "rate_limit": {"enabled": True, "score": 60, "window_sec": 10, "threshold": 50},
             "scanner_ua": {
                 "enabled": True,
@@ -91,19 +99,124 @@ def test_port_scan_detected(engine):
     assert "port_scan" in r.matched_rules
 
 
-def test_foreign_sensitive_port(engine):
-    rec = _rec(local_port=3389)
-    geo = GeoInfo(ip=rec.ip, country="美国", iso="US", found=True)
-    r = engine.evaluate(rec, geo)
-    assert "foreign_sensitive_port" in r.matched_rules
+CHINA = GeoInfo(ip="113.118.113.77", country="中国", province="广东省", iso="CN", found=True)
+OVERSEAS = GeoInfo(ip="45.33.32.156", country="美国", iso="US", found=True)
 
 
-def test_unknown_geo_does_not_trigger_foreign_rule(engine):
-    """内网 / 保留地址归属地未知时不能误判为境外访问"""
+def _port_rec(port: int = 3389) -> AccessRecord:
+    """管理端口记录：带正常浏览器 UA，避开「空 UA + HTTP 场景 = 扫描器 +45」对分值断言的干扰"""
+    return _rec(local_port=port, user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+
+
+def test_domestic_sensitive_port(engine):
+    """默认「仅限境内」：境内 IP 打管理端口加分"""
+    rec = _port_rec()
+    r = engine.evaluate(rec, CHINA)
+    assert "geo_sensitive_port" in r.matched_rules
+    assert r.score == 65
+
+
+def test_overseas_not_scored_under_china_scope(engine):
+    """仅限境内时，境外来源打同一端口不加分（范围可改成 overseas / both）"""
+    r = engine.evaluate(_port_rec(), OVERSEAS)
+    assert "geo_sensitive_port" not in r.matched_rules
+    assert r.score == 0
+
+
+def test_sensitive_port_scope_overseas(engine):
+    engine._cfg["rules"]["geo_sensitive_port"]["geo_scope"] = "overseas"
+    engine._compile()
+    assert "geo_sensitive_port" in engine.evaluate(_port_rec(), OVERSEAS).matched_rules
+    assert "geo_sensitive_port" not in engine.evaluate(_port_rec(), CHINA).matched_rules
+
+
+def test_sensitive_port_scope_both(engine):
+    engine._cfg["rules"]["geo_sensitive_port"]["geo_scope"] = "both"
+    engine._compile()
+    assert "geo_sensitive_port" in engine.evaluate(_port_rec(), OVERSEAS).matched_rules
+    assert "geo_sensitive_port" in engine.evaluate(_port_rec(), CHINA).matched_rules
+
+
+def test_sensitive_port_scope_defaults_to_china(engine):
+    """缺省 / 非法值一律按「仅限境内」，避免配错就让规则永不生效"""
+    for bad in (None, "", "zzz"):
+        engine._cfg["rules"]["geo_sensitive_port"]["geo_scope"] = bad
+        engine._compile()
+        assert "geo_sensitive_port" in engine.evaluate(_port_rec(), CHINA).matched_rules
+        assert "geo_sensitive_port" not in engine.evaluate(_port_rec(), OVERSEAS).matched_rules
+
+
+def test_unknown_geo_does_not_trigger_sensitive_port_rule(engine):
+    """内网 / 保留地址归属地未知时不能误判（否则本机/局域网访问全被加分）"""
     rec = _rec(ip="192.168.1.5", local_port=3389)
     geo = GeoInfo(ip=rec.ip, found=False)
     r = engine.evaluate(rec, geo)
-    assert "foreign_sensitive_port" not in r.matched_rules
+    assert "geo_sensitive_port" not in r.matched_rules
+
+
+def test_migrate_legacy_foreign_sensitive_port():
+    """1.x 的旧规则名自动迁移成新规则名，且默认范围变成「仅限境内」"""
+    cfg = {
+        "rules": {
+            "foreign_sensitive_port": {
+                "enabled": True,
+                "score": 65,
+                "ports": [3389],
+                "require_not_china": True,
+            }
+        }
+    }
+    assert _migrate_rules(cfg) is True
+    assert "foreign_sensitive_port" not in cfg["rules"]
+    migrated = cfg["rules"]["geo_sensitive_port"]
+    assert migrated["geo_scope"] == "china"
+    assert migrated["ports"] == [3389]
+    assert migrated["score"] == 65
+    assert "require_not_china" not in migrated
+    # 幂等：再跑一次不应报错也不应重复迁移
+    assert _migrate_rules(cfg) is False
+
+
+def test_migrate_does_not_override_existing_new_rule():
+    """新配置已存在时不覆盖（用户手工改过的参数必须保留），只丢掉废弃的旧 key"""
+    cfg = {
+        "rules": {
+            "geo_sensitive_port": {"enabled": False, "geo_scope": "overseas"},
+            "foreign_sensitive_port": {"enabled": True},
+        }
+    }
+    assert _migrate_rules(cfg) is True
+    assert cfg["rules"]["geo_sensitive_port"] == {"enabled": False, "geo_scope": "overseas"}
+    assert "foreign_sensitive_port" not in cfg["rules"]
+
+
+def test_reload_migrates_legacy_config_file(tmp_path):
+    """从磁盘读到旧配置时，引擎内存里也必须是迁移后的新规则（行为立即改变）"""
+    cfg = {
+        "version": 1,
+        "rules": {
+            "foreign_sensitive_port": {
+                "enabled": True,
+                "score": 65,
+                "ports": [3389],
+                "require_not_china": True,
+            },
+        },
+    }
+    p = tmp_path / "rules.json"
+    p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+
+    e = RuleEngine(str(p))
+    loaded = e.get_config()["rules"]
+    assert "foreign_sensitive_port" not in loaded
+    assert loaded["geo_sensitive_port"]["geo_scope"] == "china"
+    assert "geo_sensitive_port" in e.evaluate(_port_rec(), CHINA).matched_rules
+
+
+def test_legacy_rule_label_still_translates():
+    """历史事件里存的是旧 ID，UI 不能显示成一串英文"""
+    assert "旧" in rule_label("foreign_sensitive_port")
+    assert rule_label("geo_sensitive_port") == "管理端口归属地检测"
 
 
 def test_sensitive_path_brute_force(engine):

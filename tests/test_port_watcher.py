@@ -13,7 +13,7 @@ import pytest
 
 from core import port_watcher as PW
 from core import win_fwlog, win_net
-from core.config import LEVEL_NORMAL
+from core.config import LEVEL_HIGH
 from core.event_bus import bus
 from core.models import AccessRecord, GeoInfo
 from core.port_watcher import PortWatcher, WatchConfig, parse_methods, parse_ports, ports_to_text
@@ -122,8 +122,11 @@ def test_poll_table_emitted_record_is_pipeline_output(tmp_path, monkeypatch):
     assert rec.local_port == 18080
     assert rec.remote_port == 51514
     assert rec.protocol == "tcp"
-    assert rec.risk_level == LEVEL_NORMAL
-    assert rec.matched_rules == []  # 自采的 TCP 记录不该被「空 UA」规则误判
+    # 境内公网 IP 直连 18080（管理端口列表里）→ 管理端口归属地规则给 65 分，高
+    assert rec.risk_level == LEVEL_HIGH
+    assert "geo_sensitive_port" in rec.matched_rules
+    # 但自采的 TCP 记录绝不能被「空 UA」规则误判（这才是本用例要守住的东西）
+    assert "scanner_ua" not in rec.matched_rules
     assert rec.tags["source"] == "local-watch"
     assert rec.tags["channel"] == "table"
     assert rec.tags["action"] == "ESTABLISHED"

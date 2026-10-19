@@ -141,6 +141,51 @@ DEFAULT_RULES = {
     },
 }
 
+# 管理端口规则的归属地范围取值（与 rules_meta.RULE_PARAMS 里的 options 对应）
+GEO_SCOPE_CHINA = "china"
+GEO_SCOPE_OVERSEAS = "overseas"
+GEO_SCOPE_BOTH = "both"
+GEO_SCOPES = (GEO_SCOPE_CHINA, GEO_SCOPE_OVERSEAS, GEO_SCOPE_BOTH)
+
+
+def geo_scope_hit(scope: Any, is_china: bool) -> bool:
+    """
+    归属地范围是否命中。
+
+    1.x 版本这条规则叫「境外访问管理端口」，范围写死在代码里（非中国）；
+    2.x 起范围变成可配置项，默认「仅限境内」——只监听本机的部署场景下，
+    能打到管理端口的绝大多数是境内来源（境外 IP 基本到不了内网）。
+    非法/缺省值一律按 china 处理，避免配错就把规则变成「对谁都不生效」。
+    """
+    s = str(scope or GEO_SCOPE_CHINA).strip().lower()
+    if s == GEO_SCOPE_BOTH:
+        return True
+    if s == GEO_SCOPE_OVERSEAS:
+        return not is_china
+    return is_china
+
+
+def _migrate_rules(cfg: Dict[str, Any]) -> bool:
+    """
+    把 1.x 的 `foreign_sensitive_port` 就地迁移成 `geo_sensitive_port`。
+
+    返回值表示是否发生了迁移（供日志留痕）。已存在新 key 时不覆盖，
+    只丢弃废弃的旧 key，避免两份配置同时生效产生双倍加分。
+    """
+    rules = cfg.get("rules")
+    if not isinstance(rules, dict):
+        return False
+    old = rules.pop("foreign_sensitive_port", None)
+    if not isinstance(old, dict):
+        return False
+    if "geo_sensitive_port" in rules:
+        return True
+    new = dict(old)
+    new.pop("require_not_china", None)  # 1.x 的字段实际没被引擎读过，直接丢掉
+    new.setdefault("geo_scope", GEO_SCOPE_CHINA)
+    rules["geo_sensitive_port"] = new
+    return True
+
 
 class RuleEngine:
     def __init__(self, path: Optional[str] = None):
@@ -169,6 +214,11 @@ class RuleEngine:
         if not isinstance(cfg, dict) or "rules" not in cfg:
             log.warning("规则配置缺失或格式错误，使用内置默认规则")
             cfg = json.loads(json.dumps(DEFAULT_RULES))
+        if _migrate_rules(cfg):
+            log.warning(
+                "规则配置已从旧版 foreign_sensitive_port 迁移为 geo_sensitive_port"
+                "（归属地范围默认=仅限境内），在规则页点「保存并生效」即落盘"
+            )
         with self._lock:
             self._cfg = cfg
             self._compile()
@@ -436,13 +486,17 @@ class RuleEngine:
                     score += int(r.get("score", 70))
                     matched.append("sensitive_path_login")
 
-            # 4. 境外访问管理端口（必须归属地命中且非中国，避免内网/保留地址误判）
-            r = rules.get("foreign_sensitive_port", {})
+            # 4. 管理端口归属地检测（必须归属地命中，避免内网/保留地址误判）
+            r = rules.get("geo_sensitive_port", {})
             if r.get("enabled"):
                 ports = {int(p) for p in (r.get("ports") or []) if str(p).isdigit()}
-                if rec.local_port in ports and geo.found and not geo.is_china:
+                if (
+                    rec.local_port in ports
+                    and geo.found
+                    and geo_scope_hit(r.get("geo_scope"), geo.is_china)
+                ):
                     score += int(r.get("score", 65))
-                    matched.append("foreign_sensitive_port")
+                    matched.append("geo_sensitive_port")
 
             # 5. 高频请求
             r = rules.get("rate_limit", {})

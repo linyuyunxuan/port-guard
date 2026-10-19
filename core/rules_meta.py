@@ -10,7 +10,7 @@ RULE_LABELS = {
     "blacklist": "黑名单命中",
     "port_scan": "端口扫描",
     "sensitive_path_login": "敏感路径爆破",
-    "foreign_sensitive_port": "境外访问管理端口",
+    "geo_sensitive_port": "管理端口归属地检测",
     "rate_limit": "高频请求",
     "scanner_ua": "扫描器特征",
     "error_storm": "错误风暴",
@@ -23,7 +23,7 @@ RULE_DESCS = {
     "blacklist": "来源 IP 命中人工维护的黑名单，直接判为严重风险",
     "port_scan": "同一 IP 在短时间内访问大量不同端口，疑似端口扫描",
     "sensitive_path_login": "对 /admin、/login 等敏感路径持续返回 401/403，疑似暴力破解",
-    "foreign_sensitive_port": "非中国境内 IP 访问数据库、远程桌面等管理端口",
+    "geo_sensitive_port": "按归属地范围判断来源 IP 访问数据库、远程桌面等管理端口（可选境内 / 境外 / 双向）",
     "rate_limit": "同一 IP 在短时间内请求次数超过阈值，疑似压力攻击或爬虫",
     "scanner_ua": "User-Agent 为空或命中 Nmap/sqlmap 等已知扫描器特征",
     "error_storm": "短时间内 4xx/5xx 错误占比过高，疑似探测或探测型攻击",
@@ -46,8 +46,18 @@ RULE_PARAMS: Dict[str, List[Dict[str, Any]]] = {
         {"key": "window_sec", "type": "int", "label": "统计窗口(秒)", "min": 1, "max": 3600},
         {"key": "threshold", "type": "int", "label": "失败次数阈值", "min": 1, "max": 10000},
     ],
-    "foreign_sensitive_port": [
+    "geo_sensitive_port": [
         {"key": "ports", "type": "list_int", "label": "管理端口列表"},
+        {
+            "key": "geo_scope",
+            "type": "choice",
+            "label": "归属地范围",
+            "options": [
+                ("china", "仅限境内"),
+                ("overseas", "仅限境外"),
+                ("both", "境内+境外"),
+            ],
+        },
     ],
     "scanner_ua": [
         {"key": "patterns", "type": "list_str", "label": "扫描器特征(逗号分隔)"},
@@ -72,12 +82,20 @@ RULE_PARAMS: Dict[str, List[Dict[str, Any]]] = {
 }
 
 
+# 已废弃规则的旧 ID -> 名称。
+# 历史记录（events.matched_rules）里存的是当时的 ID，UI 翻译时需要能认出来，
+# 否则老事件会显示成一串英文 ID。
+LEGACY_RULE_LABELS = {
+    "foreign_sensitive_port": "境外访问管理端口（旧）",
+}
+
+
 def rule_label(rule_id: str) -> str:
     # 区域规则的 id 形如 region_allow:r-3f2a，这里解析成「区域放行：河南办公网」
     if rule_id.startswith(REGION_PREFIX) and ":" in rule_id:
         act, _, rid = rule_id[len(REGION_PREFIX) :].partition(":")
         return f"{REGION_ACTION_LABEL.get(act, '区域规则')}：{region_name(rid)}"
-    return RULE_LABELS.get(rule_id, rule_id)
+    return RULE_LABELS.get(rule_id) or LEGACY_RULE_LABELS.get(rule_id) or rule_id
 
 
 # ═══════════════════════════════════════════════════════════

@@ -51,12 +51,15 @@ def _engine(tmp_path, region_rules, rules=None):
                 "level": "critical",
                 "action": "suggest_ban",
             },
-            "foreign_sensitive_port": {
+            "geo_sensitive_port": {
                 "enabled": True,
                 "ports": [3389, 18080],
                 "score": 65,
                 "level": "high",
                 "action": "suggest_ban",
+                # 本文件用境外 IP 造「基础分」（不改境内 IP 的评分前提），
+                # 所以把范围钉在 1.x 的老口径「仅限境外」，与生产默认（仅限境内）解耦
+                "geo_scope": "overseas",
             },
             "scanner_ua": {
                 "enabled": True,
@@ -145,8 +148,8 @@ def _scanner_rec(ip="2.2.2.2", port=3389):
     """
     构造一条「基础分不为 0 且归属地为中国」的记录。
 
-    之所以绕这么一圈：境外管理端口那条规则只认非中国 IP，
-    所以中国 IP 想拿到基础分只能靠别的规则（这里用扫描器 UA，+45）。
+    这里用扫描器 UA（+45）造基础分，不依赖端口规则的归属地范围 ——
+    范围是可配置的，拿它造分会让用例随配置漂移。
     """
     return _rec(ip, port, protocol="http", method="GET", path="/", user_agent="nmap")
 
@@ -199,7 +202,7 @@ def test_allow_beats_all_other_rules(tmp_path):
     """
     区域放行优先级最高。
 
-    这里故意用境外 IP：它本来会命中「境外访问管理端口」拿 65 分并被建议封禁，
+    这里故意用境外 IP：它本来会命中「管理端口归属地检测」拿 65 分并被建议封禁，
     但管理员既然显式配了放行，就必须以放行为准（命中即短路，连评分都不做）。
     """
     eng = _engine(tmp_path, [{**ALLOW_HENAN, "match": {"countries": ["俄罗斯"]}}])
@@ -433,7 +436,7 @@ def test_shipped_rules_engine_constructs():
 def test_region_rules_do_not_affect_plain_http_only_when_matched(tmp_path):
     """没有配区域规则时，行为必须与改造前完全一致"""
     eng = _engine(tmp_path, [])
-    # 普通浏览器 UA + 境外 + 管理端口 → 只有「境外访问管理端口」一条
+    # 普通浏览器 UA + 境外 + 管理端口 → 只有「管理端口归属地检测」一条
     r = eng.evaluate(
         _rec(
             "4.4.4.4",
@@ -447,7 +450,7 @@ def test_region_rules_do_not_affect_plain_http_only_when_matched(tmp_path):
     )
     assert r.whitelisted is False
     assert r.score == 65
-    assert r.matched_rules == ["foreign_sensitive_port"]
+    assert r.matched_rules == ["geo_sensitive_port"]
 
     # HTTP 场景下 UA 为空仍按扫描器加 45 分 —— 这是刻意保留的既有行为，
     # 且正因为有这个行为，「本机采集的 TCP 记录不能套用空 UA 判定」才必须成立
