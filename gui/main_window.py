@@ -119,12 +119,18 @@ def _make_icon(color: Optional[str] = None, size: int = 64) -> QIcon:
 
 
 class BanDurationDialog(QDialog):
-    """确认封禁对话框（可调整时长）"""
+    """确认封禁对话框（时长由策略建议，用户可覆盖）
+
+    为什么不直接读 `default_ban_duration_sec`：P2-8 起封禁时长是「策略」——
+    按风险等级分档，同一 IP 反复被封还会递增。只给一个数字的话，用户改完分档
+    设置也看不出有没有生效，所以这里把「建议值 + 为什么是这个值」一起摆出来，
+    并允许当场改成别的值（改成 0 = 永久）。
+    """
 
     def __init__(self, ip: str, score: int, reason: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("确认封禁")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(420)
         form = QFormLayout(self)
         form.setContentsMargins(18, 18, 18, 12)
         form.setSpacing(10)
@@ -135,12 +141,33 @@ class BanDurationDialog(QDialog):
         rl.setWordWrap(True)
         form.addRow("封禁原因", rl)
 
+        # 策略建议值。秒数恒 ≥ 1（见 app.ban_service 顶部「语义分界」），
+        # 所以这里绝不会因为策略算出 0 而变成「永久」。
+        decision = ban_service.resolve_duration_detail(score=score, ip=ip)
+
         self.sp = QSpinBox()
         self.sp.setRange(0, 365 * 24 * 60)
-        self.sp.setValue(max(1, cfg.get_int("default_ban_duration_sec", 3600) // 60))
         self.sp.setSpecialValueText("永久")
         self.sp.setSuffix(" 分钟（0=永久）")
+        # 秒 → 分钟**向上取整**：不足 1 分钟的档位若向下取整成 0，就成了永久封禁
+        self.sp.setValue(max(1, (decision.seconds + 59) // 60))
         form.addRow("封禁时长", self.sp)
+
+        why_lines = [
+            f"策略建议 {ban_service.format_duration(decision.seconds)}"
+            f"（{decision.source_label}）：{decision.detail}",
+        ]
+        # 「已被封过几次」放这里而不是加一列表格列：BAN_WIDTHS 已经排到极限，
+        # 多一列就要牺牲 IP / 原因列的完整性；而只有真要封某个人时才关心这个数
+        prior = ban_service.prior_ban_count(ip)
+        if prior > 0:
+            why_lines.append(f"该 IP 历史封禁 {prior} 次（不含本次）。")
+        why_lines.append("如不接受，可直接改上面的分钟数；填 0 表示永久封禁。")
+
+        why = QLabel("\n".join(why_lines))
+        why.setWordWrap(True)
+        why.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        form.addRow(why)
 
         note = QLabel("将执行 New-NetFirewallRule 创建入站阻止规则（需管理员权限）。")
         note.setStyleSheet(f"color:{C.text_muted};font-size:12px;")

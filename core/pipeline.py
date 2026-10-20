@@ -29,6 +29,37 @@ from core.rule_engine import get_engine, is_never_ban
 log = get_logger(__name__)
 
 
+def _resolve_ban_duration(ip: str, result: RiskResult) -> int:
+    """
+    自动封禁该封多久：规则级 > 递增级 > 等级级 > 默认（见 app.ban_service）。
+
+    为什么在函数内 import app：分层上 core 不该在模块级依赖 app（现有代码里
+    core→app 的边一条都没有）。这里只在「真的触发自动封禁」这条冷路径上借用一次
+    业务层策略实现，放函数内既不动分层，也避免将来出现模块级循环依赖。
+
+    ⚠️ 必须在 insert_ban **之前**调用：递增策略要数「历史封禁次数」，
+    插库后再算会把本次自己数进去，第一次封禁就被当成第二次而直接翻倍。
+    """
+    from app.ban_service import resolve_duration_detail
+
+    try:
+        decision = resolve_duration_detail(
+            score=result.score, level=result.level, rule_ids=result.matched_rules, ip=ip
+        )
+    except Exception:
+        # 策略解析失败（规则库读不到 / 设置值是脏数据）不能挡住封禁
+        log.exception("解析封禁时长策略失败 ip=%s，退回默认时长", ip)
+        return max(1, cfg.get_int("default_ban_duration_sec", 3600))
+    log.info(
+        "自动封禁时长按「%s」取 %d 秒：%s（ip=%s）",
+        decision.source_label,
+        decision.seconds,
+        decision.detail,
+        ip,
+    )
+    return decision.seconds
+
+
 def auto_ban_record(rec: AccessRecord, result: RiskResult) -> None:
     """
     自动模式：无需人工确认直接封禁（默认关闭，需在设置页显式开启）。
@@ -73,7 +104,7 @@ def auto_ban_record(rec: AccessRecord, result: RiskResult) -> None:
         )
         return
 
-    duration = cfg.get_int("default_ban_duration_sec", 3600)
+    duration = _resolve_ban_duration(rec.ip, result)
     expire = int(time.time() * 1000) + duration * 1000
     rec_ban = BanRecord(
         ip=rec.ip,

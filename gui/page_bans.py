@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from app import ban_service
 from core import firewall
+from core import settings as cfg
 from core.config import LEVEL_CRITICAL, LEVEL_HIGH
 from core.database import (
     count_active_bans,
@@ -106,7 +107,9 @@ class ManualBanDialog(QDialog):
         self.reason = QLineEdit("手动封禁")
         self.duration = QSpinBox()
         self.duration.setRange(0, 365 * 24 * 60)
-        self.duration.setValue(60)
+        # 默认取「默认封禁时长」设置（原来硬编码 60 分钟：用户在设置页改过默认值，
+        # 这里仍然显示 1 小时，两边对不上）。0 在设置里表示永久，直接映射成「永久」。
+        self.duration.setValue(max(0, cfg.get_int("default_ban_duration_sec", 3600) // 60))
         self.duration.setSuffix(" 分钟（0=永久）")
         self.duration.setSpecialValueText("永久")
 

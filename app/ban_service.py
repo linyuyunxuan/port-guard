@@ -10,10 +10,23 @@ PortGuard — 封禁编排（不依赖 Qt，可脱离界面单测）
 
 import contextlib
 import time
-from typing import List, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 from core import firewall
+from core import settings as cfg
+from core.config import (
+    BAN_DURATION_TIER_DEFAULTS,
+    DEFAULT_BAN_DURATION_SEC,
+    DEFAULT_ESCALATION_FACTOR,
+    DEFAULT_ESCALATION_MAX_SEC,
+    LEVEL_CRITICAL,
+    LEVEL_HIGH,
+    LEVEL_LABEL,
+    LEVEL_LOW,
+    LEVEL_MEDIUM,
+)
 from core.database import (
+    count_bans_by_ip,
     find_active_ban_by_ip,
     insert_ban,
     list_expired_bans,
@@ -29,7 +42,8 @@ from core.models import (
     STATUS_PENDING,
     BanRecord,
 )
-from core.rule_engine import is_never_ban
+from core.rule_engine import RuleEngine, get_engine, is_never_ban
+from core.rules_meta import REGION_PREFIX, region_rule_key, rule_label
 from core.validators import InvalidIP, clamp_int, normalize_ip, safe_text
 
 log = get_logger(__name__)
@@ -38,14 +52,267 @@ MAX_BAN_SECONDS = 365 * 24 * 3600
 MAX_IP_LEN = 64
 
 
+# ═══════════════════════════════════════════════════════════
+#  封禁时长策略（P2-8）
+#
+#  ⚠️ 语义分界（踩了就是线上事故）：
+#  `BanRecord.duration_sec = 0 / None` 表示**永久封禁**（expire_at 也为 None）。
+#  因此策略函数**绝不能返回 0** —— 递增算法一旦算出 0（例如用户把倍数配成 0，
+#  或乘法溢出被截断），「按策略封 1 小时」就会静默变成「永久封禁」。
+#  本模块所有策略出口都过 `_sec()`，下限硬钉在 1 秒。
+# ═══════════════════════════════════════════════════════════
+
+#: 策略出口的硬下限。1 秒在业务上等同于「立刻到期」，但**不是永久**
+_MIN_POLICY_SEC = 1
+
+#: 时长来源，用于日志与界面解释「为什么是这个值」
+SOURCE_RULE = "rule"
+SOURCE_ESCALATION = "escalation"
+SOURCE_LEVEL = "level"
+SOURCE_DEFAULT = "default"
+
+SOURCE_LABEL = {
+    SOURCE_RULE: "规则指定时长",
+    SOURCE_ESCALATION: "重复封禁递增",
+    SOURCE_LEVEL: "按风险等级分档",
+    SOURCE_DEFAULT: "默认时长",
+}
+
+#: 风险等级 -> 分档设置项。normal 没有档位（它本就不该被封）
+_LEVEL_TIER_KEY = {
+    LEVEL_CRITICAL: "ban_duration_critical_sec",
+    LEVEL_HIGH: "ban_duration_high_sec",
+    LEVEL_MEDIUM: "ban_duration_medium_sec",
+    LEVEL_LOW: "ban_duration_low_sec",
+}
+
+
+class DurationDecision(NamedTuple):
+    """一次时长解析的结果（秒数 + 来源 + 人话解释，供日志和界面直接展示）"""
+
+    seconds: int
+    source: str
+    detail: str
+
+    @property
+    def source_label(self) -> str:
+        return SOURCE_LABEL.get(self.source, self.source)
+
+
+def _sec(value: Any, fallback: Optional[int] = None) -> int:
+    """
+    把任意外部值收敛成合法封禁时长：`1 <= v <= MAX_BAN_SECONDS`。
+
+    非法 / 非正 / 超出上限时退回 fallback（再退 DEFAULT_BAN_DURATION_SEC）。
+    这是「策略绝不返回 0」的唯一出口，别在别处绕过它。
+    """
+    v = clamp_int(value, 0, MAX_BAN_SECONDS, 0)
+    if v <= 0:
+        v = clamp_int(fallback, 0, MAX_BAN_SECONDS, 0)
+    if v <= 0:
+        v = DEFAULT_BAN_DURATION_SEC
+    return max(_MIN_POLICY_SEC, min(v, MAX_BAN_SECONDS))
+
+
+def _default_sec(override: Optional[int] = None) -> int:
+    """兜底时长：优先用调用方给的 default，其次读设置，最后用内置默认"""
+    if override is not None:
+        return _sec(override)
+    return _sec(cfg.get_int("default_ban_duration_sec", DEFAULT_BAN_DURATION_SEC))
+
+
+def tier_sec_for_level(level: Optional[str]) -> int:
+    """
+    该风险等级在设置里配的分档时长（秒）。未配栏杆位（normal / 未知等级）返回 0，
+    表示「不分档」，由调用方决定退回哪个兜底值。
+    """
+    key = _LEVEL_TIER_KEY.get(level or "")
+    if not key:
+        return 0
+    builtin = int(BAN_DURATION_TIER_DEFAULTS.get(level or "", 0))
+    # 传入内置默认值：老库可能还没有这个 key（INSERT OR IGNORE 只补新库缺的行，
+    # 但用户手动删过 settings 行时同样缺失），此时不能静默退化成「不分档」
+    return clamp_int(cfg.get_int(key, builtin), 0, MAX_BAN_SECONDS, 0)
+
+
+def duration_for_level(level: Optional[str], fallback: Optional[int] = None) -> int:
+    """按风险等级取封禁时长；该等级未配栏杆位时用 fallback（默认取默认时长）"""
+    base = _default_sec(fallback)
+    return _sec(tier_sec_for_level(level) or base, base)
+
+
+def escalation_sec(base: int, prior_bans: int) -> int:
+    """
+    重复封禁递增：历史封禁 `prior_bans` 次后，本次时长 = base × factor^prior_bans，
+    并以 `ban_escalation_max_sec` 封顶。
+
+    · prior_bans <= 0 时原样返回（**首次封禁不放大**）；
+    · factor <= 1 时不递增（配置失误不该变成「越封越短」）；
+    · 封顶值低于 base 时不生效 —— 封顶是用来限制「递增」的，
+      不应该把用户配的分档值反过来压短；
+    · 循环逐次相乘而不是一步 pow：prior_bans 可能很大（历史记录被清过又攒回来），
+      `factor ** n` 会直接算出一个天文数字再被截断，结果依赖浮点/大整数行为。
+    """
+    if base <= 0 or prior_bans <= 0:
+        return base
+    factor = max(1, cfg.get_int("ban_escalation_factor", DEFAULT_ESCALATION_FACTOR))
+    if factor <= 1:
+        return base
+    cap = clamp_int(
+        cfg.get_int("ban_escalation_max_sec", DEFAULT_ESCALATION_MAX_SEC),
+        base,
+        MAX_BAN_SECONDS,
+        MAX_BAN_SECONDS,
+    )
+    out = base
+    for _ in range(prior_bans):
+        if out >= cap:
+            return cap
+        out = min(out * factor, cap)
+    return min(out, cap)
+
+
+def _rule_duration_sec(rule_id: str) -> int:
+    """
+    规则级时长：`rules.json` 里该规则若配了 `ban_duration_sec`，返回其秒数，否则 0。
+    普通规则从 `rules.<id>` 读；区域规则（命中标记形如 `region_suggest_ban:r1`）
+    从 `region_rules` 原始配置里按同样的 key 规则反查。
+    """
+    engine = get_engine()
+    body = engine.rule(rule_id)
+    if not body and rule_id.startswith(REGION_PREFIX):
+        for r in engine.get_config().get("region_rules") or []:
+            if not isinstance(r, dict):
+                continue
+            key = region_rule_key(str(r.get("action") or "").lower(), str(r.get("id") or ""))
+            if key == rule_id:
+                body = r
+                break
+    if not body:
+        return 0
+    return clamp_int(body.get("ban_duration_sec"), 0, MAX_BAN_SECONDS, 0)
+
+
+def _prior_ban_count(ip: str) -> int:
+    """历史封禁次数；查库失败按 0 处理（不递增，但绝不能因此挡住封禁）"""
+    try:
+        return count_bans_by_ip(ip)
+    except Exception:
+        log.exception("统计历史封禁次数失败 ip=%s（本次不做递增）", ip)
+        return 0
+
+
+def prior_ban_count(ip: str) -> int:
+    """
+    某 IP 的历史封禁次数（界面展示 / 排查用；不含「当前这条」，因为它还没落库）。
+    查库失败返回 0 —— 展示用的数字不值得把界面弄崩。
+    """
+    return _prior_ban_count(ip)
+
+
+def resolve_duration_detail(
+    score: Optional[int] = None,
+    level: Optional[str] = None,
+    rule_ids: Optional[List[str]] = None,
+    ip: Optional[str] = None,
+    default: Optional[int] = None,
+) -> DurationDecision:
+    """
+    解析本次封禁应该封多久，并给出「为什么这么长」。
+
+    优先级（前者命中就不再往后看）：
+      1. 规则级   —— `rule_ids` 里有规则配了 `ban_duration_sec`，取最狠（最长）的那条
+      2. 递增级   —— 开启递增且该 IP 有历史封禁记录，按倍数在「等级档位」上加长并封顶
+      3. 等级级   —— 按 `score`/`level` 映射的档位（`ban_duration_*_sec`）
+      4. 默认     —— `default`，未传则 `default_ban_duration_sec`
+    返回值恒 ≥ 1 秒（见模块顶部「语义分界」）。
+
+    ⚠️ 调用点必须在 `insert_ban` **之前**：递增要用「历史次数」，插库后再解析
+    会把本次自己数进去，第一次封禁就翻倍（core.database.count_bans_by_ip 亦同）。
+    """
+    base = _default_sec(default)
+
+    # 1. 规则级：最狠 = 最长
+    hits = [(rid, _rule_duration_sec(rid)) for rid in (rule_ids or []) if rid]
+    hits = [(rid, sec) for rid, sec in hits if sec > 0]
+    if hits:
+        rid, sec = max(hits, key=lambda kv: kv[1])
+        return DurationDecision(
+            _sec(sec, base), SOURCE_RULE, f"规则「{rule_label(rid)}」指定 {format_duration(sec)}"
+        )
+
+    lv = level or (RuleEngine.level_of(int(score)) if score is not None else None)
+    tier = tier_sec_for_level(lv)
+
+    # 2. 递增级：以等级档位（无档位则默认时长）为基准放大
+    if ip and cfg.get_bool("ban_escalation_enabled", False):
+        # factor <= 1 等于没开递增（也不该出现「越封越短」），此时仍按等级档位走
+        factor = max(1, cfg.get_int("ban_escalation_factor", DEFAULT_ESCALATION_FACTOR))
+        prior = _prior_ban_count(ip) if factor > 1 else 0
+        if prior > 0:
+            start = _sec(tier or base, base)
+            sec = _sec(escalation_sec(start, prior), start)
+            return DurationDecision(
+                sec,
+                SOURCE_ESCALATION,
+                f"{ip} 历史已封禁 {prior} 次，基准 {format_duration(start)} × {factor}^{prior} → {format_duration(sec)}",
+            )
+
+    # 3. 等级级
+    if tier > 0:
+        return DurationDecision(
+            _sec(tier, base),
+            SOURCE_LEVEL,
+            f"风险等级「{LEVEL_LABEL.get(lv or '', lv or '未定')}」对应 {format_duration(tier)}",
+        )
+
+    # 4. 默认
+    return DurationDecision(
+        base, SOURCE_DEFAULT, f"未命中分档 / 递增，使用默认 {format_duration(base)}"
+    )
+
+
+def resolve_duration(
+    score: Optional[int] = None,
+    level: Optional[str] = None,
+    rule_ids: Optional[List[str]] = None,
+    ip: Optional[str] = None,
+    default: Optional[int] = None,
+) -> int:
+    """
+    封禁时长策略的纯数值入口：返回**秒数，恒 ≥ 1**（永不返回 0=永久）。
+    需要「为什么是这个值」时用 `resolve_duration_detail()`。
+    """
+    return resolve_duration_detail(
+        score=score, level=level, rule_ids=rule_ids, ip=ip, default=default
+    ).seconds
+
+
+def format_duration(sec: int) -> str:
+    """秒数 -> 「1 天 / 6 小时 / 30 分钟」，复用表格里那套口径"""
+    return BanRecord(duration_sec=sec).duration_label
+
+
 class BanError(Exception):
     """封禁前置校验失败（消息可直接展示给用户）"""
 
 
-def prepare(ip: str, score: int = 0, reason: str = "", duration_sec: int = 0) -> BanRecord:
+def prepare(
+    ip: str,
+    score: int = 0,
+    reason: str = "",
+    duration_sec: Optional[int] = None,
+    rule_ids: Optional[List[str]] = None,
+) -> BanRecord:
     """
     校验并构造封禁记录（**不落库、不执行**）。
     这里是所有封禁路径的唯一校验入口。
+
+    `duration_sec` 三种传法，语义必须分清：
+    · `None`（默认）—— 走封禁时长策略：规则级 > 递增级 > 等级级 > 默认；
+    · `0`            —— **永久封禁**（duration_sec/expire_at 都是 None）；
+    · `>0`           —— 调用方指定的秒数（超出上限会被夹到 365 天）。
+    策略分支永远拿不到 0：`resolve_duration_detail()` 的下限硬钉在 1 秒。
     """
     try:
         safe_ip = normalize_ip(ip)
@@ -55,7 +322,20 @@ def prepare(ip: str, score: int = 0, reason: str = "", duration_sec: int = 0) ->
     if is_never_ban(safe_ip):
         raise BanError(f"{safe_ip} 属于内网 / 回环 / 保留地址，PortGuard 永不封禁此类地址")
 
-    duration = clamp_int(duration_sec, 0, MAX_BAN_SECONDS, 0)
+    if duration_sec is None:
+        # 递增要读「历史次数」，此处尚未 insert，天然不含本次记录（见 resolve_duration_detail）
+        decision = resolve_duration_detail(score=score, rule_ids=rule_ids, ip=safe_ip)
+        duration = decision.seconds
+        log.info(
+            "封禁时长按「%s」取 %s：%s（ip=%s）",
+            decision.source_label,
+            format_duration(duration),
+            decision.detail,
+            safe_ip,
+        )
+    else:
+        duration = clamp_int(duration_sec, 0, MAX_BAN_SECONDS, 0)
+
     expire = None if not duration else int(time.time() * 1000) + duration * 1000
     return BanRecord(
         ip=safe_ip,
@@ -69,11 +349,18 @@ def prepare(ip: str, score: int = 0, reason: str = "", duration_sec: int = 0) ->
 
 
 def execute(
-    ip: str, score: int = 0, reason: str = "", duration_sec: int = 0, source: str = "manual"
+    ip: str,
+    score: int = 0,
+    reason: str = "",
+    duration_sec: Optional[int] = None,
+    source: str = "manual",
+    rule_ids: Optional[List[str]] = None,
 ) -> Tuple[Optional[int], str]:
     """
     完整封禁流程：校验 → 写 pending → 调防火墙 → 回填结果 → 投递事件。
     返回 (ban_id, 错误信息)。成功时错误信息为空串。
+
+    `duration_sec` 的语义同 `prepare()`（None=走策略 / 0=永久 / >0=指定秒数）。
 
     注意：调用方应在后台线程执行（防火墙命令可能耗时数秒）。
     """
@@ -81,7 +368,7 @@ def execute(
         return None, "需要管理员权限才能修改 Windows 防火墙"
 
     try:
-        rec = prepare(ip, score, reason, duration_sec)
+        rec = prepare(ip, score, reason, duration_sec, rule_ids)
     except BanError as e:
         log.warning("拒绝封禁：%s", e)
         return None, str(e)

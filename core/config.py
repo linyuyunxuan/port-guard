@@ -218,6 +218,30 @@ def assets_path(rel: str) -> str:
     return resource_path(os.path.join("assets", rel))
 
 
+# ═══════════════════════════════════════════════════════════
+#  封禁时长策略（按风险等级分档 + 重复封禁递增）
+#  解析优先级见 app.ban_service.resolve_duration：
+#      规则级 > 递增级 > 等级级 > 默认
+# ═══════════════════════════════════════════════════════════
+
+#: 默认封禁时长（秒）。既是所有策略的兜底值，也是手动封禁的默认值
+DEFAULT_BAN_DURATION_SEC = 3600
+
+#: 按风险等级分档的默认时长（秒）。未列出的等级（normal）= 不分档，退回默认时长
+BAN_DURATION_TIER_DEFAULTS = {
+    LEVEL_CRITICAL: 86400,  # 24 小时
+    LEVEL_HIGH: 21600,  # 6 小时
+    LEVEL_MEDIUM: 7200,  # 2 小时
+    LEVEL_LOW: 1800,  # 30 分钟
+}
+
+#: 递增倍数：同一 IP 每多一次历史封禁，时长乘以该值
+DEFAULT_ESCALATION_FACTOR = 2
+#: 递增封顶（秒）。必须 ≤ app.ban_service.MAX_BAN_SECONDS（365 天），
+#: 否则 prepare() 里的 clamp_int 会静默截断 → 界面显示值与实际生效值不符
+DEFAULT_ESCALATION_MAX_SEC = 7 * 24 * 3600
+
+
 # ── 默认设置（写入 settings 表）──
 DEFAULT_SETTINGS = {
     # 服务
@@ -240,6 +264,17 @@ DEFAULT_SETTINGS = {
     "auto_mode": "0",  # 1=自动封禁（默认关闭）
     "auto_ban_threshold": "90",  # 自动封禁的最低风险分
     "default_ban_duration_sec": "3600",
+    # ── 封禁时长策略：按等级分档 ──
+    # 分档只在「自动封禁 / 走策略」时生效，手动封禁仍以 default_ban_duration_sec 为默认值。
+    # 0 = 该等级不分档，退回 default_ban_duration_sec。
+    "ban_duration_critical_sec": str(BAN_DURATION_TIER_DEFAULTS[LEVEL_CRITICAL]),
+    "ban_duration_high_sec": str(BAN_DURATION_TIER_DEFAULTS[LEVEL_HIGH]),
+    "ban_duration_medium_sec": str(BAN_DURATION_TIER_DEFAULTS[LEVEL_MEDIUM]),
+    "ban_duration_low_sec": str(BAN_DURATION_TIER_DEFAULTS[LEVEL_LOW]),
+    # ── 封禁时长策略：重复封禁递增 ──
+    "ban_escalation_enabled": "0",  # 1=同一 IP 再次被封时按倍数加长
+    "ban_escalation_factor": str(DEFAULT_ESCALATION_FACTOR),  # 每次递增的倍数
+    "ban_escalation_max_sec": str(DEFAULT_ESCALATION_MAX_SEC),  # 递增封顶（秒）
     # 告警
     "alert_sound": "1",
     "alert_popup_level": LEVEL_CRITICAL,

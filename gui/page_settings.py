@@ -19,6 +19,9 @@ from app import maintenance
 from core import firewall, report_server
 from core import settings as cfg
 from core.config import (
+    BAN_DURATION_TIER_DEFAULTS,
+    DEFAULT_ESCALATION_FACTOR,
+    DEFAULT_ESCALATION_MAX_SEC,
     DEFAULT_LISTEN_HOST,
     DEFAULT_LISTEN_PORT,
     DEFAULT_TS_SKEW_SEC,
@@ -409,6 +412,39 @@ class SettingsPage(QWidget):
         self.sp_duration.setSpecialValueText("永久")
         self.sp_duration.setFixedWidth(180)
 
+        # ── 按风险等级分档的封禁时长 ──
+        # 只对「走策略」的封禁生效（自动封禁 / 未指定时长的手动封禁）；
+        # 手动封禁对话框里的默认值仍然是上面那个「默认封禁时长」。
+        def _tier_spin(level: str) -> QSpinBox:
+            sp = QSpinBox()
+            sp.setRange(0, 365 * 24 * 60)
+            sp.setValue(BAN_DURATION_TIER_DEFAULTS[level] // 60)
+            sp.setSuffix(" 分钟（0=不分档）")
+            sp.setSpecialValueText("不分档")
+            sp.setFixedWidth(200)
+            return sp
+
+        self.sp_dur_critical = _tier_spin(LEVEL_CRITICAL)
+        self.sp_dur_high = _tier_spin(LEVEL_HIGH)
+        self.sp_dur_medium = _tier_spin(LEVEL_MEDIUM)
+        self.sp_dur_low = _tier_spin(LEVEL_LOW)
+
+        # ── 重复封禁递增 ──
+        self.tg_escalation = ToggleSwitch(False)
+        self.tg_escalation.toggled.connect(self._on_escalation_toggle)
+
+        self.sp_esc_factor = QSpinBox()
+        self.sp_esc_factor.setRange(1, 10)
+        self.sp_esc_factor.setValue(DEFAULT_ESCALATION_FACTOR)
+        self.sp_esc_factor.setSuffix(" 倍")
+        self.sp_esc_factor.setFixedWidth(120)
+
+        self.sp_esc_max = QSpinBox()
+        self.sp_esc_max.setRange(1, 365 * 24)
+        self.sp_esc_max.setValue(DEFAULT_ESCALATION_MAX_SEC // 3600)
+        self.sp_esc_max.setSuffix(" 小时")
+        self.sp_esc_max.setFixedWidth(160)
+
         self.sp_rate = QSpinBox()
         self.sp_rate.setRange(0, 100000)
         self.sp_rate.setValue(300)
@@ -417,7 +453,24 @@ class SettingsPage(QWidget):
 
         ban.add("自动封禁最低评分", self.sp_threshold)
         ban.add("默认封禁时长", self.sp_duration)
+        ban.add("严重档时长", self.sp_dur_critical)
+        ban.add("高档时长", self.sp_dur_high)
+        ban.add("中档时长", self.sp_dur_medium)
+        ban.add("低档时长", self.sp_dur_low)
+        ban.add("重复封禁递增", _row_widget(self.tg_escalation, spacing=10))
+        ban.add("递增倍数", self.sp_esc_factor)
+        ban.add("递增封顶", self.sp_esc_max)
         ban.add("上报限流", self.sp_rate)
+
+        hint_strategy = QLabel(
+            "时长优先级：规则指定 > 重复封禁递增 > 风险等级分档 > 默认封禁时长。"
+            "「不分档」表示该等级沿用默认封禁时长；递增以等级档位为基准，"
+            "同一 IP 每多一次历史封禁记录就乘一次倍数，直到封顶值。"
+            "手动封禁对话框仍以「默认封禁时长」为初始值，可随时改。"
+        )
+        hint_strategy.setObjectName("hint")
+        hint_strategy.setWordWrap(True)
+        ban.add_block(hint_strategy, span=False)
 
         self.lbl_perm = QLabel("")
         self.lbl_perm.setWordWrap(True)
@@ -678,6 +731,26 @@ class SettingsPage(QWidget):
         self.tg_auto.setChecked(cfg.get_bool("auto_mode", False))
         self.sp_threshold.setValue(cfg.get_int("auto_ban_threshold", 90))
         self.sp_duration.setValue(cfg.get_int("default_ban_duration_sec", 3600) // 60)
+        self.sp_dur_critical.setValue(
+            cfg.get_int("ban_duration_critical_sec", BAN_DURATION_TIER_DEFAULTS[LEVEL_CRITICAL])
+            // 60
+        )
+        self.sp_dur_high.setValue(
+            cfg.get_int("ban_duration_high_sec", BAN_DURATION_TIER_DEFAULTS[LEVEL_HIGH]) // 60
+        )
+        self.sp_dur_medium.setValue(
+            cfg.get_int("ban_duration_medium_sec", BAN_DURATION_TIER_DEFAULTS[LEVEL_MEDIUM]) // 60
+        )
+        self.sp_dur_low.setValue(
+            cfg.get_int("ban_duration_low_sec", BAN_DURATION_TIER_DEFAULTS[LEVEL_LOW]) // 60
+        )
+        self.tg_escalation.setChecked(cfg.get_bool("ban_escalation_enabled", False))
+        self.sp_esc_factor.setValue(cfg.get_int("ban_escalation_factor", DEFAULT_ESCALATION_FACTOR))
+        # 封顶按小时展示；库里是秒，老值可能不是整小时，向上取整避免「显示 7 天、实际 6 天」
+        self.sp_esc_max.setValue(
+            (cfg.get_int("ban_escalation_max_sec", DEFAULT_ESCALATION_MAX_SEC) + 3599) // 3600
+        )
+        self._on_escalation_toggle(self.tg_escalation.isChecked())
         self.sp_rate.setValue(cfg.get_int("rate_limit_per_sec", 300))
 
         # 告警
@@ -732,6 +805,15 @@ class SettingsPage(QWidget):
                 "auto_mode": "1" if self.tg_auto.isChecked() else "0",
                 "auto_ban_threshold": self.sp_threshold.value(),
                 "default_ban_duration_sec": self.sp_duration.value() * 60,
+                "ban_duration_critical_sec": self.sp_dur_critical.value() * 60,
+                "ban_duration_high_sec": self.sp_dur_high.value() * 60,
+                "ban_duration_medium_sec": self.sp_dur_medium.value() * 60,
+                "ban_duration_low_sec": self.sp_dur_low.value() * 60,
+                "ban_escalation_enabled": "1" if self.tg_escalation.isChecked() else "0",
+                "ban_escalation_factor": self.sp_esc_factor.value(),
+                # 上限 365 天 = app.ban_service.MAX_BAN_SECONDS，别改大：
+                # 超出部分会被 prepare() 里的 clamp_int 静默截断
+                "ban_escalation_max_sec": self.sp_esc_max.value() * 3600,
                 "rate_limit_per_sec": self.sp_rate.value(),
                 "alert_sound": "1" if self.tg_sound.isChecked() else "0",
                 "alert_popup_level": (
@@ -797,6 +879,11 @@ class SettingsPage(QWidget):
             "已开启：局域网内其他主机可上报（需 API Key）" if on else "已关闭（推荐）：仅本机可上报"
         )
         self.warn_lan.setVisible(bool(on))
+
+    def _on_escalation_toggle(self, on: bool) -> None:
+        """递增关闭时倍数 / 封顶没有意义，置灰避免用户以为改了会生效"""
+        self.sp_esc_factor.setEnabled(on)
+        self.sp_esc_max.setEnabled(on)
 
     def _toggle_key_echo(self) -> None:
         if self.ed_key.echoMode() == QLineEdit.EchoMode.Password:

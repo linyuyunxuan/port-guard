@@ -26,6 +26,7 @@ from core.models import (
     BanRecord,
     GeoInfo,
     RiskResult,
+    ms_to_str,
     now_ms,
 )
 
@@ -724,6 +725,34 @@ def find_active_ban_by_ip(ip: str) -> Optional[BanRecord]:
             (ip, STATUS_ACTIVE),
         ).fetchone()
         return _row_to_ban(r) if r else None
+    finally:
+        conn.close()
+
+
+def count_bans_by_ip(ip: str, since_ts: Optional[int] = None) -> int:
+    """
+    某 IP 的历史封禁次数（递增封禁策略用）。
+
+    细节与理由：
+    · **不看 status**：解封 / 到期 / 失败都算。要回答的是「这个 IP 是不是惯犯」，
+      而不是「现在是否还在封禁中」。只数 active 的话，攻击者等解封后重来一次
+      就又回到「第一次」，递增永远不生效。
+    · **必须 `ip = ?` 等值**：`query_bans` 的 keyword 走 `ip LIKE %kw%`，
+      `203.0.113.1` 会连带命中 `203.0.113.10~19`，拿来精确计数是错的。
+    · since_ts 为 epoch 毫秒，只统计该时刻之后创建的记录。created_at 存的是
+      `YYYY-MM-DD HH:MM:SS` 本地时间字符串（见 SCHEMA），定长格式下字典序即时间序。
+
+    ⚠️ 调用点必须在 `insert_ban` **之前**：本函数不排除任何记录，插库后再数会把
+    本次封禁自己数进去，第一次封禁就被当成第二次，时长直接翻倍。
+    """
+    sql = "SELECT COUNT(*) c FROM ban_list WHERE ip = ?"
+    args: List[Any] = [ip]
+    if since_ts:
+        sql += " AND created_at >= ?"
+        args.append(ms_to_str(since_ts))
+    conn = _connect()
+    try:
+        return int(conn.execute(sql, args).fetchone()["c"])
     finally:
         conn.close()
 
