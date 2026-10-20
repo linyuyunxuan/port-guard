@@ -663,6 +663,7 @@ class SettingsPage(QWidget):
     def _tab_data(self) -> QWidget:
         page, lay = self._scroll_page()
         self.tab_data = page
+        self._data_scroll = page  # WAL 提示条的「去整理」要滚到这里
 
         xdb = _Panel("离线库在线同步（IP 归属地）")
 
@@ -841,12 +842,17 @@ class SettingsPage(QWidget):
         data.add("监控缓冲行数", self.sp_buffer)
         data.add("归属地缓存条数", self.sp_cache)
 
+        # 这里必须指向**真实入口**：用户清完日志发现空间没变小，得知道去哪儿解决，
+        # 否则会以为「清理坏了」。「去整理」直接滚到本面板下方的数据库文件区。
         self.warn_wal = WarnBanner(
             "清理会批量删除数据，SQLite 的 WAL 文件会随之涨到与被删数据同量级，"
             "且这部分空间不会自动还给文件系统（只是留给后续写入复用）。"
-            "要真正回收磁盘，需要另外执行一次数据库整理（VACUUM）。",
+            "要真正回收磁盘，需要执行一次数据库整理（VACUUM）"
+            "—— 就在下方「数据库文件」区域里点「整理数据库」。",
+            action_text="去整理",
             level="info",
         )
+        self.warn_wal.action_clicked.connect(self._scroll_to_db_section)
         data.add_block(self.warn_wal)
 
         self.lbl_logfile = QLabel(log_file())
@@ -894,6 +900,8 @@ class SettingsPage(QWidget):
         title = QLabel("数据库文件（整理 · 备份 · 恢复）")
         title.setObjectName("panel_title")
         panel.add_block(title)
+        #: 「去整理」滚动定位用（这个 tab 很高，提示条在上、入口在下）
+        self._db_anchor = title
 
         self.lbl_dbsize = QLabel("读取中…")
         self.lbl_dbsize.setObjectName("mono_hint")
@@ -1873,6 +1881,17 @@ class SettingsPage(QWidget):
     # ═══════════════════════════════════════════════
     #  数据库维护（整理 / 重建索引 / 备份 / 恢复）
     # ═══════════════════════════════════════════════
+
+    def _scroll_to_db_section(self) -> None:
+        """把数据库文件区滚进视野（WAL 提示条上的「去整理」）。
+
+        提示条在「数据管理」顶部、入口在面板下半截，窗口矮的时候中间隔着
+        六七个表单项 —— 只写「在下方」用户还要自己找，不如直接滚过去。
+        """
+        with contextlib.suppress(Exception):
+            self.tabs.setCurrentWidget(self.tab_data)
+            self._data_scroll.ensureWidgetVisible(self._db_anchor, 0, 12)
+            self.btn_db_vacuum.setFocus()
 
     def refresh_db_state(self) -> None:
         """刷新「数据库大小」与备份列表（构造、切到本 tab、任务结束后各调一次）"""
