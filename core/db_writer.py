@@ -240,6 +240,17 @@ def get_writer() -> BatchWriter:
     return _writer
 
 
+def peek_writer() -> Optional[BatchWriter]:
+    """
+    返回当前写入器；**没有时返回 None，绝不创建**。
+
+    与 `get_writer()` 的区别是这里不做 lazy 初始化 —— 测试夹具要在收尾时
+    判断「有没有写入线程泄漏」，若用 `get_writer()` 会在本无写入器的情况下
+    凭空造出一个，护栏就永远看不到泄漏。
+    """
+    return _writer
+
+
 def start_writer() -> BatchWriter:
     w = get_writer()
     w.start()

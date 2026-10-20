@@ -45,32 +45,75 @@ def isolated_env():
 
 
 @pytest.fixture(autouse=True)
-def fresh_db(isolated_env):
-    """每个用例一套干净数据库，避免相互污染"""
+def fresh_db(isolated_env, request):
+    """
+    每个用例一套干净数据库，避免相互污染。
+
+    收尾带**护栏**：曾经踩过的坑是某个用例起了后台写入线程却没退干净，
+    线程握着上一轮库文件的句柄，本夹具删不掉又默默往下走，于是随机出现
+    「attempt to write a readonly database」或数据串到别的用例 —— 报出来的
+    红和真正的缺陷毫无关系，极难查。现在这类情况会当场炸在**肇事用例**上。
+    """
     import time
 
     from core import database, db_writer, settings
 
     def _wipe():
-        # 先确保没有残留的写入线程占着库文件，否则 Windows 上删不掉，
-        # 就会把上一个用例的数据带进下一个（曾导致计数类断言莫名多出数据）
-        db_writer.stop_writer(timeout=5)
-        db_writer.set_writer(None)
         db = config.db_path()
         for suffix in ("", "-wal", "-shm"):
+            path = db + suffix
+            last_err = None
             for _ in range(10):
                 try:
-                    os.remove(db + suffix)
+                    os.remove(path)
+                    last_err = None
                     break
                 except FileNotFoundError:
+                    last_err = None
                     break
-                except OSError:
+                except OSError as e:
+                    last_err = e
                     time.sleep(0.05)
+            if last_err is not None:
+                raise RuntimeError(
+                    f"数据库文件删不掉：{path}（{last_err}）。"
+                    "十有八九还有后台写入线程握着它的句柄 —— 见护栏报错。"
+                )
         database._initialized = False
         settings.invalidate()
 
+    def _stop_writers(writers):
+        """
+        停掉写入器，并断言这些线程**真的退出了**。
+
+        `stop_writer()` 会把单例置 None，所以必须在停之前先把引用记下来，
+        否则泄漏出去的线程再也查不到是谁起的。
+        """
+        db_writer.stop_writer(timeout=5)
+        leaked = [w for w in writers if w is not None and w.running]
+        if leaked:
+            raise RuntimeError(
+                f"写入线程在 5 秒内没有退出（用例：{request.node.nodeid}）。\n"
+                "\n"
+                "后果：线程握着即将被删掉的库文件句柄继续写，后续用例会随机报\n"
+                "「attempt to write a readonly database」，或者上一个用例的数据\n"
+                "串到下一个用例里 —— 报出来的红跟真正的问题毫无关系，极难查。\n"
+                "\n"
+                "怎么改（三选一）：\n"
+                "  1. 测试里不要 start_writer()；确实需要落库就用 set_writer(...)\n"
+                "     注入同步写入器（参考 tests/test_report_trust.py 里的\n"
+                "     _InlineWriter），线程和长连接都不存在；\n"
+                "  2. 确实要测后台线程，就在用例自己的 teardown 里 stop_writer()\n"
+                "     并确认 writer.running 已经是 False；\n"
+                "  3. 线程卡在建连重试上 —— 修根因，别在这里加大 timeout。\n"
+            )
+
+    # teardown 报错后 pytest 仍会继续跑下一个用例，所以 setup 也要查一次，
+    # 免得上一个用例泄漏的线程把锅甩给下一个。
+    _stop_writers([db_writer.peek_writer()])
     _wipe()
     yield
+    _stop_writers([db_writer.peek_writer()])
     _wipe()
 
 
