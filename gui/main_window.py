@@ -21,6 +21,7 @@ from core.event_bus import bus
 from core.geo_locator import get_locator
 from core.logger import get_logger
 from core.rule_engine import get_engine, is_never_ban
+from gui.about_dialog import AboutDialog, ClickableLabel, register_about_shortcut
 from gui.components import ShieldMark, TopStatusBar
 from gui.mixins import EventPumpMixin, ServerCtlMixin
 from gui.page_access import AccessPage
@@ -502,20 +503,34 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         brl.addStretch(1)
         sl.addWidget(ban_row)
 
-        ver = QLabel(f"v{APP_VERSION} · ip2region")
-        ver.setObjectName("sidebar_footer")
-        ver.setContentsMargins(16, 0, 16, 12)
-        sl.addWidget(ver)
+        # 底部版本号 = 「关于 / 快捷键帮助」的入口之一。
+        # 侧栏底部是全程序唯一还留着版本信息的地方，让它可点，
+        # 用户不必再去托盘里找；QLabel 没有 clicked 信号，用子类（见 ClickableLabel）。
+        self.lbl_version = ClickableLabel(f"v{APP_VERSION} · ip2region")
+        self.lbl_version.setObjectName("sidebar_footer")
+        self.lbl_version.setContentsMargins(16, 0, 16, 12)
+        self.lbl_version.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_version.setToolTip("关于 PortGuard / 快捷键帮助（F1）")
+        self.lbl_version.clicked.connect(self._show_about)
+        sl.addWidget(self.lbl_version)
         return self.sidebar
 
     def _setup_shortcuts(self) -> None:
-        """Ctrl+1…8 切页（与侧栏顺序一致，导航项 tooltip 已标出）"""
+        """Ctrl+1…8 切页（与侧栏顺序一致，导航项 tooltip 已标出）+ F1 关于/帮助"""
         self._shortcuts: List[QShortcut] = []
         for idx in range(len(NAV_ITEMS)):
             sc = QShortcut(QKeySequence(f"Ctrl+{idx + 1}"), self)
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(self._nav_slot(idx))
             self._shortcuts.append(sc)
+        # F1：QShortcut 在 Qt5 属于 QtWidgets、Qt6 属于 QtGui，
+        # 统一由 gui.about_dialog.register_about_shortcut 从 qtcompat 取。
+        self._sc_help = register_about_shortcut(self)
+        self._sc_help.activated.connect(self._show_about)
+
+    def _show_about(self) -> None:
+        """关于 / 快捷键帮助：侧栏版本号、托盘菜单、F1 三个入口共用这一种实现"""
+        AboutDialog(NAV_ITEMS, self).exec()
 
     def _goto_settings(self) -> None:
         self._switch_page(PAGE_SETTINGS)
@@ -591,6 +606,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self.a_server.triggered.connect(self._toggle_server)
         a_sync = QAction("立即同步离线 IP 库", self)
         a_sync.triggered.connect(lambda: self._sync_xdb_now(force=False))
+        a_about = QAction("关于", self)
+        a_about.triggered.connect(self._show_about)
         a_quit = QAction("退出", self)
         a_quit.triggered.connect(self._quit)
         menu.addAction(a_show)
@@ -598,6 +615,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         menu.addSeparator()
         menu.addAction(a_sync)
         menu.addSeparator()
+        menu.addAction(a_about)
         menu.addAction(a_quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(
