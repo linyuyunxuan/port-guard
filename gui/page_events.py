@@ -22,7 +22,6 @@ from core.config import LEVEL_LABEL, LEVEL_ORDER
 from core.database import (
     delete_risk_events,
     query_risk_events,
-    set_risk_handled,
     set_risk_handled_batch,
 )
 from core.models import HANDLED_LABEL, ms_to_str
@@ -34,6 +33,7 @@ from gui.components import (
     export_table_csv,
     row_menu_button,
 )
+from gui.event_group import flatten_rows, merge_rows
 from gui.table_select import CheckColumn
 from gui.table_sort import KIND_MS, KIND_NUM, KIND_TEXT, ColumnSpec, SortSpec, TableSort
 from gui.theme import C, small_button_style
@@ -47,6 +47,7 @@ from gui.widgets import (
 )
 from qtcompat import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDate,
     QDateEdit,
@@ -87,7 +88,8 @@ HEADERS = [
 # 截了用户就分不清是哪条记录。无界内容（路径 / 命中规则）交给 tooltip 兜底，
 # 第 6 列（路径）同时是唯一的拉伸列。
 # 时间列用 `MM-DD HH:MM:SS`：事件页是事后复盘，同一分钟可能有十几条爆破记录，
-# 秒数是排序的唯一依据，不能省成分钟。
+# 秒数是排序的唯一依据，不能省成分钟。同类合并开启时该列还会带 ` ×N` 后缀
+# （N 最大按三位数留量），所以比裸时间戳宽 40px。
 # 评分列 46px：`100` 在等宽加粗下要 21px，太窄会被省略成「1…」—— 分数直接被
 # 读错一个数量级，比列宽值钱。
 COL_CHECK = 0
@@ -102,7 +104,7 @@ COL_RULE = 8
 COL_STATUS = 9
 COL_ACTION = 10
 
-COL_WIDTHS = [32, 110, 56, 130, 108, 52, 109, 46, 141, 68, 88]
+COL_WIDTHS = [32, 160, 56, 130, 108, 52, 109, 46, 141, 68, 88]
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 勾选列（点了是全选）与操作列（无值）不给规则 —— 点这两列表头不排序。
@@ -206,6 +208,16 @@ class EventDetailDialog(QDialog):
                 f"  国家：{geo.country}  省份：{geo.province}",
                 f"  城市：{geo.city}  ISP：{geo.isp}  国家码：{geo.iso}",
             ]
+        # 同类合并的折叠行：列出组内每一次发生（成员已按时间倒序）
+        members = row.get("members") or []
+        if len(members) > 1:
+            lines += [
+                "",
+                f"同类事件：共 {len(members)} 次（每次连接的远端端口不同，故各记一条）",
+            ]
+            lines += [f"  · {ms_to_str(m.get('event_ts'))}  #{m.get('id')}" for m in members[:50]]
+            if len(members) > 50:
+                lines.append(f"  … 其余 {len(members) - 50} 次见导出的 CSV")
         txt.setPlainText("\n".join(lines))
         lay.addWidget(txt)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -226,9 +238,11 @@ class EventsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         # _rows 是当前**显示顺序**（点表头后会被重排），行号 == 数据下标；
-        # _rows_src 是后端返回的原序，只用于「取消排序」时还原
+        # _rows_src 是后端返回的原序，只用于「取消排序」时还原；
+        # _src 是「参与排序的源」（合并开关决定它是合并组还是原始行）
         self._rows: List[Dict] = []
         self._rows_src: List[Dict] = []
+        self._src: List[Dict] = []
         self.sort = TableSort(SORT_SPECS)
         self._build()
         self.refresh()
@@ -305,6 +319,16 @@ class EventsPage(QWidget):
         self.limit.setFixedWidth(124)
         self.limit.currentIndexChanged.connect(self.refresh)
 
+        self.merge = QCheckBox("同类合并")
+        self.merge.setChecked(True)
+        self.merge.setToolTip(
+            "同一「IP + 端口 + 路径 + 等级 + 评分 + 命中规则 + 状态」的多条事件"
+            "折叠成一行，时间列标 ×N。\n"
+            "对方每次新建连接都会各记一条（远端端口不同），不是重复显示；\n"
+            "批量确认 / 忽略 / 删除会作用于组内全部事件，导出仍逐条展开。"
+        )
+        self.merge.stateChanged.connect(self.refresh)
+
         self.lbl_info = QLabel("")
         self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
 
@@ -314,6 +338,7 @@ class EventsPage(QWidget):
         bar.addWidget(self.lbl_to)
         bar.addWidget(self.dt_to)
         bar.addWidget(self.limit)
+        bar.addWidget(self.merge)
         bar.addStretch(1)
         bar.addWidget(self.lbl_info)
         return bar
@@ -487,10 +512,18 @@ class EventsPage(QWidget):
         )
         # 排序状态跨刷新保留：用户在「按评分降序」下改筛选条件，期望的还是降序
         self._rows_src = rows
-        self._rows = self.sort.apply(rows)
+        # 同类合并：同一「IP+端口+路径+等级+评分+规则+状态」折叠成一行（×N）。
+        # 合并的是展示层，_rows_src 始终是后端原序原条数，导出/审计走 flatten 还原。
+        merged = self.merge.isChecked()
+        src = merge_rows(rows) if merged else rows
+        self._src = src
+        self._rows = self.sort.apply(src)
         self._render(self._rows)
-        self.lbl_info.setText(f"共 {len(rows)} 条")
-        self.btn_export.setToolTip(f"导出当前筛选结果（{len(rows)} 条）")
+        info = f"共 {len(rows)} 条事件"
+        if merged and len(src) < len(rows):
+            info += f"（同类合并为 {len(src)} 组）"
+        self.lbl_info.setText(info)
+        self.btn_export.setToolTip(f"导出当前筛选结果（{len(rows)} 条事件）")
 
     def _render(self, rows: List[Dict]) -> None:
         if rows:
@@ -522,10 +555,22 @@ class EventsPage(QWidget):
                 )
                 matched = "、".join(rule_label(x) for x in r.get("matched_rules", [])) or "-"
 
+                n = int(r.get("group_count") or 1)
+                if n > 1:
+                    # 折叠行：时间列标 ×N，tooltip 列出组内每一次发生的时间
+                    time_text = f"{time_str} ×{n}"
+                    times = r.get("members") or []
+                    tip_lines = [f"共 {n} 次同类事件（每次连接的远端端口不同，故各记一条）："]
+                    tip_lines += ["· " + ms_to_str(m.get("event_ts")) for m in times[:20]]
+                    if n > 20:
+                        tip_lines.append(f"… 其余 {n - 20} 次见导出的 CSV")
+                    time_tip = "\n".join(tip_lines)
+                else:
+                    time_text = time_str
+                    time_tip = ms_to_str(r.get("event_ts"))
+
                 self.sel.fill(i)
-                self.table.setItem(
-                    i, COL_TIME, make_item(time_str, mono=True, tip=ms_to_str(r.get("event_ts")))
-                )
+                self.table.setItem(i, COL_TIME, make_item(time_text, mono=True, tip=time_tip))
                 self.table.setItem(i, COL_LEVEL, badge_item(level))
                 ip_text = str(r.get("ip") or "")
                 self.table.setItem(i, COL_IP, make_item(ip_text, C.text_link, tip=ip_text))
@@ -592,13 +637,17 @@ class EventsPage(QWidget):
         落到别的记录上，紧接着的「一键封禁」就封错了。
         """
         keys = {r.get("id") for r in self._checked_rows()}
-        self._rows = self.sort.apply(self._rows_src)
+        self._rows = self.sort.apply(self._src)
         self._render(self._rows)
         self.sel.set_checked_rows(i for i, r in enumerate(self._rows) if r.get("id") in keys)
 
     # ── 批量动作 ──
     def _batch_handled(self, handled: int) -> None:
-        rows = self._checked_rows()
+        # 折叠行代表一组：必须摊开成原始事件再操作，否则「勾一行确认」
+        # 只有代表那条被确认，其余 N-1 条还挂在未处理里。
+        # 用模块级 flatten_rows 而不是 self 的方法 —— 测试用替身宿主
+        # 只实现被点名的成员函数，多一个 self 依赖就多一个假红。
+        rows = flatten_rows(self._checked_rows())
         if not rows:
             return
         ids = [int(r["id"]) for r in rows]
@@ -631,7 +680,7 @@ class EventsPage(QWidget):
         )
 
     def _batch_delete(self) -> None:
-        rows = self._checked_rows()
+        rows = flatten_rows(self._checked_rows())
         if not rows:
             return
         ids = [int(r["id"]) for r in rows]
@@ -675,7 +724,7 @@ class EventsPage(QWidget):
         self.lbl_info.setText(f"已删除 {n} 条 · 当前列表共 {len(self._rows)} 条")
 
     def _batch_ban(self) -> None:
-        rows = self._checked_rows()
+        rows = flatten_rows(self._checked_rows())
         if not rows:
             return
         # 同一 IP 在选定区间里常有多条事件（爆破就是几十条），按 IP 去重、
@@ -711,9 +760,12 @@ class EventsPage(QWidget):
         多少条」说清楚 —— 否则用户会以为手里的 CSV 是全量，据此下的结论是错的。
         触到上限时额外提示一句，让人知道该把上限调大再来一次。
         """
-        rows = self._rows
+        # 合并开启时 _rows 是折叠组，导出必须摊平 —— CSV 要逐条事实
+        rows = flatten_rows(self._rows)
         cap = self._limit_value()
-        scope = f"导出范围：当前筛选结果，共 {len(rows)} 条。"
+        scope = f"导出范围：当前筛选结果，共 {len(rows)} 条事件。"
+        if len(self._rows) < len(rows):
+            scope += f"\n（列表中同类合并显示为 {len(self._rows)} 组，CSV 按逐条展开。）"
         if len(rows) >= cap:
             scope += f"\n当前列表已达「最近 {cap} 条」上限，可能还有更早的事件未导出。"
         export_table_csv(
@@ -791,8 +843,13 @@ class EventsPage(QWidget):
     def _set_handled(self, r: Dict, handled: int) -> None:
         action = _handled_action(handled)
         verb = HANDLED_LABEL.get(handled, "处理")
+        # 折叠行的行内「确认/忽略」作用于整组：用户看到的是一行 ×N，
+        # 只改代表那条的话，刷新回来还有 N-1 条挂在未处理，等于操作没生效
+        members = flatten_rows([r])
+        before = _event_snapshot(members)
+        ids = [int(m["id"]) for m in members]
         try:
-            set_risk_handled(int(r["id"]), handled)
+            n = set_risk_handled_batch(ids, handled)
         except Exception as e:
             audit.record(
                 action,
@@ -809,9 +866,9 @@ class EventsPage(QWidget):
             action,
             target_type="event",
             target_id=r.get("id"),
-            summary=f"{verb}事件：{r.get('ip', '')}",
-            before={"handled": r.get("handled", 0)},
-            after={"handled": handled},
+            summary=f"{verb}事件：{r.get('ip', '')}" + (f"（同类 {n} 条）" if n > 1 else ""),
+            before={"events": before},
+            after={"handled": handled, "count": n},
         )
         self.refresh()
 

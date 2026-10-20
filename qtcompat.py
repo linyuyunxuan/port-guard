@@ -100,6 +100,7 @@ QPolygonF = QtGui.QPolygonF
 
 QAbstractItemView = QtWidgets.QAbstractItemView
 QApplication = QtWidgets.QApplication
+QCheckBox = QtWidgets.QCheckBox
 QComboBox = QtWidgets.QComboBox
 QDateEdit = QtWidgets.QDateEdit
 QDialog = QtWidgets.QDialog
