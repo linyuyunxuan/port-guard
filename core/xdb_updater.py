@@ -21,6 +21,9 @@ GitHub Contents API 返回的是 **git blob sha1**（`sha1("blob <size>\\0" + co
 5. 换库：下载文件 `os.replace` 原子替换（同盘，Windows 下原子）
 6. 热加载：`GeoLocator.reload()` 把新库整库读入内存并原子替换 searcher，**不重启进程**
 7. 回滚：热加载失败则从备份恢复并重新热加载，回到可用状态
+8. 手动回滚：设置页列出备份，选一份回滚。**回滚前同样先备份当前库**
+   （`backup_now`），否则回滚本身也不可撤销 —— 回滚到旧库后，原先那份新库
+   就再也找不回来了
 
 ## 安全约束
 - 只允许 https，且主机必须在白名单内（防被改成内网地址做 SSRF）
@@ -549,7 +552,15 @@ def _backup(name: str) -> Optional[str]:
     src = xdb_path(name)
     if not os.path.exists(src):
         return None
-    dst = os.path.join(backup_dir(), f"{name}.{int(time.time())}.bak")
+    # 时间戳只到秒：同一秒内的第二次备份（换库紧接着回滚就是）会算出同一个
+    # 文件名，直接把上一份备份覆盖掉 —— 那份正是唯一能回滚回去的副本。
+    # 撞名就往后顺延一秒，文件名格式不变（`cleanup_backups` 与界面分组都按
+    # `{name}.{ts}.bak` 解析），只是「名义时间」可能比真实时间晚一两秒。
+    stamp = int(time.time())
+    dst = os.path.join(backup_dir(), f"{name}.{stamp}.bak")
+    while os.path.exists(dst):
+        stamp += 1
+        dst = os.path.join(backup_dir(), f"{name}.{stamp}.bak")
     try:
         shutil.copy2(src, dst)
         log.info("已备份旧库：%s", dst)
@@ -559,8 +570,34 @@ def _backup(name: str) -> Optional[str]:
         return None
 
 
+def backup_now(name: str) -> Tuple[bool, str]:
+    """立即备份当前库（公开入口）。
+
+    换库流程内部用的 `_backup()` 是私有的；而**回滚同样是一次换库** —— 回滚前
+    不留一份当前库，回滚本身就变成不可撤销操作：回滚到旧库之后，原先那份新库
+    就再也找不回来了。所以对外只暴露这个入口，回滚前必须走它。
+    """
+    src = xdb_path(name)
+    if not os.path.exists(src):
+        return False, f"当前没有可备份的库：{name}"
+    dst = _backup(name)
+    if not dst:
+        return False, f"备份当前库失败：{src}（详见运行日志）"
+    log.info("手动备份离线库：%s", dst)
+    return True, dst
+
+
 def restore_backup(name: str, backup_file: str = "") -> Tuple[bool, str]:
-    """从备份恢复指定库并热加载"""
+    """从备份恢复指定库并热加载。
+
+    返回 `(ok, err)`，`err` **只在失败时有内容，且必须原样展示给用户**：它区分了
+    三种完全不同的失败 ——
+      · `回滚前备份…`  当前库还没动，什么都没发生；
+      · `恢复失败…`    当前库还没动（复制没成功）；
+      · `文件已恢复，但热加载失败…`  磁盘上的库**已经换成备份了**，只是内存里的
+        searcher 还停在旧库，重启程序即生效。
+    把这三种压成一句「回滚失败」，用户就不知道自己现在到底在用哪份库。
+    """
     if not backup_file:
         cands = sorted(
             (f for f in os.listdir(backup_dir()) if f.startswith(name + ".")), reverse=True
@@ -570,6 +607,15 @@ def restore_backup(name: str, backup_file: str = "") -> Tuple[bool, str]:
         backup_file = os.path.join(backup_dir(), cands[0])
     if not os.path.exists(backup_file):
         return False, f"备份文件不存在：{backup_file}"
+
+    # 回滚前先备份当前库：否则回滚不可撤销。
+    # 当前库缺失（损坏到没法读 / 被误删）时没有可备份的东西，直接恢复 —— 这种
+    # 情况下回滚正是唯一的救援手段，不能因为没有备份可留就拒绝回滚。
+    if os.path.exists(xdb_path(name)):
+        ok_bak, info = backup_now(name)
+        if not ok_bak:
+            return False, f"回滚前备份当前库失败，已终止回滚（{info}）"
+
     try:
         shutil.copy2(backup_file, xdb_path(name))
     except Exception as e:
@@ -578,7 +624,9 @@ def restore_backup(name: str, backup_file: str = "") -> Tuple[bool, str]:
     log.warning(
         "已从备份恢复 %s（%s），热加载 %s", name, backup_file, "成功" if ok else f"失败：{err}"
     )
-    return ok, err
+    if not ok:
+        return False, f"已从备份恢复 {name} 的文件，但热加载失败：{err}（重启程序后生效）"
+    return True, ""
 
 
 def list_backups() -> List[Dict]:
@@ -599,6 +647,36 @@ def list_backups() -> List[Dict]:
     except Exception:
         pass
     return out
+
+
+def backup_group(file_name: str) -> str:
+    """备份文件名 -> 库名：`ip2region_v4.xdb.1760000000.bak` -> `ip2region_v4.xdb`。
+
+    口径与 `app.maintenance.cleanup_backups` 的分组**必须一致**：那边按这个分组
+    决定保留最近几份，这边按同一个分组列给用户看。两边漂移了，界面上列着的
+    备份可能正是下一轮清理要删的那份。
+    """
+    if file_name.count(".") >= 2:
+        return file_name.rsplit(".", 2)[0]
+    return file_name
+
+
+def group_backups(items: Optional[List[Dict]] = None) -> Dict[str, List[Dict]]:
+    """按库名分组，组内**新在前**（回滚列表里最新那份最常被选）。
+
+    排序用 mtime 而不是文件名：文件名里嵌的是 unix 秒级时间戳，倒序字符串比较
+    只在「位数都一样」时才等价于时间倒序 —— 这个隐含前提不写出来迟早踩。
+    """
+    if items is None:
+        items = list_backups()
+    groups: Dict[str, List[Dict]] = {}
+    for item in items:
+        groups.setdefault(backup_group(str(item.get("file", ""))), []).append(item)
+    for files in groups.values():
+        files.sort(
+            key=lambda d: (int(d.get("mtime", 0) or 0), str(d.get("file", ""))), reverse=True
+        )
+    return groups
 
 
 def _reload_locator() -> Tuple[bool, str]:

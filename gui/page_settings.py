@@ -11,12 +11,13 @@
 等属性名被 selftest 与主窗口直接引用，全部保留。
 """
 
+import contextlib
 import datetime
 import secrets
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from app import maintenance
-from core import firewall, report_server
+from core import firewall, report_server, xdb_updater
 from core import settings as cfg
 from core.config import (
     BAN_DURATION_TIER_DEFAULTS,
@@ -31,6 +32,7 @@ from core.config import (
     LEVEL_LOW,
     LEVEL_MEDIUM,
     WILDCARD_HOST,
+    XDB_UPSTREAM,
     user_data_dir,
 )
 from core.database import clear_all_logs, delete_old_access
@@ -38,13 +40,15 @@ from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.components import PageHeader
 from gui.theme import C
-from gui.widgets import ToggleSwitch, WarnBanner
+from gui.widgets import ToggleSwitch, WarnBanner, make_item
 from qtcompat import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLayout,
     QLineEdit,
@@ -54,6 +58,7 @@ from qtcompat import (
     QScrollArea,
     QSpinBox,
     Qt,
+    QTableWidget,
     QTabWidget,
     QTimer,
     QVBoxLayout,
@@ -68,6 +73,15 @@ LEVEL_LABELS = [LEVEL_LABEL[x] for x in LEVEL_ITEMS]
 
 #: 表单标签列固定宽度。所有面板共用，保证控件左缘对齐（P1-5）
 LABEL_W = 128
+
+#: 备份表：行高与列宽（库 / 备份文件 / 大小 / 备份时间）。文件列是唯一的拉伸列
+BACKUP_ROW_H = 24
+BACKUP_WIDTHS = [68, 300, 80, 148]
+
+
+def _xdb_label(name: str) -> str:
+    """库文件名 -> 列表里的展示名。与 `refresh_xdb_state` 同一套口径"""
+    return "IPv4 库" if "_v4" in name else "IPv6 库"
 
 
 def _row_widget(*items, spacing: int = 8) -> QWidget:
@@ -154,6 +168,7 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self._loading = True  # load() 期间不点亮「未保存」
         self._report_url = ""
+        self._bak_rows: List[Dict] = []  # 备份表当前行 -> 备份条目（与表格行号同序）
         self._dirty = False
         self._hint_timer = QTimer(self)
         self._hint_timer.setSingleShot(True)
@@ -662,6 +677,44 @@ class SettingsPage(QWidget):
         for b in (self.btn_xdb_check, self.btn_xdb_sync, self.btn_xdb_force):
             b.setToolTip(sync_tip)
         xdb.add("", (self.btn_xdb_check, self.btn_xdb_sync, self.btn_xdb_force))
+
+        # ── 备份与回滚（换库前自动备份，这里把它们列出来供手动回滚）──
+        restore_tip = (
+            "换库前会自动备份旧库，这里列出的是还能回滚到的版本"
+            f"（每个库只保留最近 {maintenance.KEEP_BACKUPS_PER_FILE} 份）。\n"
+            "回滚前会再备份一次当前库，所以回滚错了仍然可以再回滚回来。"
+        )
+        # 备份列表用 QTableWidget 而不是下拉框：_wire_dirty 会把页面里所有
+        # QComboBox 的 currentIndexChanged 接到「未保存」标记上，而「选中哪份
+        # 备份」不是一项设置，不该点亮未保存。
+        self.tbl_bak = QTableWidget(0, 4)
+        self.tbl_bak.setHorizontalHeaderLabels(["库", "备份文件", "大小", "备份时间"])
+        self.tbl_bak.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_bak.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_bak.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tbl_bak.setAlternatingRowColors(True)
+        self.tbl_bak.setShowGrid(False)
+        self.tbl_bak.setWordWrap(False)
+        self.tbl_bak.setTabKeyNavigation(False)
+        self.tbl_bak.verticalHeader().setVisible(False)
+        self.tbl_bak.verticalHeader().setDefaultSectionSize(BACKUP_ROW_H)
+        hh = self.tbl_bak.horizontalHeader()
+        for i, w in enumerate(BACKUP_WIDTHS):
+            hh.resizeSection(i, w)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        xdb.add_block(self.tbl_bak, span=False)
+
+        self.lbl_bak = QLabel("")
+        self.lbl_bak.setObjectName("form_hint")
+        self.lbl_bak.setWordWrap(True)
+        self.lbl_bak.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        xdb.add_block(self.lbl_bak, span=False)
+
+        self.btn_bak_restore = QPushButton("回滚到此备份")
+        self.btn_bak_restore.setObjectName("btn_outline")
+        self.btn_bak_restore.setToolTip(restore_tip)
+        self.btn_bak_restore.clicked.connect(self._restore_backup)
+        xdb.add("", self.btn_bak_restore)
         lay.addWidget(xdb)
 
         data = _Panel("数据管理")
@@ -1177,6 +1230,9 @@ class SettingsPage(QWidget):
     # ═══════════════════════════════════════════════
 
     def refresh_xdb_state(self) -> None:
+        # 备份列表只依赖备份目录，不依赖 xdb_service —— 放在最前面刷新，
+        # 即使离线库状态读不出来（服务还没起）它也照样列得出来
+        self._refresh_backups()
         try:
             from app.xdb_service import get_service
 
@@ -1243,6 +1299,115 @@ class SettingsPage(QWidget):
         ):
             return
         self.xdb_sync_requested.emit(True)
+
+    # ═══════════════════════════════════════════════
+    #  离线库备份与回滚
+    # ═══════════════════════════════════════════════
+
+    def _refresh_backups(self) -> None:
+        """列出可回滚的备份：**按库分组**（IPv4 一段、IPv6 一段），组内新在前。
+
+        组间顺序固定为 v4 → v6（`XDB_UPSTREAM` 的顺序），不按备份多少排 ——
+        否则回滚过一次之后两组会互换位置，用户每次都得重新找。
+        """
+        try:
+            groups = xdb_updater.group_backups()
+        except Exception:
+            log.exception("读取离线库备份失败")
+            groups = {}
+
+        rows: List[Dict] = []
+        for name in XDB_UPSTREAM:
+            rows.extend(groups.get(name, []))
+        self._bak_rows = rows
+
+        self.tbl_bak.setRowCount(0)
+        self.tbl_bak.setRowCount(len(rows))
+        for i, item in enumerate(rows):
+            name = xdb_updater.backup_group(str(item.get("file", "")))
+            size_mb = int(item.get("size", 0) or 0) / 1048576
+            self.tbl_bak.setItem(i, 0, make_item(_xdb_label(name)))
+            self.tbl_bak.setItem(i, 1, make_item(item.get("file", ""), mono=True))
+            self.tbl_bak.setItem(
+                i,
+                2,
+                make_item(f"{size_mb:.1f} MB", align=Qt.AlignmentFlag.AlignCenter, mono=True),
+            )
+            self.tbl_bak.setItem(i, 3, make_item(ms_to_str(item.get("mtime")), mono=True))
+
+        has = bool(rows)
+        self.tbl_bak.setVisible(has)
+        self.tbl_bak.setFixedHeight(min(28 + BACKUP_ROW_H * len(rows), 176))
+        self.btn_bak_restore.setEnabled(has)
+        if has:
+            self.tbl_bak.selectRow(0)
+            counts = " · ".join(
+                f"{_xdb_label(n)} {len(groups.get(n, []))} 份" for n in XDB_UPSTREAM if n in groups
+            )
+            text = (
+                f"{counts}。回滚前会自动备份当前库，回滚错了还能再回滚回来"
+                f"（每个库只保留最近 {maintenance.KEEP_BACKUPS_PER_FILE} 份）。"
+            )
+        else:
+            text = "尚无备份。每次在线同步换库前都会自动备份，届时这里会列出可回滚的版本。"
+        self.lbl_bak.setText(text)
+        self.lbl_bak.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+
+    def _restore_backup(self) -> None:
+        row = self.tbl_bak.currentRow()
+        if not 0 <= row < len(self._bak_rows):
+            QMessageBox.information(self, "无法回滚", "请先在上方列表里选中一份备份。")
+            return
+        item = self._bak_rows[row]
+        name = xdb_updater.backup_group(str(item.get("file", "")))
+        path = str(item.get("path", ""))
+        file_name = str(item.get("file", ""))
+        label = _xdb_label(name)
+
+        if (
+            QMessageBox.question(
+                self,
+                "回滚离线库",
+                f"将把{label}回滚到这份备份：\n{file_name}\n\n"
+                "· 回滚前会自动备份当前库，回滚错了还能再回滚回来；\n"
+                "· 回滚成功后热加载，不需要重启程序；\n"
+                "· 若提示热加载失败，文件已经换掉，重启程序才生效。\n\n继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            ok, err = xdb_updater.restore_backup(name, path)
+        except Exception as e:
+            log.exception("回滚离线库失败")
+            QMessageBox.warning(self, "回滚失败", str(e))
+            return
+
+        # 回滚本身也产生了一份新备份，列表与「当前库」两处都要跟着变
+        self._refresh_backups()
+        self._refresh_lib_views()
+        if ok:
+            QMessageBox.information(self, "回滚完成", f"{label}已回滚到：\n{file_name}")
+        else:
+            # err 区分「当前库没动」与「文件已换但热加载失败」，必须原样展示 ——
+            # 吞掉它用户就不知道自己现在用的是哪份库
+            QMessageBox.warning(self, "回滚未完成", err or "未知错误")
+
+    def _refresh_lib_views(self) -> None:
+        """回滚后刷新两处「离线库状态」显示（本页 + IP 查询页）。
+
+        IP 查询页的库信息由它自己持有（`page_iplookup._update_lib_info`），本轮
+        不改那个文件；这里从主窗口拿到那个页面再调一次 —— 与切到查询页时的刷新
+        是同一口径，否则回滚完切过去看到的还是回滚前的版本号。
+        """
+        self.refresh_xdb_state()
+        with contextlib.suppress(Exception):
+            page = getattr(self.window(), "page_iplookup", None)
+            fn = getattr(page, "_update_lib_info", None)
+            if callable(fn):
+                fn()
 
     # ═══════════════════════════════════════════════
     #  告警测试 / 数据操作
