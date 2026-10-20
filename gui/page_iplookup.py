@@ -1,18 +1,16 @@
 """PortGuard — IP 归属地查询工具"""
 
-import csv
-from typing import List
+from typing import Any, Iterator, List
 
 from core.geo_locator import get_locator
 from core.logger import get_logger
 from core.models import ms_to_str
-from gui.components import PageHeader
+from gui.components import PageHeader, export_table_csv
 from gui.theme import C
 from gui.widgets import EmptyState
 from qtcompat import (
     QAbstractItemView,
     QColor,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -33,6 +31,25 @@ from qtcompat import (
 log = get_logger(__name__)
 
 HEADERS = ["IP", "是否命中", "国家", "省份", "城市", "ISP", "国家码", "是否中国"]
+
+
+def iter_geo_rows(results: List[Any]) -> Iterator[List[Any]]:
+    """GeoInfo 列表 -> CSV 行。
+
+    取的是 `self._results` 里的**完整值**，不是表格单元格里的显示值：
+    表格里 ISP 为 "0" 会显示成 "-"，导出保留库里原样，方便二次加工。
+    """
+    for g in results:
+        yield [
+            g.ip,
+            "是" if g.found else "否",
+            g.country,
+            g.province,
+            g.city,
+            g.isp,
+            g.iso,
+            "中国" if g.is_china else "境外",
+        ]
 
 
 class IpLookupPage(QWidget):
@@ -284,34 +301,16 @@ class IpLookupPage(QWidget):
         self._toggle_empty()
 
     def _export(self) -> None:
-        if not self._results:
-            QMessageBox.information(self, "提示", "没有可导出的查询结果。")
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "导出查询结果", "ip_lookup.csv", "CSV 文件 (*.csv)"
+        """批量查询结果导出。编码 / 列名 / 对话框默认值沿用原实现。"""
+        export_table_csv(
+            self,
+            self._results,
+            HEADERS,
+            iter_geo_rows,
+            default_name="ip_lookup.csv",
+            dialog_title="导出查询结果",
+            empty_msg="没有可导出的查询结果。",
         )
-        if not path:
-            return
-        try:
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f)
-                w.writerow(HEADERS)
-                for g in self._results:
-                    w.writerow(
-                        [
-                            g.ip,
-                            "是" if g.found else "否",
-                            g.country,
-                            g.province,
-                            g.city,
-                            g.isp,
-                            g.iso,
-                            "中国" if g.is_china else "境外",
-                        ]
-                    )
-            QMessageBox.information(self, "导出成功", f"已导出到：\n{path}")
-        except Exception as e:
-            QMessageBox.warning(self, "导出失败", str(e))
 
     def lookup_and_show(self, ip: str) -> None:
         """供其他页面跳转调用"""

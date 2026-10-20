@@ -16,6 +16,7 @@
 import datetime
 from typing import Dict, List, Optional, Tuple
 
+from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
 from core.config import LEVEL_LABEL
 from core.database import (
     delete_risk_events,
@@ -23,9 +24,15 @@ from core.database import (
     set_risk_handled,
     set_risk_handled_batch,
 )
-from core.models import ms_to_str
+from core.models import HANDLED_LABEL, ms_to_str
 from core.rules_meta import rule_label
-from gui.components import MenuEntry, PageHeader, _menu_slot, row_menu_button
+from gui.components import (
+    MenuEntry,
+    PageHeader,
+    _menu_slot,
+    export_table_csv,
+    row_menu_button,
+)
 from gui.table_select import CheckColumn
 from gui.theme import C, small_button_style
 from gui.widgets import (
@@ -99,8 +106,6 @@ ELIDE_OK_COLS = (COL_PATH, COL_RULE)
 
 # 居中对齐的列（表头与数据必须一致，否则一列会被读成两根轴）
 CENTER_COLS = (COL_CHECK, COL_LEVEL, COL_PORT, COL_SCORE, COL_STATUS)
-
-HANDLED_LABEL = {0: "未处理", 1: "已确认", 2: "已忽略"}
 
 # 时间筛选：右端一律取「次日零点」的左闭右开区间
 RANGE_ALL = "全部时间"
@@ -285,6 +290,12 @@ class EventsPage(QWidget):
         self.btn_del.setToolTip("删除选中的事件记录（不影响访问流水，删除后不可恢复）")
         self.btn_del.clicked.connect(self._batch_delete)
 
+        # 导出不依赖勾选：它导的是「当前筛选结果」而不是「选中的行」，
+        # 所以不能放进 _batch_buttons（那批按钮是按勾选数启停的）
+        self.btn_export = self._batch_button("导出 CSV", "")
+        self.btn_export.setToolTip("导出当前筛选结果，不受勾选影响")
+        self.btn_export.clicked.connect(self._export_csv)
+
         lay.addWidget(self.lbl_sel)
         lay.addWidget(self.btn_sel_all)
         lay.addSpacing(6)
@@ -292,6 +303,7 @@ class EventsPage(QWidget):
         lay.addWidget(self.btn_ok)
         lay.addWidget(self.btn_ignore)
         lay.addWidget(self.btn_del)
+        lay.addWidget(self.btn_export)
         lay.addStretch(1)
 
         self._batch_buttons = [self.btn_ban, self.btn_ok, self.btn_ignore, self.btn_del]
@@ -416,6 +428,7 @@ class EventsPage(QWidget):
         self._rows = rows
         self._render(rows)
         self.lbl_info.setText(f"共 {len(rows)} 条")
+        self.btn_export.setToolTip(f"导出当前筛选结果（{len(rows)} 条）")
 
     def _render(self, rows: List[Dict]) -> None:
         if rows:
@@ -581,6 +594,28 @@ class EventsPage(QWidget):
         ]
         if items:
             self.ask_ban_many.emit(items)
+
+    def _export_csv(self) -> None:
+        """导出**当前筛选结果**，不是全库。
+
+        页面一次最多只取 `self.limit` 条（默认 200），所以这里必须把「导了
+        多少条」说清楚 —— 否则用户会以为手里的 CSV 是全量，据此下的结论是错的。
+        触到上限时额外提示一句，让人知道该把上限调大再来一次。
+        """
+        rows = self._rows
+        cap = self._limit_value()
+        scope = f"导出范围：当前筛选结果，共 {len(rows)} 条。"
+        if len(rows) >= cap:
+            scope += f"\n当前列表已达「最近 {cap} 条」上限，可能还有更早的事件未导出。"
+        export_table_csv(
+            self,
+            rows,
+            EVENT_CSV_HEADERS,
+            iter_event_rows,
+            default_name="risk_events.csv",
+            dialog_title="导出风险事件",
+            scope_hint=scope,
+        )
 
     # ── 行内操作 ──
     def _row_actions(self, r: Dict) -> QWidget:

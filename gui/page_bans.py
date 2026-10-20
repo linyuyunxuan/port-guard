@@ -5,6 +5,7 @@ import threading
 from typing import Any, Dict, List
 
 from app import ban_service
+from app.export_csv import BAN_CSV_HEADERS, SUG_CSV_HEADERS, iter_ban_rows, iter_sug_rows
 from core import firewall
 from core import settings as cfg
 from core.config import LEVEL_CRITICAL, LEVEL_HIGH
@@ -25,7 +26,7 @@ from core.models import (
     ms_to_str,
 )
 from core.validators import InvalidIP, normalize_ip
-from gui.components import PageHeader, row_menu_button
+from gui.components import PageHeader, export_table_csv, row_menu_button
 from gui.table_select import CheckColumn
 from gui.theme import C, small_button_style
 from gui.widgets import (
@@ -249,11 +250,22 @@ class BansPage(QWidget):
         self.btn_sug_all = self._mini_button("全选", enabled=True)
         self.btn_sug_ban = self._mini_button("批量封禁", "danger")
         self.btn_sug_ignore = self._mini_button("批量忽略")
+        # 建议面板没有独立的批量条，导出放标题行末尾：既不额外占高度，
+        # 也与「批量忽略」同属「对这批建议整体做点什么」
+        self.btn_sug_export = self._mini_button("导出 CSV", enabled=True)
+        self.btn_sug_export.setToolTip("导出当前待确认建议，不受勾选影响")
         # 勾选列建在表格之后，lambda 延迟取值（不能提前绑定方法）
         self.btn_sug_all.clicked.connect(lambda: self.sug_sel.toggle_all())  # noqa: PLW0108
         self.btn_sug_ban.clicked.connect(self._batch_ban_suggestions)
         self.btn_sug_ignore.clicked.connect(self._batch_ignore_suggestions)
-        for w in (self.lbl_sug_sel, self.btn_sug_all, self.btn_sug_ban, self.btn_sug_ignore):
+        self.btn_sug_export.clicked.connect(self._export_sug_csv)
+        for w in (
+            self.lbl_sug_sel,
+            self.btn_sug_all,
+            self.btn_sug_ban,
+            self.btn_sug_ignore,
+            self.btn_sug_export,
+        ):
             head.addWidget(w)
         lay.addLayout(head)
 
@@ -349,11 +361,15 @@ class BansPage(QWidget):
         self.btn_ban_unban.clicked.connect(self._batch_unban)
         self.btn_ban_del.clicked.connect(self._batch_delete_bans)
         self.btn_ban_del.setToolTip("仅删除数据库记录，不会改动已生效的防火墙规则")
+        self.btn_ban_export = self._mini_button("导出 CSV", enabled=True)
+        self.btn_ban_export.setToolTip("导出当前筛选的封禁记录，不受勾选影响")
+        self.btn_ban_export.clicked.connect(self._export_ban_csv)
         bb.addWidget(self.lbl_ban_sel)
         bb.addWidget(self.btn_ban_all)
         bb.addSpacing(6)
         bb.addWidget(self.btn_ban_unban)
         bb.addWidget(self.btn_ban_del)
+        bb.addWidget(self.btn_ban_export)
         bb.addStretch(1)
         lay.addLayout(bb)
 
@@ -631,6 +647,35 @@ class BansPage(QWidget):
         self.refresh()
         self.request_refresh_stats.emit()
         self.lbl_info.setText(f"已删除 {n} 条记录 · 共 {len(self._ban_rows)} 条")
+
+    # ── 导出 ──
+    def _export_sug_csv(self) -> None:
+        """导出当前待确认建议。
+
+        建议表的数据源是「未处理 + 高危」的前 200 条风险事件（见
+        `_load_suggestions`），所以导出的是**当前这批建议**，不是全库事件。
+        """
+        export_table_csv(
+            self,
+            self._sug_rows,
+            SUG_CSV_HEADERS,
+            iter_sug_rows,
+            default_name="ban_suggestions.csv",
+            dialog_title="导出封禁建议",
+            scope_hint=f"导出范围：当前待确认建议，共 {len(self._sug_rows)} 条。",
+        )
+
+    def _export_ban_csv(self) -> None:
+        """导出当前筛选的封禁记录（搜索词 + 状态筛选后的结果）"""
+        export_table_csv(
+            self,
+            self._ban_rows,
+            BAN_CSV_HEADERS,
+            iter_ban_rows,
+            default_name="ban_records.csv",
+            dialog_title="导出封禁记录",
+            scope_hint=f"导出范围：当前筛选结果，共 {len(self._ban_rows)} 条。",
+        )
 
     def _load_bans(self) -> None:
         rows = query_bans(status=self._status_filter(), keyword=self.search.text().strip())

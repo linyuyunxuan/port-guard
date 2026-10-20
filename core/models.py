@@ -377,6 +377,10 @@ SOURCE_LABEL = {
     "suggest": "建议",
 }
 
+#: risk_event.handled 的中文标签。放在模型层是因为 GUI 与 CSV 导出都要用同一套
+#: 措辞 —— 各写一份的话改文案时必然只改一处，界面和导出文件就会对不上。
+HANDLED_LABEL = {0: "未处理", 1: "已确认", 2: "已忽略"}
+
 
 @dataclass
 class BanRecord:

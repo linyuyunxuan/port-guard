@@ -13,16 +13,19 @@
 - 注解必须写成 Python 3.8 当场可求值的形式（typing.List / Optional）。
 """
 
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
 
+from app.export_csv import export_rows
 from gui.theme import C
 from gui.widgets import StatusItem
 from qtcompat import (
     QColor,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
     QPainter,
     QPen,
     QPointF,
@@ -247,6 +250,43 @@ def _menu_slot(callback: Callable[[], object]) -> Callable[..., None]:
         callback()
 
     return slot
+
+
+def export_table_csv(
+    parent: Optional[QWidget],
+    rows: Sequence[Any],
+    headers: Sequence[str],
+    row_builder: Callable[[Any], Iterator[Sequence[Any]]],
+    default_name: str,
+    dialog_title: str = "导出 CSV",
+    scope_hint: str = "",
+    empty_msg: str = "没有可导出的数据。",
+) -> None:
+    """「选路径 → 写文件 → 报结果」三段式，四个导出入口共用。
+
+    文件对话框、异常弹框、结果弹框统一在这里兜住，业务页只负责给
+    `rows`（页面数据缓存）和 `row_builder`（`app.export_csv` 里的行构造函数）：
+
+    · `rows` 必须是**内存缓存**而不是 QTableWidget —— 表格里是被列宽截断的
+      显示值，且 tooltip 里的完整值在导出场景取不到；
+    · `rows` 是序列而不是生成器，就是为了在弹文件对话框之前先判断空数据，
+      免得用户选完路径才被告知「没有数据」；
+    · `scope_hint` 用来说明导出范围（导了多少条 / 是不是全量），
+      这是「当前筛选结果」与「全量」唯一不会误导用户的交代方式。
+    """
+    if not rows:
+        QMessageBox.information(parent, "提示", empty_msg)
+        return
+    path, _ = QFileDialog.getSaveFileName(parent, dialog_title, default_name, "CSV 文件 (*.csv)")
+    if not path:
+        return
+    try:
+        n = export_rows(path, headers, row_builder(rows), title=dialog_title)
+    except Exception as e:  # 导出失败必须让用户看见，不能静默吞掉
+        QMessageBox.warning(parent, "导出失败", str(e))
+        return
+    tail = f"\n\n{scope_hint}" if scope_hint else ""
+    QMessageBox.information(parent, "导出成功", f"已导出 {n} 条到：\n{path}{tail}")
 
 
 def row_menu_button(
