@@ -10,7 +10,7 @@ PortGuard — 主窗口
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from app import ban_service, server_ctl
+from app import audit, ban_service, server_ctl
 from app.xdb_service import get_service as get_xdb_service
 from core import firewall
 from core import settings as cfg
@@ -687,8 +687,27 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             eng.save_lists()
         except Exception as e:
             log.exception("保存黑名单失败 ip=%s", ip)
+            audit.record(
+                audit.ACTION_LIST_SAVE,
+                target_type="blacklist",
+                target_id=ip,
+                summary=f"加入黑名单失败：{e}",
+                result=audit.RESULT_FAIL,
+                detail=str(e),
+            )
             QMessageBox.warning(self, "保存失败", str(e))
             return
+        # 这是「右键顺手加黑」的捷径入口，与设置页规则页的文本框保存是两条路径；
+        # 不记的话，「这个 IP 什么时候被谁拉黑的」会出现查不到的空档。
+        # target_type 用 blacklist 而不是 list：这里只动黑名单，没碰白名单。
+        audit.record(
+            audit.ACTION_LIST_SAVE,
+            target_type="blacklist",
+            target_id=ip,
+            summary=f"右键加入黑名单：{ip}",
+            before={"in_blacklist": False},
+            after={"in_blacklist": True, "blacklist_size": len(eng.blacklist)},
+        )
         self.page_rules.reload()
         self._set_status(f"已把 {ip} 加入黑名单", C.success)
 

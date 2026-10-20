@@ -6,13 +6,21 @@
 """
 
 import datetime
+from typing import Any, List
 
 import pytest
 
 from app import audit, ban_service
 from core import database, firewall
 from core.database import count_audit, init_db, query_audit
-from core.models import STATUS_ACTIVE, STATUS_EXPIRED, AccessRecord, BanRecord, RiskResult
+from core.models import (
+    STATUS_ACTIVE,
+    STATUS_EXPIRED,
+    STATUS_UNBANNED,
+    AccessRecord,
+    BanRecord,
+    RiskResult,
+)
 from core.pipeline import auto_ban_record
 
 IP = "203.0.113.77"
@@ -349,3 +357,341 @@ def test_ban_record_has_unblocked_by_field():
     rec = BanRecord(ip=IP, unblocked_by="alice")
     assert rec.unblocked_by == "alice"
     assert BanRecord(ip=IP).unblocked_by == ""
+
+
+# ═══════════════════ GUI 手工操作的埋点 ═══════════════════
+#
+# 事件页 / 封禁页 / 主窗口这三处是「人点出来的」破坏性动作，也是审计最该覆盖
+# 的地方 —— 但它们写在 Qt 页面里。这里沿用 tests/test_about_dialog.py 的思路：
+# **不构造真页面**（会拖进表格、定时器、8 个 tab），而是把方法当普通函数调用，
+# 用一个只提供「方法体真正用到的那几个属性」的替身宿主。断言的是「动作发生后
+# 审计真的落库」以及「审计炸了不影响主流程」，不是界面长什么样。
+#
+# ⚠️ QMessageBox 用**替换模块内名字**的方式打桩（`monkeypatch.setattr` 到
+# `gui.page_events.QMessageBox`），不是给 Qt 类挂属性 —— PySide2/PySide6 的
+# wrapper 类型都可能拒绝外部赋值，那样用例会在有的栈上直接报 AttributeError。
+
+
+def _call(fn: Any, host: Any, *args: Any) -> Any:
+    """
+    把页面方法当普通函数调（不构造真页面）。
+
+    签名上 `EventsPage._set_handled(self, ...)` 的 self 是 EventsPage，
+    而这里传的是替身宿主，所以对 mypy 走 Any 通道 —— 与
+    tests/test_about_dialog.py 里 `_BUILD_SIDEBAR: Any = MainWindow._build_sidebar`
+    是同一个手法，理由也相同。
+    """
+    return fn(host, *args)
+
+
+class _Lbl:
+    """替身 QLabel：只需要 setText"""
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    def setText(self, text: str) -> None:
+        self.text = str(text)
+
+
+class _Sig:
+    """替身 Signal：只需要 emit"""
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def emit(self) -> None:
+        self.n += 1
+
+
+class _Btn:
+    """
+    替身 StandardButton 的单个按钮。
+
+    必须支持 `Yes | No` 这种写法 —— 真代码是用位或拼按钮组合的，
+    所以 `__or__` 返回自身（组合后的「结果」在替身里没有意义，
+    真正决定分支的是 `question()` 的返回值）。
+    """
+
+    def __or__(self, _other):
+        return self
+
+
+class _StdBtn:
+    Yes = _Btn()
+    No = _Btn()
+
+
+class _FakeMsgBox:
+    """替身 QMessageBox：一律回答「是」，并把弹过的框记下来"""
+
+    StandardButton = _StdBtn
+    calls: List[str]
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    def question(self, *_a, **_k):
+        self.calls.append("question")
+        return _StdBtn.Yes
+
+    def information(self, *_a, **_k):
+        self.calls.append("information")
+
+    def warning(self, *_a, **_k):
+        self.calls.append("warning")
+
+
+@pytest.fixture
+def msgbox(monkeypatch):
+    """
+    把三个页面模块里的 `QMessageBox` 名字换掉。
+
+    只换模块内的名字、不动 Qt 类本身：PySide 的 wrapper 类型在有的版本上
+    拒绝外部赋值，直接给 `QMessageBox.question` 打桩会变成另一种「有的栈红」。
+    """
+    box = _FakeMsgBox()
+    from gui import main_window, page_bans, page_events
+
+    monkeypatch.setattr(page_events, "QMessageBox", box)
+    monkeypatch.setattr(page_bans, "QMessageBox", box)
+    monkeypatch.setattr(main_window, "QMessageBox", box)
+    return box
+
+
+def _event_row(rid: int, ip: str = IP, handled: int = 0) -> dict:
+    return {
+        "id": rid,
+        "ip": ip,
+        "handled": handled,
+        "risk_level": "high",
+        "risk_score": 95,
+        "summary": "扫端口",
+    }
+
+
+def test_handled_action_maps_confirm_and_ignore():
+    """变异：把两个 action 写成同一个 → 本例变红（确认/忽略在审计里就分不开了）"""
+    from gui.page_events import _handled_action
+
+    assert _handled_action(1) == audit.ACTION_EVENT_CONFIRM
+    assert _handled_action(2) == audit.ACTION_EVENT_IGNORE
+
+
+def test_event_snapshot_keeps_key_fields():
+    """变异：快照只留 id → 本例变红（事后答不出「删了哪些 IP」）"""
+    from gui.page_events import _event_snapshot
+
+    snap = _event_snapshot([_event_row(7)])
+    assert snap == [
+        {"id": 7, "ip": IP, "handled": 0, "level": "high", "score": 95},
+    ]
+
+
+def test_single_event_confirm_is_audited(isolated_env, msgbox, as_user):
+    """
+    变异：删掉 `_set_handled` 里的 audit.record → 本例变红。
+    事件页此前是「直接改库、什么都不留」，这是最典型的一条。
+    """
+    from gui.page_events import EventsPage
+
+    rid = database.insert_risk_event(
+        AccessRecord(ip=IP, local_port=18080),
+        RiskResult(score=95, level="high", matched_rules=["scan"], suggest_ban=True),
+    )
+
+    class _Host:
+        def refresh(self) -> None:
+            pass
+
+    _call(EventsPage._set_handled, _Host(), _event_row(rid), 1)
+
+    row = _last(audit.ACTION_EVENT_CONFIRM)
+    assert row["target_id"] == str(rid)
+    assert row["actor"] == "alice"
+    assert '"handled": 0' in (row["before_json"] or "")
+
+
+def test_single_event_ignore_is_audited(isolated_env, msgbox):
+    from gui.page_events import EventsPage
+
+    class _Host:
+        def refresh(self) -> None:
+            pass
+
+    _call(EventsPage._set_handled, _Host(), _event_row(3), 2)
+    assert _last(audit.ACTION_EVENT_IGNORE)["target_id"] == "3"
+
+
+def test_batch_event_confirm_is_audited_with_before_state(isolated_env, msgbox):
+    """
+    变异：before 只记条数不记原状态 → 本例变红。
+    确认/忽略可以来回切，只记条数的话事后判断不出「这条是被确认过还是改回来过」。
+    """
+    from gui.page_events import EventsPage
+
+    rows = [_event_row(11, "203.0.113.1"), _event_row(12, "203.0.113.2", handled=2)]
+
+    class _Host:
+        _rows = rows
+        lbl_info = _Lbl()
+
+        def _checked_rows(self):
+            return rows
+
+        def refresh(self) -> None:
+            pass
+
+    _call(EventsPage._batch_handled, _Host(), 1)
+    row = _last(audit.ACTION_EVENT_CONFIRM)
+    assert '"id": 12' in (row["before_json"] or "")
+    assert '"handled": 2' in (row["before_json"] or ""), "已被忽略的记录改确认，原状态必须留档"
+
+
+def test_batch_event_delete_is_audited_with_full_snapshot(isolated_env, msgbox):
+    """变异：删掉 `_batch_delete` 里的 audit.record → 本例变红（删除不可逆）"""
+    from gui.page_events import EventsPage
+
+    rid = database.insert_risk_event(
+        AccessRecord(ip=IP, local_port=18080),
+        RiskResult(score=95, level="high", matched_rules=["scan"], suggest_ban=True),
+    )
+    rows = [_event_row(rid)]
+
+    class _Host:
+        _rows = rows
+        lbl_info = _Lbl()
+
+        def _checked_rows(self):
+            return rows
+
+        def refresh(self) -> None:
+            pass
+
+    _call(EventsPage._batch_delete, _Host())
+    row = _last(audit.ACTION_EVENT_DELETE)
+    before = row["before_json"] or ""
+    assert str(rid) in before
+    assert IP in before
+    assert "handled" in before
+
+
+def test_batch_ban_delete_is_audited_with_full_snapshot(isolated_env, msgbox):
+    """
+    变异：删掉 `_batch_delete_bans` 里的 audit.record → 本例变红。
+
+    封禁记录是「记账」：删掉之后「这个 IP 曾经被封过、当时是什么状态」就再也
+    查不到了，而防火墙规则还在（本操作不改规则）—— 更需要这条审计来解释规则来源。
+    """
+    from gui.page_bans import BansPage
+
+    ban_id = database.insert_ban(
+        BanRecord(ip=IP, status=STATUS_UNBANNED, source="manual", rule_name="PG_x")
+    )
+    rows = [b for b in database.query_bans(limit=10) if b.id == ban_id]
+
+    class _Host:
+        _ban_rows = rows
+        lbl_info = _Lbl()
+        request_refresh_stats = _Sig()
+
+        def _checked_bans(self):
+            return rows
+
+        def refresh(self) -> None:
+            pass
+
+    _call(BansPage._batch_delete_bans, _Host())
+    row = _last(audit.ACTION_BAN_DELETE)
+    before = row["before_json"] or ""
+    assert str(ban_id) in before
+    assert IP in before
+    assert STATUS_UNBANNED in before
+    assert "PG_x" in before
+    # 前提校验：真的删掉了，否则这条审计可能只是「记了一笔没发生的删除」
+    assert database.query_bans(limit=10) == []
+
+
+def test_add_blacklist_is_audited(isolated_env, msgbox, monkeypatch, as_user):
+    """
+    变异：删掉 `_add_blacklist` 里的 audit.record → 本例变红。
+
+    这是「右键顺手加黑」的捷径，与规则页文本框保存是两条路径；不记就会有
+    「这个 IP 什么时候被谁拉黑的」查不到的空档。
+    """
+    from gui import main_window
+
+    class _Set(set):
+        def add(self, x):
+            super().add(x)
+
+    class _Eng:
+        def __init__(self):
+            self.blacklist = _Set()
+            self.whitelist = _Set()
+            self.saved = 0
+
+        def save_lists(self):
+            self.saved += 1
+
+    eng = _Eng()
+    monkeypatch.setattr(main_window, "get_engine", lambda: eng)
+
+    class _PageRules:
+        def reload(self):
+            pass
+
+    class _Host:
+        page_rules = _PageRules()
+
+        def _set_status(self, *_a, **_k):
+            pass
+
+    _call(main_window.MainWindow._add_blacklist, _Host(), IP)
+
+    assert eng.saved == 1
+    row = _last(audit.ACTION_LIST_SAVE)
+    assert row["actor"] == "alice"
+    assert row["target_type"] == "blacklist"
+    assert row["target_id"] == IP
+
+
+def test_gui_audit_failure_does_not_break_ban_delete(isolated_env, msgbox, monkeypatch):
+    """
+    变异：把 `audit.record` 的 try/except 去掉 → 本例会抛异常、删除流程中断。
+
+    ⚠️ 打的是 `app.audit.insert_audit`（record 真正调用的那个名字）。
+    打 `core.database.insert_audit` 对 record() 无效，测试会假绿。
+    """
+    from gui.page_bans import BansPage
+
+    ban_id = database.insert_ban(BanRecord(ip=IP, status=STATUS_UNBANNED))
+    rows = [b for b in database.query_bans(limit=10) if b.id == ban_id]
+    monkeypatch.setattr(audit, "insert_audit", _boom)
+
+    class _Host:
+        _ban_rows = rows
+        lbl_info = _Lbl()
+        request_refresh_stats = _Sig()
+
+        def _checked_bans(self):
+            return rows
+
+        def refresh(self) -> None:
+            pass
+
+    _call(BansPage._batch_delete_bans, _Host())  # 不抛异常
+    assert database.query_bans(limit=10) == [], "审计写失败不能让删除半途而废"
+
+
+def test_new_gui_actions_are_registered():
+    """新增 action 必须进 ACTION_LABELS，否则审计 tab 的下拉框里选不到"""
+    for act in (
+        audit.ACTION_EVENT_CONFIRM,
+        audit.ACTION_EVENT_IGNORE,
+        audit.ACTION_EVENT_DELETE,
+        audit.ACTION_BAN_DELETE,
+        audit.ACTION_LIST_SAVE,
+    ):
+        assert act in audit.ACTION_LABELS
+        assert act in audit.ACTIONS

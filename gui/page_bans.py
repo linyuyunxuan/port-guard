@@ -4,7 +4,7 @@ import datetime
 import threading
 from typing import Any, Dict, List, Optional
 
-from app import ban_service
+from app import audit, ban_service
 from app.export_csv import BAN_CSV_HEADERS, SUG_CSV_HEADERS, iter_ban_rows, iter_sug_rows
 from core import firewall
 from core import settings as cfg
@@ -713,11 +713,40 @@ class BansPage(QWidget):
             != QMessageBox.StandardButton.Yes
         ):
             return
+        ids = [int(b.id) for b in rows if b.id is not None]
+        # 删除前把关键字段整条留档：封禁记录是**记账**，删掉之后「这个 IP 曾经
+        # 被封过、封的是什么状态」就再也查不到了（防火墙规则不受影响，反而更
+        # 需要这条记录来解释现存规则是谁加的）。只记条数等于什么都没记。
+        snapshot = [
+            {
+                "id": b.id,
+                "ip": b.ip,
+                "status": b.status,
+                "source": b.source,
+                "rule_name": b.rule_name,
+            }
+            for b in rows
+        ]
         try:
-            n = delete_ban_records([int(b.id) for b in rows])
+            n = delete_ban_records(ids)
         except Exception as e:
+            audit.record(
+                audit.ACTION_BAN_DELETE,
+                target_type="ban",
+                summary=f"删除 {len(ids)} 条封禁记录失败：{e}",
+                result=audit.RESULT_FAIL,
+                detail=str(e),
+            )
             QMessageBox.warning(self, "删除失败", str(e))
             return
+        audit.record(
+            audit.ACTION_BAN_DELETE,
+            target_type="ban",
+            summary=f"删除 {n} 条封禁记录（仅删库记录，未改动防火墙规则）",
+            before={"bans": snapshot},
+            after={"count": n},
+            detail="防火墙规则未改动",
+        )
         self.refresh()
         self.request_refresh_stats.emit()
         self.lbl_info.setText(f"已删除 {n} 条记录 · 共 {len(self._ban_rows)} 条")

@@ -16,6 +16,7 @@
 import datetime
 from typing import Dict, List, Optional, Tuple
 
+from app import audit
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
 from core.config import LEVEL_LABEL, LEVEL_ORDER
 from core.database import (
@@ -138,6 +139,38 @@ RANGE_CHOICES = [RANGE_ALL, RANGE_TODAY, RANGE_7D, RANGE_30D, RANGE_CUSTOM]
 
 def _day_start(d: datetime.date) -> datetime.datetime:
     return datetime.datetime(d.year, d.month, d.day)
+
+
+#: handled 值 → 审计 action。0 是「未处理」，不会被写进审计（没有这个动作）。
+_HANDLED_ACTION = {
+    1: audit.ACTION_EVENT_CONFIRM,
+    2: audit.ACTION_EVENT_IGNORE,
+}
+
+
+def _handled_action(handled: int) -> str:
+    """确认/忽略共用一个入口，按目标状态分流到两个 action"""
+    return _HANDLED_ACTION.get(handled, audit.ACTION_EVENT_CONFIRM)
+
+
+def _event_snapshot(rows: List[Dict]) -> List[Dict]:
+    """
+    被操作事件的审计快照。
+
+    只取事后真要回溯的字段：id 用于定位、ip 用于「删了谁的记录」、
+    handled 用于「删的时候是已确认还是未处理」、等级与分数用于「这条结论有多严重」。
+    地理/路径/规则明细不取 —— 它们能被 access_log 还原，且会让 JSON 膨胀几倍。
+    """
+    return [
+        {
+            "id": r.get("id"),
+            "ip": r.get("ip") or "",
+            "handled": r.get("handled", 0),
+            "level": r.get("risk_level") or "",
+            "score": r.get("risk_score") or 0,
+        }
+        for r in rows
+    ]
 
 
 class EventDetailDialog(QDialog):
@@ -569,11 +602,29 @@ class EventsPage(QWidget):
         if not rows:
             return
         ids = [int(r["id"]) for r in rows]
+        action = _handled_action(handled)
+        verb = HANDLED_LABEL.get(handled, "处理")
         try:
             n = set_risk_handled_batch(ids, handled)
         except Exception as e:
+            audit.record(
+                action,
+                target_type="event",
+                summary=f"批量{verb} {len(ids)} 条事件失败：{e}",
+                result=audit.RESULT_FAIL,
+                detail=str(e),
+            )
             QMessageBox.warning(self, "操作失败", str(e))
             return
+        # before 记「每条原来的状态」：确认/忽略是可来回切的，只记条数无法事后
+        # 判断某条事件是被确认过、还是被忽略过又改回来。
+        audit.record(
+            action,
+            target_type="event",
+            summary=f"批量{verb} {n} 条风险事件",
+            before={"events": _event_snapshot(rows)},
+            after={"handled": handled, "count": n},
+        )
         self.refresh()
         self.lbl_info.setText(
             f"已{HANDLED_LABEL.get(handled, '处理')} {n} 条 · 当前列表共 {len(self._rows)} 条"
@@ -597,11 +648,29 @@ class EventsPage(QWidget):
             != QMessageBox.StandardButton.Yes
         ):
             return
+        # 删除是不可逆的（弹窗里也写了「审计要求留档的请改用忽略」），
+        # 所以 before 必须把被删记录的关键字段整条存下来 —— 只记条数的话，
+        # 事后既答不出「删了哪些 IP」，也答不出「删的时候它们是什么状态」。
+        snapshot = _event_snapshot(rows)
         try:
             n = delete_risk_events(ids)
         except Exception as e:
+            audit.record(
+                audit.ACTION_EVENT_DELETE,
+                target_type="event",
+                summary=f"删除 {len(ids)} 条风险事件失败：{e}",
+                result=audit.RESULT_FAIL,
+                detail=str(e),
+            )
             QMessageBox.warning(self, "删除失败", str(e))
             return
+        audit.record(
+            audit.ACTION_EVENT_DELETE,
+            target_type="event",
+            summary=f"删除 {n} 条风险事件",
+            before={"events": snapshot},
+            after={"count": n},
+        )
         self.refresh()
         self.lbl_info.setText(f"已删除 {n} 条 · 当前列表共 {len(self._rows)} 条")
 
@@ -720,10 +789,30 @@ class EventsPage(QWidget):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _set_handled(self, r: Dict, handled: int) -> None:
+        action = _handled_action(handled)
+        verb = HANDLED_LABEL.get(handled, "处理")
         try:
             set_risk_handled(int(r["id"]), handled)
         except Exception as e:
+            audit.record(
+                action,
+                target_type="event",
+                target_id=r.get("id"),
+                summary=f"{verb} {r.get('ip', '')} 的事件失败：{e}",
+                result=audit.RESULT_FAIL,
+                detail=str(e),
+            )
             QMessageBox.warning(self, "操作失败", str(e))
+            self.refresh()
+            return
+        audit.record(
+            action,
+            target_type="event",
+            target_id=r.get("id"),
+            summary=f"{verb}事件：{r.get('ip', '')}",
+            before={"handled": r.get("handled", 0)},
+            after={"handled": handled},
+        )
         self.refresh()
 
     def _on_double_click(self, index) -> None:
