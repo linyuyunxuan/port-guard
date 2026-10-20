@@ -233,6 +233,8 @@ class BansPage(QWidget):
         self._ban_rows_src = []
         self.sug_sort = TableSort(SUG_SORT_SPECS)
         self.ban_sort = TableSort(BAN_SORT_SPECS)
+        # 到期但解不掉的条数（普通权限下由主窗口巡检回报），供权限条展示
+        self._expired_backlog = 0
         self._build()
         self.batch_unban_done.connect(self._on_batch_unban_done)
         self.refresh()
@@ -248,13 +250,8 @@ class BansPage(QWidget):
         # 权限警示条（仅普通权限时出现）
         self.banner = WarnBanner("", "以管理员身份重启", C.warning)
         self.banner.action_clicked.connect(self._restart_as_admin)
-        self.banner.setVisible(not firewall.is_admin())
-        if not firewall.is_admin():
-            self.banner.set_text(
-                "当前以普通权限运行，无法修改 Windows 防火墙。"
-                "监控与规则判定正常，但「确认封禁」不会生效。"
-            )
         root.addWidget(self.banner)
+        self._refresh_perm_banner()
 
         # 结果区：上「待确认建议」/ 下「封禁记录」，可拖拽分配高度
         self.split = QSplitter(Qt.Orientation.Vertical)
@@ -265,6 +262,36 @@ class BansPage(QWidget):
         self.split.setStretchFactor(1, 1)
         self.split.setSizes([268, 386])
         root.addWidget(self.split, 1)
+
+    def _refresh_perm_banner(self) -> None:
+        """
+        普通权限时的常驻提示。
+
+        除了「封禁不会生效」，还带上「有 N 条已到期但解不掉」—— 到期巡检要管理员
+        权限，没权限时它什么都做不了。不在这里说清楚，用户会以为封禁到期自动消失。
+        """
+        if firewall.is_admin():
+            self.banner.setVisible(False)
+            return
+        text = (
+            "当前以普通权限运行，无法修改 Windows 防火墙。"
+            "监控与规则判定正常，但「确认封禁」不会生效。"
+        )
+        if self._expired_backlog > 0:
+            text += (
+                f"另有 {self._expired_backlog} 条封禁已到期，需管理员权限才能删除对应"
+                "防火墙规则 —— 这些规则仍在生效。"
+            )
+        self.banner.set_text(text)
+        self.banner.setVisible(True)
+
+    def set_expired_backlog(self, n: int) -> None:
+        """由主窗口的到期巡检回报「到期但解不掉」的条数（普通权限下才有值）"""
+        n = max(0, int(n or 0))
+        if n == self._expired_backlog:
+            return
+        self._expired_backlog = n
+        self._refresh_perm_banner()
 
     @staticmethod
     def _setup_table(table: QTableWidget) -> None:
@@ -942,6 +969,31 @@ class BansPage(QWidget):
         except Exception as e:
             log.exception("读取防火墙规则失败")
             QMessageBox.warning(self, "对账失败", str(e))
+            return
+        # 「读到空列表」有两种含义：规则真的都不在了，或者压根没读到
+        # （netsh-only 环境 / 权限不足）。reconcile 只会按前者处理 —— 它会把库里
+        # 所有 active 记录标成已解封，而防火墙规则还在系统里，从此无人巡检解封。
+        try:
+            active = count_active_bans()
+        except Exception:
+            active = 0
+        if (
+            not existing
+            and active > 0
+            and QMessageBox.question(
+                self,
+                "对账确认",
+                f"没有从防火墙读到任何 PortGuard 规则，但库里有 {active} 条「已封禁」记录。\n\n"
+                "这通常意味着本机读不到防火墙规则（旧系统 / 权限不足），"
+                "而不是规则真的不存在。\n"
+                f"继续对账会把 {active} 条记录全部标记为已解封，"
+                "**防火墙规则不会被删除，仍将继续拦截**。\n\n"
+                "确实要对账吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         fixed = ban_service.reconcile(existing)
         self.refresh()

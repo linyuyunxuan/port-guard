@@ -562,12 +562,61 @@ def unban_all(actor: Optional[str] = None) -> Tuple[bool, int, str]:
     return True, n, ""
 
 
+#: 非管理员时「到期解封被跳过」的告警限流（秒）。巡检每 60 秒一次，
+#: 不限流的话日志会被同一句刷满，真正的问题反而被淹没。
+_ADMIN_SKIP_WARN_SEC = 600.0
+_admin_skip_warned_at = 0.0
+
+
+def expired_backlog(now: Optional[int] = None) -> int:
+    """
+    已到期但仍处于 active 的封禁条数 —— 也就是「本该被解封、实际还封着」的数量。
+
+    存在的意义：到期巡检依赖管理员权限，普通权限运行时它什么都做不了。
+    没有这个数字，界面就只能说「可能有封禁没解开」，说不清有几条。
+    查库失败按 0 处理（展示用的数字不值得把界面弄崩）。
+    """
+    try:
+        return len(list_expired_bans(now))
+    except Exception:
+        log.exception("统计到期未解封条数失败")
+        return 0
+
+
+def _warn_expire_without_admin() -> None:
+    """
+    非管理员时，把「巡检跳过」这件事显式说出来（限流到 10 分钟一次）。
+
+    原实现在这里直接 `return []`，一声不响 —— 后果很具体：以管理员封过的 IP，
+    之后以普通权限（`start.bat`，只监控模式）运行，那些规则**永远不会到期解封**，
+    而界面上没有任何提示，用户以为封禁是自动到期的。
+    """
+    global _admin_skip_warned_at
+    n = expired_backlog()
+    if n <= 0:
+        return  # 没有积压就不必打扰：普通权限运行本来就是设计内的正常用法
+    now = time.time()
+    if now - _admin_skip_warned_at < _ADMIN_SKIP_WARN_SEC:
+        return
+    _admin_skip_warned_at = now
+    log.warning(
+        "到期巡检已跳过：有 %d 条封禁已到期，但当前进程不是管理员，无法删除防火墙规则。"
+        "这些规则仍在生效（Windows 防火墙规则本身没有到期时间，只能靠本程序删）。"
+        "以管理员身份运行一次即可自动补解封。",
+        n,
+    )
+
+
 def check_expired(now: Optional[int] = None) -> List[BanRecord]:
     """
     到期解封巡检：把已到期但仍 active 的封禁真正解掉。
     返回本次成功解封的记录列表。
+
+    ⚠️ 非管理员时返回空列表，但**不再静默**：会记一条限流告警（见
+    `_warn_expire_without_admin`），界面侧还有 `expired_backlog()` 可用。
     """
     if not firewall.is_admin():
+        _warn_expire_without_admin()
         return []
     done: List[BanRecord] = []
     try:
@@ -617,6 +666,15 @@ def reconcile(rule_names: List[str]) -> int:
     from core.database import query_bans
 
     existing = set(rule_names or [])
+    if not existing:
+        # 空列表可能是「真的都没了」，也可能是「本机读不到规则」（2008 R2 没有
+        # Get-NetFirewallRule，或权限不足）。二者在这里无法区分，但后果差别巨大：
+        # 后者会把所有 active 记录标成已解封，而防火墙规则仍在拦截。
+        # 调用方（封禁页）会先弹确认；这里至少留下可追溯的日志。
+        log.warning(
+            "对账收到空的规则列表：若本机读不到防火墙规则，"
+            "本次会把所有 active 记录标记为已解封（防火墙规则并不会被删除）"
+        )
     fixed: List[str] = []
     for b in query_bans(status=STATUS_ACTIVE, limit=100000):
         if b.rule_name and b.rule_name not in existing:

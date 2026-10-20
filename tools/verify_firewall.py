@@ -37,10 +37,15 @@ from core import firewall as fw
 
 # RFC 5737 TEST-NET-2：文档保留地址，恒不可路由
 TEST_IP = "198.51.100.1"
+# 同一网段，用于「脏描述」用例（与 TEST_IP 分开，避免两步互相干扰）
+DIRTY_IP = "198.51.100.2"
 # 命令注入载荷：原实现会真的执行后半截，等于在输入框打字即可提权执行命令
 INJECTION = '1.2.3.4"; Start-Process calc; #'
 # 内网地址：规则引擎硬保护，任何情况下都拒绝封禁
 PROTECTED = "192.168.1.10"
+# 真实踩过的「脏描述」：归属地英文长名 + netsh 描述字符白名单里的违规符号。
+# 2008 R2 上没有 New-NetFirewallRule，只能走 netsh，这类描述曾让封禁整个失败。
+DIRTY_NOTE = 'Korea|Republic "a" Côte d\'Ivoire ' + "很长的国家名称" * 20
 
 # ShellExecuteW 的 ERROR_CANCELLED（注意它 > 32，不能只看「返回码 > 32 即成功」）
 ERR_CANCELLED = 1223
@@ -191,6 +196,19 @@ def run_checks() -> Dict[str, Any]:
             baseline <= names3,
             f"基线={len(baseline)} 现在={len(names3)}",
         )
+
+        # 11/12：描述里带 netsh 非法字符（`|`、成对引号）且超长时，封禁仍必须成功。
+        # 这是真机回归：netsh 的 description 有字符白名单，命中就整条规则拒建；
+        # 而 2008 R2 没有 New-NetFirewallRule，只能靠 netsh。
+        ok5, name5, e5 = fw.block_ip(DIRTY_IP, duration_sec=3600, note=DIRTY_NOTE)
+        rec.add("11 脏描述（| 与引号、超长）仍能写入防火墙", ok5, name5 or e5)
+        if ok5:
+            fw.unblock_by_name(name5)
+            rec.add(
+                "12 脏描述规则已清理",
+                name5 not in set(fw.list_rule_names()),
+                f"规则名={name5}",
+            )
     except Exception:
         result["error"] = traceback.format_exc()
         rec.add("XX 未预期异常", False, result["error"])

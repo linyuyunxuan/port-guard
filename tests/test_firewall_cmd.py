@@ -41,6 +41,9 @@ def spy(monkeypatch):
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
     monkeypatch.setattr(firewall, "_powershell", fake_ps)
     monkeypatch.setattr(firewall, "_run", fake_run)
+    # 「本机有没有 New-NetFirewallRule」是模块级缓存，用例之间必须重置，
+    # 否则前一条用例探出的结论会让这条用例走了另一条分支
+    monkeypatch.setattr(firewall, "_ps_cmdlet_missing", None)
     return calls
 
 
@@ -129,19 +132,30 @@ def _ps_arg(script: str, flag: str) -> str:
         "'; Start-Process calc; #",
         "$(Get-Content C:\\Windows\\win.ini)",
         "`nStart-Process calc",
+        'Korea|Republic say "hi"',
     ],
 )
-def test_note_is_quoted_not_interpolated(spy, note):
-    """封禁原因里的引号/子表达式必须被单引号字面量吃掉，不能逃到参数之外"""
+def test_note_is_sanitized_not_interpolated(spy, note):
+    """
+    封禁原因里的引号 / 子表达式 / 竖线必须被**净化掉**，而不是原样带进描述。
+
+    原用例断言的是「原文原样保留」（只靠 ps_quote 兜），但真机证明那样不够：
+    netsh 的 description 有字符白名单，`|` 与成对引号会让它拒建规则，
+    而 Server 2008 R2 上没有 New-NetFirewallRule，只能走 netsh。
+    所以现在的口径是「净化之后再 ps_quote」，本用例同时钉住两边：
+    危险字符不能出现，可读内容要留下，参数边界不能溢出。
+    """
     ok, _n, err = firewall.block_ip("203.0.113.10", note=note)
     assert ok, err
     _kind, script = spy[0]
 
     desc = _ps_arg(script, "-Description")
-    assert note in desc, f"原因原文被篡改：{desc!r}"
-    assert desc.endswith(note), f"原因后面被拼进了别的东西：{desc!r}"
+    for bad in ('"', "|", "`", "$", "\\"):
+        assert bad not in desc, f"描述里仍残留 {bad!r}：{desc!r}"
     assert "-RemoteAddress" not in desc, "payload 溢出了参数边界"
     assert _ps_arg(script, "-RemoteAddress") == "203.0.113.10"
+    # 净化不等于整段丢弃：字母数字部分必须留下痕迹，否则描述就失去意义了
+    assert any(k in desc for k in ("Start-Process", "Get-Content", "win.ini", "Korea"))
 
 
 def test_rule_name_is_unique_within_same_millisecond():

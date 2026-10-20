@@ -157,6 +157,44 @@ def safe_text(value: Any, maxlen: int = 200, default: str = "") -> str:
     return s or default
 
 
+#: `cli_note()` 允许保留的标点。**这是实测出来的白名单，别随意往里加**：
+#: 2026-10-20 在 Windows 上用 `netsh advfirewall firewall add rule` 逐字符试过，
+#: `A|B` 直接报「描述包含无效的字符，或具有无效的长度。」；`say "hi"` 里成对的
+#: 双引号会打乱 netsh 自己的分词，报「应用程序包含无效的字符…」。其余常见标点
+#: （`; & < > ( ) { } \ , % ! ^ ~ = # * ? [ ] + @ : / . -`）、汉字、带重音的拉丁字母
+#: （Côte d'Ivoire）都能通过。为了不依赖「逐个试过」的结论，这里取**交集**：
+#: 只保留确定安全的那几个，其余一律换成空格。
+_NOTE_KEEP = frozenset(" -_.:/+,#()'")
+
+
+def cli_note(value: Any, maxlen: int = 160, default: str = "") -> str:
+    """
+    清洗「要写进防火墙规则描述」的自由文本。
+
+    为什么不能只用 `safe_text()`：它只去控制字符，拦不住 `|` 与成对双引号 ——
+    而 **Server 2008 R2 上根本没有 New-NetFirewallRule**（Win8/2012 才提供），
+    交付环境每次封禁都走 netsh 回退，netsh 会因此拒建规则，封禁整个失败。
+    归属地来自离线库（`Korea, Republic of`、`Côte d'Ivoire` 这类），又长又带符号。
+
+    策略：**非白名单字符换成空格**（不是删除 —— 删了会把前后两个词粘成一个），
+    折叠连续空白，按字符数截断。宁可描述难看，也不能让描述挡住封禁。
+    """
+    if value is None:
+        return default
+    s = _CONTROL_RE.sub("", str(value))
+    chars = []
+    for ch in s:
+        if ch.isalnum() or ch in _NOTE_KEEP:
+            chars.append(ch)
+        else:
+            # 控制字符 / 非法标点 / 全角符号统一成空格
+            chars.append(" ")
+    text = " ".join("".join(chars).split())
+    if len(text) > maxlen:
+        text = text[:maxlen].rstrip()
+    return text or default
+
+
 def clamp_int(value: Any, low: int, high: int, default: int) -> int:
     """把外部传入的数值夹到安全区间（防止超大封禁时长等）"""
     try:

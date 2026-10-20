@@ -123,6 +123,9 @@ class EventPumpMixin(_HostBase):
         self.expire_timer.setInterval(EXPIRE_INTERVAL_MS)
         self.expire_timer.timeout.connect(self._check_expired)
         self.expire_timer.start()
+        # 启动补检：定时器第一次触发在 60 秒后，而程序关了一整晚再打开时，
+        # 这 60 秒里所有本该解封的 IP 仍然被封着。启动后立刻补跑一次。
+        QTimer.singleShot(1500, self._check_expired)
 
         # 日志/备份清理：每 10 分钟看一眼，每天到点才真跑（见 _maintenance_due）
         self.clean_timer = QTimer(self)
@@ -264,17 +267,44 @@ class EventPumpMixin(_HostBase):
     # ── 到期巡检 / 清理 ──
     def _check_expired(self) -> None:
         if not self._is_admin():
+            self._report_expired_backlog()
             return
         try:
             done = ban_service.check_expired()
         except Exception:
             log.exception("到期解封巡检失败")
             return
+        # 无论这次有没有解封到东西，都把积压数同步给封禁页：
+        # 权限条上那句「另有 N 条已到期」必须跟着真实状态走，
+        # 否则解封完了界面还在说「解不掉」。
+        with contextlib.suppress(Exception):
+            self.page_bans.set_expired_backlog(ban_service.expired_backlog())
         if done:
             self._set_status(f"已自动解封 {len(done)} 个到期 IP", C.success)
             if self.stack.currentWidget() is self.page_bans:
                 self.page_bans.refresh()
             self._refresh_stats(force=True)
+
+    def _report_expired_backlog(self) -> None:
+        """
+        普通权限下的到期巡检：做不了事，但**必须说清楚**。
+
+        原来这里直接 return，于是「以管理员封过的 IP，之后以普通权限运行就永不
+        解封」这件事在界面上完全没有痕迹。现在把积压条数报给封禁页的权限条，
+        并在状态栏提一句（状态栏会被后续事件覆盖，所以真正的常驻提示在权限条上）。
+        """
+        try:
+            n = ban_service.expired_backlog()
+        except Exception:
+            log.exception("统计到期未解封条数失败")
+            return
+        with contextlib.suppress(Exception):
+            self.page_bans.set_expired_backlog(n)
+        if n > 0:
+            self._set_status(
+                f"有 {n} 条封禁已到期，但当前无管理员权限，无法删除防火墙规则",
+                C.warning,
+            )
 
     def _cleanup_logs(self) -> None:
         """
