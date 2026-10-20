@@ -25,12 +25,13 @@ import argparse
 import ctypes
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -48,6 +49,9 @@ BAD_MARKS = (
     "自检结束：失败",
     "Traceback (most recent call last)",
 )
+
+# Qt 绑定名 → 该线路会加载的 Qt 库前缀（决定 step 10 该断言哪几个名字）
+QT_LIB_PREFIX = {"PySide6": "Qt6", "PySide2": "Qt5"}
 
 ERR_CANCELLED = 1223
 CREATE_NO_WINDOW = 0x08000000
@@ -149,16 +153,51 @@ def elevate_and_wait(exe: str, out_path: str, timeout: int) -> int:
 # ═══════════════════════════════════════════════════════════
 
 
-def _log_offset() -> int:
-    return os.path.getsize(LOG_FILE) if os.path.isfile(LOG_FILE) else 0
+class LogMark(NamedTuple):
+    """「这个日志文件已经读到哪儿」的标记。"""
+
+    inode: int
+    size: int
 
 
-def _log_since(offset: int) -> str:
-    """只读本次运行追加的那一段，避免被上一轮的标志位「假通过」"""
-    if not os.path.isfile(LOG_FILE):
+def _log_mark() -> LogMark:
+    """记录日志文件当前末尾，供 `_log_since` 只读增量。
+
+    为什么不能只记字节偏移：日志走的是 `TimedRotatingFileHandler`，按天轮转 ——
+    做法是**把旧文件改名加日期后缀、再新建一个同名空文件**。文件名全程不变，
+    但文件已经不是同一个了。只认偏移量时，跨天后的首次运行会踩一个很隐蔽的坑：
+    上一天留下的大偏移量比新文件还长，`seek()` 直接落到文件末尾之后，
+    `read()` 返回空串，于是自检段里所有启动标志位都「看不见」——
+    表现成 step 04/05 假失败（实际日志里标志位明明写着「通过」）。
+
+    记 inode 就能识破「同名但换了个文件」。Windows 上 `st_ino` 由
+    `os.stat` 从 NTFS 文件索引取回，改名不会变、新建必然变。
+    """
+    try:
+        st = os.stat(LOG_FILE)
+    except OSError:
+        # 文件还不存在：用 (0, 0) 表示，之后一旦出现就会因 inode 不同而全文重读
+        return LogMark(0, 0)
+    return LogMark(st.st_ino, st.st_size)
+
+
+def _log_since(mark: LogMark) -> str:
+    """只读本次运行追加的那一段，避免被上一轮的标志位「假通过」。
+
+    轮转判定用两条或条件，缺一不可：
+    · **inode 变了** —— 文件被换掉了（跨天轮转的标准形态）；
+    · **文件比记录的偏移还短** —— 兜住 inode 拿不到 0（个别文件系统 / 旧 Python）
+      的情况，至少「明显变短」还能识别。
+    只判「变短」是不够的：新文件写得快的时候，等到读取那一刻它可能已经长得比
+    旧偏移还长，偏移恰好落在正文中间，前半段（往往正是启动标志位）会被静默截掉。
+    """
+    try:
+        st = os.stat(LOG_FILE)
+    except OSError:
         return ""
+    rotated = st.st_ino != mark.inode or st.st_size < mark.size
     with open(LOG_FILE, "rb") as f:
-        f.seek(offset)
+        f.seek(0 if rotated else mark.size)
         return f.read().decode("utf-8", "replace")
 
 
@@ -245,6 +284,23 @@ def _read_newest_report(before: set) -> Tuple[str, str]:
         return path, ""
 
 
+def _diag_binding(report: str) -> str:
+    """从 `--diag` 报告里读出实际 Qt 线路（PySide6 / PySide2），读不到返回空串。
+
+    为什么必须先读线路再断言：产物走 Qt5 还是 Qt6 由打包时的绑定决定，
+    两条线的探测结果分别是 `Qt5Core.dll` / `Qt6Core.dll`。旧实现把两个名字都
+    写死成 Qt6，Qt5 产物在这一项上永远红；而如果反过来「Qt5 或 Qt6 命中一个就算
+    过」，这一项又会退化成永远绿的装饰性断言 —— 连「产物里根本没有 Qt」都拦不住。
+    所以线路必须从报告原文里取，取不到就是无法判定，直接判失败。
+
+    返回值是冒号后面那一段原文（如 `PySide2`、`未检测到（可能不是 GUI 进程）`），
+    由调用方用 `QT_LIB_PREFIX` 校验是不是已知线路 —— 这样判失败时能把实际读到的
+    内容原样写进结果，排障时不用再去翻报告。
+    """
+    m = re.search(r"Qt 线路\s*[:：]\s*(.+)", report)
+    return m.group(1).strip() if m else ""
+
+
 # ═══════════════════════════════════════════════════════════
 #  检查项
 # ═══════════════════════════════════════════════════════════
@@ -270,9 +326,9 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
         rec.add("02 记录运行前用户数据快照", True, f"文件数={len(before)} 目录={DATA_DIR}")
 
         # ── 第一道：无控制台自检（唯一能覆盖「窗口化 + std 流为 None」的路径）──
-        off1 = _log_offset()
+        mark1 = _log_mark()
         code, err = _run_selfcheck(exe)
-        text1 = _log_since(off1)
+        text1 = _log_since(mark1)
         rec.add("03 --selfcheck 退出码为 0", code == 0, f"退出码={code} {err}".strip())
 
         rec.add(
@@ -307,14 +363,33 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
             "【系统】" in dtext and "【依赖闭包】" in dtext,
             f"{len(dtext)} 字符",
         )
-        rec.add(
-            "10 Qt 关键库按真实加载方式探测成功",
-            "✓ Qt6Core.dll" in dtext and "✓ Qt6Widgets.dll" in dtext,
-            next((ln.strip() for ln in dtext.splitlines() if "Qt6Core.dll" in ln), "无探测结果"),
-        )
+        # 按报告里读出的线路断言对应的两个库：Qt5 产物断言 Qt5Core/Qt5Widgets，
+        # Qt6 产物断言 Qt6Core/Qt6Widgets。读不出线路就判失败并说明，
+        # 绝不「两个名字任一命中就算过」——那等于永远绿。
+        binding = _diag_binding(dtext)
+        prefix = QT_LIB_PREFIX.get(binding, "")
+        if not prefix:
+            rec.add(
+                "10 Qt 关键库按真实加载方式探测成功",
+                False,
+                f"报告里读不到 Qt 线路（原值={binding or '空'}），无法判定该断言哪条线",
+            )
+        else:
+            probes = [f"{prefix}Core.dll", f"{prefix}Widgets.dll"]
+            rec.add(
+                "10 Qt 关键库按真实加载方式探测成功",
+                all(f"✓ {p}" in dtext for p in probes),
+                "；".join(
+                    next(
+                        (ln.strip() for ln in dtext.splitlines() if f"✓ {p}" in ln),
+                        f"未探测到 {p}",
+                    )
+                    for p in probes
+                ),
+            )
 
         # ── 第三道：正常启动，验证真实 Qt 插件与完整界面链路 ──
-        off2 = _log_offset()
+        mark2 = _log_mark()
         env = dict(os.environ)
         if not desktop:
             env["QT_QPA_PLATFORM"] = "offscreen"  # 离屏，不在自动化环境里弹窗
@@ -340,7 +415,7 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
             + (f"，第 {died_at} 秒退出，码={proc.returncode}" if died_at else ""),
         )
 
-        text2 = _log_since(off2)
+        text2 = _log_since(mark2)
         rec.add(
             "12 后端就绪标志位出现",
             OK_MARK in text2,
