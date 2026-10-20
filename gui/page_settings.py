@@ -21,6 +21,7 @@ from core import settings as cfg
 from core.config import (
     DEFAULT_LISTEN_HOST,
     DEFAULT_LISTEN_PORT,
+    DEFAULT_TS_SKEW_SEC,
     LEVEL_CRITICAL,
     LEVEL_HIGH,
     LEVEL_LABEL,
@@ -228,6 +229,36 @@ class SettingsPage(QWidget):
         b_copy.setFixedWidth(52)
         b_copy.clicked.connect(self._copy_key)
         panel.add("API Key", (self.ed_key, b_show, b_gen, b_copy))
+
+        # ── 上报侧可信度 ──
+        # body 里的 ip / timestamp 都是业务系统给的，能直接左右判定结果，
+        # 所以这里给运维一个总闸与阈值，而不是让程序默默信任。
+        self.tg_trust_ip = ToggleSwitch(True)
+        self.sp_ts_skew = QSpinBox()
+        self.sp_ts_skew.setRange(0, 3600)
+        self.sp_ts_skew.setSuffix(" 秒")
+        self.sp_ts_skew.setValue(DEFAULT_TS_SKEW_SEC)
+        self.sp_ts_skew.setFixedWidth(120)
+        panel.add(
+            "上报来源 IP",
+            _row_widget(self.tg_trust_ip, self._sw_label("信任上报中的来源 IP"), spacing=10),
+        )
+        panel.add("时间戳最大偏差", self.sp_ts_skew)
+
+        hint_trust = QLabel(
+            "勾掉后一律按 TCP 对端地址计；不勾时，仅回环来源或通过 API Key 校验的请求，"
+            "其上报的 ip 才会被采信。时间戳与本机时间不符或超出偏差时，按本机时间计。"
+        )
+        hint_trust.setObjectName("hint")
+        hint_trust.setWordWrap(True)
+        hint_trust.setToolTip(
+            "上报的 ip 与 timestamp 都来自业务系统，可被伪造：\n\n"
+            "· ip 伪造 —— 给任意 IP 刷风险分，甚至借自动封禁封掉正常来源；\n"
+            "· 时间戳伪造 —— 规则引擎用它推进滑动窗口，往回拨能让窗口永远累积不起来，"
+            "往前拨会让清理逻辑把窗口清空，4 条窗口型规则全部失效。\n\n"
+            "因此这两项由服务端按「来源可信度 + 偏差阈值」兜底。"
+        )
+        panel.add_block(hint_trust, span=False)
 
         self.lbl_server_state = QLabel("")
         self.lbl_server_state.setObjectName("form_hint")
@@ -632,6 +663,8 @@ class SettingsPage(QWidget):
         host = cfg.get("listen_host", DEFAULT_LISTEN_HOST)
         self.tg_lan.setChecked(host not in ("127.0.0.1", "localhost", "::1"))
         self.ed_key.setText(cfg.get("api_key", ""))
+        self.tg_trust_ip.setChecked(cfg.get_bool("trust_reported_ip", True))
+        self.sp_ts_skew.setValue(cfg.get_int("report_max_ts_skew_sec", DEFAULT_TS_SKEW_SEC))
         self._on_lan_toggle(self.tg_lan.isChecked())
 
         # 离线库
@@ -694,6 +727,8 @@ class SettingsPage(QWidget):
                 # （上面已自动生成），因此这是有意为之，不是配置疏漏。
                 "listen_host": WILDCARD_HOST if lan else DEFAULT_LISTEN_HOST,
                 "api_key": key,
+                "trust_reported_ip": "1" if self.tg_trust_ip.isChecked() else "0",
+                "report_max_ts_skew_sec": self.sp_ts_skew.value(),
                 "auto_mode": "1" if self.tg_auto.isChecked() else "0",
                 "auto_ban_threshold": self.sp_threshold.value(),
                 "default_ban_duration_sec": self.sp_duration.value() * 60,

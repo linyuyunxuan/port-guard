@@ -22,6 +22,11 @@ DEFAULT_LISTEN_PORT = 18080
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
+# 上报时间戳与本机时间的允许偏差（秒）：超出即以本机时间为准。
+# 放在这里是为了让「配置默认值」与「代码兜底值」同源 —— settings 表读不到时
+# （例如上报在 warm() 之前进来）用同一个数，不会出现两套口径。
+DEFAULT_TS_SKEW_SEC = 300
+
 # 「绑定所有网卡」的地址。集中在这里定义有两个目的：
 #   1) 全项目只有这一处硬编码字面量，S104（bind-all-interfaces）单点豁免；
 #   2) 默认值、设置页、安全检查共用同一常量，避免三处写法各自漂移。
@@ -224,6 +229,13 @@ DEFAULT_SETTINGS = {
     "rate_limit_burst": "600",  # 桶容量（允许的瞬时突发）
     "max_body_mb": "2",  # 单次请求体上限（MB）
     "autostart_server": "0",  # 1=启动程序时自动开启接收服务
+    # 上报来源可信度（详见 core.report_server._is_loopback_source）：
+    # 1=仅可信来源（回环地址，或本次请求通过 API Key 校验）才采信 body 里的 ip；
+    # 0=一律使用 TCP 对端地址，忽略 body 里的 ip
+    "trust_reported_ip": "1",
+    "report_max_ts_skew_sec": str(
+        DEFAULT_TS_SKEW_SEC
+    ),  # 上报 timestamp 与本机时间的最大偏差（秒），超出按本机时间计
     # 封禁
     "auto_mode": "0",  # 1=自动封禁（默认关闭）
     "auto_ban_threshold": "90",  # 自动封禁的最低风险分

@@ -5,11 +5,14 @@ PortGuard — 领域模型
 
 import datetime
 import json
+import logging
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional
 
-from core.config import LEVEL_LABEL, LEVEL_NORMAL, LEVEL_ORDER
+from core.config import DEFAULT_TS_SKEW_SEC, LEVEL_LABEL, LEVEL_NORMAL, LEVEL_ORDER
+from core.logger import get_logger
 
 
 def now_ms() -> int:
@@ -80,6 +83,92 @@ def parse_timestamp(value: Any) -> int:
         return int(dt.timestamp() * 1000)
     except Exception:
         return now_ms()
+
+
+# ═══════════════════════════════════════════════════════════
+#  上报时间戳纠偏
+# ═══════════════════════════════════════════════════════════
+
+# 为什么必须纠偏：`event_ts` 在下游被当成「现在」使用 —— 规则引擎用它推进
+# 滑动窗口并清理窗口（`core/rule_engine.py`），保留期删除也以它为边界。客户端
+# 一旦能任意指定它，窗口型规则（端口扫描 / 后台登录爆破 / 频率限制 / 错误风暴）
+# 就形同虚设：给一个很旧的时间戳，窗口永远累积不起来；给一个未来的时间戳，
+# 清理逻辑会把已累积的窗口直接清空。所以服务端必须掌握最终解释权。
+#
+# 日志限流方式：**按秒去重**。伪造时间戳的客户端通常是一批一批地打，逐条记
+# warning 会瞬间刷爆日志，反而把真正的异常淹没。这里同一秒内只记一条，被合并
+# 掉的条数累计到下一条文案里 —— 既压住刷屏，又保留「一共伪造了多少次」的量级
+# 信息。没选按月/长期计数，是因为这条日志要回答的是「此刻有没有人在伪造时间」，
+# 不服务于统计口径，也就不需要额外维护长期状态。
+
+_warn_lock = threading.Lock()
+
+
+class ThrottledWarning:
+    """按秒去重的 warning 记录器（同一秒内只落一条，多余条数合并计数）
+
+    `template` 用 logging 的 %-风格占位符，末尾会自动拼上被合并条数的说明。
+    """
+
+    def __init__(self, logger: logging.Logger, template: str) -> None:
+        self._logger = logger
+        self._template = template
+        self._sec = 0
+        self._dropped = 0
+
+    def emit(self, *args: Any) -> None:
+        now = int(time.time())
+        with _warn_lock:
+            if now == self._sec:
+                self._dropped += 1
+                return
+            dropped, self._sec, self._dropped = self._dropped, now, 0
+        extra = "" if not dropped else f"（上一秒另有 {dropped} 条同类已合并）"
+        self._logger.warning(self._template + extra, *args)
+
+
+_warn_ts_skew = ThrottledWarning(
+    get_logger(__name__),
+    "上报时间戳与本机时间偏差 %d 秒，超过阈值 %d 秒，已按本机时间计"
+    "（客户端上报 %d / 服务端 %d，epoch 毫秒）",
+)
+
+
+def _max_skew_sec(max_skew_sec: Optional[int]) -> int:
+    """阈值归一：None=读设置，非法/负数按「不容忍偏差」处理"""
+    if max_skew_sec is None:
+        try:
+            from core import settings as cfg
+
+            return max(0, cfg.get_int("report_max_ts_skew_sec", DEFAULT_TS_SKEW_SEC))
+        except Exception:
+            return DEFAULT_TS_SKEW_SEC
+    try:
+        return max(0, int(max_skew_sec))
+    except (TypeError, ValueError):
+        return DEFAULT_TS_SKEW_SEC
+
+
+def resolve_event_ts(raw: Any, max_skew_sec: Optional[int] = None) -> int:
+    """
+    决定一条上报最终采用的时间戳：服务端掌握最终解释权。
+
+    · 缺失 / 无法解析 —— `parse_timestamp` 本身就回退到调用时刻的 `now_ms()`，
+      偏差为 0，自然落在阈值内，等价于「用服务端时间」；
+    · 偏差绝对值 > 阈值 —— 记一条 warning（按秒去重），改用服务端时间；
+    · 阈值内 —— 保留客户端时间。业务系统带自己的采集时间是合理场景
+      （例如日志落盘与上报之间存在排队延迟），不该一律抹掉。
+
+    参数 `max_skew_sec` 显式传入优先；留空则读设置 `report_max_ts_skew_sec`。
+    """
+    limit = _max_skew_sec(max_skew_sec)
+    server_ms = now_ms()
+    client_ms = parse_timestamp(raw)
+    skew_sec = int(abs(client_ms - server_ms) / 1000)
+    if skew_sec > limit:
+        _warn_ts_skew.emit(skew_sec, limit, client_ms, server_ms)
+        return server_ms
+    return client_ms
 
 
 # ═══════════════════════════════════════════════════════════
@@ -185,7 +274,17 @@ class AccessRecord:
     suggest_ban: bool = False
 
     @staticmethod
-    def from_payload(body: Dict[str, Any], ip: str) -> "AccessRecord":
+    def from_payload(
+        body: Dict[str, Any],
+        ip: str,
+        max_ts_skew_sec: Optional[int] = None,
+    ) -> "AccessRecord":
+        """构造一条访问记录。
+
+        `max_ts_skew_sec` —— 上报时间戳与本机时间的最大允许偏差（秒），
+        超出即按本机时间计，详见 `resolve_event_ts`。留空读设置。
+        """
+
         def _int(v):
             try:
                 return int(v) if v is not None and v != "" else None
@@ -209,7 +308,7 @@ class AccessRecord:
             host=str(body.get("host") or ""),
             server_name=str(body.get("server_name") or ""),
             tags=tags,
-            event_ts=parse_timestamp(body.get("timestamp")),
+            event_ts=resolve_event_ts(body.get("timestamp"), max_ts_skew_sec),
         )
 
     @property

@@ -13,10 +13,16 @@ PortGuard — 业务系统上报接收服务（FastAPI + 后台线程 uvicorn）
 - CORS 默认不加；需要时按设置页白名单显式开启
 - 每来源 IP 令牌桶限流 + 请求体大小上限
 - 服务端直连场景不需要 CORS，`allow_origins=["*"]` 纯属多余风险
+
+上报侧可信度（相对 v1.1.0 的收敛）：
+- `timestamp`：与本机时间偏差超过 `report_max_ts_skew_sec` 时按本机时间计
+  （它会驱动规则引擎的滑动窗口，可被伪造就等于规则失效）
+- `ip`：仅可信来源（回环地址，或本次请求通过 API Key 校验）可覆盖 TCP 对端地址
 """
 
 import contextlib
 import errno
+import ipaddress
 import socket
 import threading
 import time
@@ -42,7 +48,7 @@ from core.database import (
 from core.db_writer import get_writer
 from core.geo_locator import get_locator
 from core.logger import get_logger, log_file, route_uvicorn_logs
-from core.models import AccessRecord, GeoInfo, RiskResult
+from core.models import AccessRecord, GeoInfo, RiskResult, ThrottledWarning
 from core.pipeline import process_record, result_payload
 from core.ratelimit import TokenBucket
 from core.rule_engine import get_engine
@@ -180,11 +186,42 @@ def _wait_ready(timeout_ms: int = _READY_TIMEOUT_MS) -> bool:
     return True
 
 
-def _client_key(request: Request) -> str:
+def _peer_ip(request: Request) -> str:
+    """TCP 对端地址（取不到时返回空串，由调用方决定是否拒绝）"""
     try:
-        return (request.client.host if request.client else "") or "unknown"
+        return (request.client.host if request.client else "") or ""
     except Exception:
-        return "unknown"
+        return ""
+
+
+def _client_key(request: Request) -> str:
+    """限流用的来源键。拿不到地址时归到 unknown，避免空串被当成合法 IP"""
+    return _peer_ip(request) or "unknown"
+
+
+def _is_loopback_source(host: str) -> bool:
+    """
+    来源是否为「可信来源」的回环判定：127.0.0.0/8 与 ::1。
+
+    取不到来源、或来源不是 IP 字面量时按可信处理：那只可能发生在进程内直调
+    ASGI（Starlette TestClient 给的就是 "testclient"）或 unix socket 场景，
+    根本没有「远端主机」这一层，也就无所谓伪造来源。真实部署里 uvicorn 交给
+    应用的 `client.host` 一定是 IP 字面量，不会走到这个兜底分支。
+    """
+    s = (host or "").strip()
+    if not s:
+        return True
+    try:
+        return bool(ipaddress.ip_address(s).is_loopback)
+    except ValueError:
+        return True
+
+
+# 与时间戳纠偏共用同一套按秒去重，理由见 core.models 里的说明
+_warn_ip_spoof = ThrottledWarning(
+    log,
+    "来源不可信，忽略上报 body 里的 ip %s，按 TCP 对端地址 %s 计",
+)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -192,13 +229,28 @@ def _client_key(request: Request) -> str:
 # ═══════════════════════════════════════════════════════════
 
 
-def _process(body: Dict[str, Any], fallback_ip: str) -> Dict[str, Any]:
-    """处理一条上报，返回判定结果"""
-    raw_ip = body.get("ip") or fallback_ip or ""
+def _process(
+    body: Dict[str, Any],
+    fallback_ip: str,
+    trusted_source: bool = False,
+) -> Dict[str, Any]:
+    """
+    处理一条上报，返回判定结果。
+
+    `trusted_source` —— 来源是否可信（回环地址，或本次请求的 API Key 校验通过）。
+    只有可信来源才允许用 body 里的 `ip` 覆盖 TCP 对端地址，否则任何能访问到本服务
+    的进程都能指定任意 IP：把风险分打给别人、或借自动封禁之手封掉别人。
+    """
+    raw_ip = body.get("ip") or ""
+    override_allowed = trusted_source and cfg.get_bool("trust_reported_ip", True)
+    if raw_ip and not override_allowed:
+        _warn_ip_spoof.emit(raw_ip, fallback_ip or "(未知)")
+        raw_ip = ""
+    ip_raw = raw_ip or fallback_ip or ""
     try:
-        ip = normalize_ip(raw_ip)
+        ip = normalize_ip(ip_raw)
     except InvalidIP:
-        raise HTTPException(status_code=400, detail=f"无效的 IP 地址: {raw_ip!r}") from None
+        raise HTTPException(status_code=400, detail=f"无效的 IP 地址: {ip_raw!r}") from None
 
     rec = AccessRecord.from_payload(body, ip)
 
@@ -247,10 +299,20 @@ def _make_app(api_key: str) -> FastAPI:
         )
         log.info("已启用 CORS 白名单：%s", allow)
 
-    def _check_key(key: Optional[str]) -> None:
+    def _check_key(key: Optional[str]) -> bool:
+        """
+        校验 API Key，返回「本次请求是否通过了真实的 Key 校验」。
+
+        注意区分**放行**与**可信**：未配置 Key 时本服务照旧放行（内部网络部署下
+        这是既定策略），但返回值是 False —— 没有凭据就不算可信来源，body 里的
+        `ip` 不予采信。两者混为一谈的话，本机任意进程都能伪造来源 IP。
+        """
         current = (api_key or cfg.get("api_key", "") or "").strip()
-        if current and key != current:
+        if not current:
+            return False
+        if key != current:
             raise HTTPException(status_code=401, detail="API Key 无效")
+        return True
 
     def _check_rate(request: Request) -> None:
         bucket_rate = cfg.get_int("rate_limit_per_sec", 300)
@@ -304,12 +366,12 @@ def _make_app(api_key: str) -> FastAPI:
         body: Dict[str, Any], request: Request, x_api_key: Optional[str] = Header(default=None)
     ):
         _check_rate(request)
-        _check_key(x_api_key)
+        key_ok = _check_key(x_api_key)
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
-        fallback = request.client.host if request.client else ""
+        fallback = _peer_ip(request)
         try:
-            data = _process(body, fallback)
+            data = _process(body, fallback, trusted_source=key_ok or _is_loopback_source(fallback))
         except HTTPException:
             raise
         except Exception:
@@ -322,18 +384,19 @@ def _make_app(api_key: str) -> FastAPI:
         body: Dict[str, Any], request: Request, x_api_key: Optional[str] = Header(default=None)
     ):
         _check_rate(request)
-        _check_key(x_api_key)
+        key_ok = _check_key(x_api_key)
         items = body.get("items") if isinstance(body, dict) else None
         if not isinstance(items, list):
             raise HTTPException(status_code=400, detail="items 必须是数组")
         if len(items) > 1000:
             raise HTTPException(status_code=400, detail="单次最多上报 1000 条")
-        fallback = request.client.host if request.client else ""
+        fallback = _peer_ip(request)
+        trusted = key_ok or _is_loopback_source(fallback)
         results, errors = [], []
         for i, item in enumerate(items):
             try:
                 if isinstance(item, dict):
-                    results.append(_process(item, fallback))
+                    results.append(_process(item, fallback, trusted_source=trusted))
             except HTTPException as e:
                 errors.append({"index": i, "error": e.detail})
             except Exception as e:
