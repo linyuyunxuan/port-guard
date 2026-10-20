@@ -13,7 +13,7 @@
 （双击详情、右键菜单）。两者互不干扰。
 """
 
-from typing import Callable, List, Optional
+from typing import Callable, Iterable, List, Optional
 
 from gui.widgets import check_item
 from qtcompat import Qt, QTableWidget, QTableWidgetItem
@@ -65,6 +65,30 @@ class CheckColumn:
 
     def count(self) -> int:
         return len(self.checked_rows())
+
+    def set_checked_rows(self, indices: Iterable[int]) -> None:
+        """按行号集合**重放**勾选（不在集合里的行一律清掉）。
+
+        排序后用得上：表格行号变了，但记录的 id 没变。页面先记下被勾记录的
+        业务 key，重渲染后再按新行号回放，用户勾的还是原来那几条 —— 否则
+        「勾第 3 行 → 排序 → 批量封禁」封的是另一条记录的 IP。
+
+        整批设置完才发一次计数回调：逐行 `setCheckState` 会触发 N 次
+        `itemChanged`，几百行就是几百次无谓的 UI 回调。
+        """
+        wanted = set(indices)
+        self._loading = True
+        try:
+            for i in range(self.table.rowCount()):
+                it = self.table.item(i, self.col)
+                if it is not None:
+                    it.setCheckState(
+                        Qt.CheckState.Checked if i in wanted else Qt.CheckState.Unchecked
+                    )
+        finally:
+            self._loading = False
+        self._sync_header()
+        self._emit()
 
     def set_all(self, checked: bool) -> None:
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked

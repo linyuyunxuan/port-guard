@@ -17,7 +17,7 @@ import datetime
 from typing import Dict, List, Optional, Tuple
 
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
-from core.config import LEVEL_LABEL
+from core.config import LEVEL_LABEL, LEVEL_ORDER
 from core.database import (
     delete_risk_events,
     query_risk_events,
@@ -34,10 +34,12 @@ from gui.components import (
     row_menu_button,
 )
 from gui.table_select import CheckColumn
+from gui.table_sort import KIND_MS, KIND_NUM, KIND_TEXT, ColumnSpec, SortSpec, TableSort
 from gui.theme import C, small_button_style
 from gui.widgets import (
     EmptyState,
     RiskBadgeDelegate,
+    SortHeader,
     align_headers,
     badge_item,
     make_item,
@@ -100,6 +102,24 @@ COL_STATUS = 9
 COL_ACTION = 10
 
 COL_WIDTHS = [32, 110, 56, 130, 108, 52, 109, 46, 141, 68, 88]
+
+# 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
+# 勾选列（点了是全选）与操作列（无值）不给规则 —— 点这两列表头不排序。
+# 等级 / 状态按**语义序**排而不是按中文笔画：等级取 LEVEL_ORDER 的严重度，
+# 状态取 handled 的 0/1/2；按本地化文本排的话「严/高/中/低」是乱序。
+SORT_SPECS = {
+    COL_TIME: ColumnSpec(KIND_MS, lambda r: r.get("event_ts")),
+    COL_LEVEL: ColumnSpec(KIND_NUM, lambda r: LEVEL_ORDER.get(str(r.get("risk_level") or ""))),
+    COL_IP: ColumnSpec(KIND_TEXT, lambda r: r.get("ip")),
+    COL_GEO: ColumnSpec(KIND_TEXT, lambda r: r.get("geo").region_short if r.get("geo") else ""),
+    COL_PORT: ColumnSpec(KIND_NUM, lambda r: r.get("local_port")),
+    COL_PATH: ColumnSpec(KIND_TEXT, lambda r: r.get("path") or "/"),
+    COL_SCORE: ColumnSpec(KIND_NUM, lambda r: r.get("risk_score")),
+    COL_RULE: ColumnSpec(
+        KIND_TEXT, lambda r: "、".join(rule_label(x) for x in r.get("matched_rules", [])) or ""
+    ),
+    COL_STATUS: ColumnSpec(KIND_NUM, lambda r: r.get("handled", 0)),
+}
 
 #: 内容无界的列：允许省略号，但必须有 tooltip 兜底
 ELIDE_OK_COLS = (COL_PATH, COL_RULE)
@@ -172,7 +192,11 @@ class EventsPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # _rows 是当前**显示顺序**（点表头后会被重排），行号 == 数据下标；
+        # _rows_src 是后端返回的原序，只用于「取消排序」时还原
         self._rows: List[Dict] = []
+        self._rows_src: List[Dict] = []
+        self.sort = TableSort(SORT_SPECS)
         self._build()
         self.refresh()
 
@@ -349,6 +373,9 @@ class EventsPage(QWidget):
         for i, w in enumerate(COL_WIDTHS):
             hh.resizeSection(i, w)
         hh.setSectionResizeMode(COL_PATH, QHeaderView.ResizeMode.Stretch)
+
+        # 点表头排序（数据层重排 + 重渲染，见 gui/table_sort.py）
+        self.sort_header = SortHeader(self.table, self.sort, self._apply_sort)
         return self.table
 
     # ── 时间筛选 ──
@@ -425,8 +452,10 @@ class EventsPage(QWidget):
             since_ts=since,
             until_ts=until,
         )
-        self._rows = rows
-        self._render(rows)
+        # 排序状态跨刷新保留：用户在「按评分降序」下改筛选条件，期望的还是降序
+        self._rows_src = rows
+        self._rows = self.sort.apply(rows)
+        self._render(self._rows)
         self.lbl_info.setText(f"共 {len(rows)} 条")
         self.btn_export.setToolTip(f"导出当前筛选结果（{len(rows)} 条）")
 
@@ -522,6 +551,17 @@ class EventsPage(QWidget):
 
     def _checked_rows(self) -> List[Dict]:
         return [self._rows[i] for i in self.sel.checked_rows() if i < len(self._rows)]
+
+    def _apply_sort(self, _state: Optional[SortSpec]) -> None:
+        """按新排序重渲染：行号与数据下标始终一致，勾选按业务 key（事件 id）回放。
+
+        key 必须是 id 而不是行号 —— 排序后行号已经换人，按行号回放会把勾选
+        落到别的记录上，紧接着的「一键封禁」就封错了。
+        """
+        keys = {r.get("id") for r in self._checked_rows()}
+        self._rows = self.sort.apply(self._rows_src)
+        self._render(self._rows)
+        self.sel.set_checked_rows(i for i, r in enumerate(self._rows) if r.get("id") in keys)
 
     # ── 批量动作 ──
     def _batch_handled(self, handled: int) -> None:

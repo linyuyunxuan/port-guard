@@ -2,13 +2,13 @@
 
 import datetime
 import threading
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from app import ban_service
 from app.export_csv import BAN_CSV_HEADERS, SUG_CSV_HEADERS, iter_ban_rows, iter_sug_rows
 from core import firewall
 from core import settings as cfg
-from core.config import LEVEL_CRITICAL, LEVEL_HIGH
+from core.config import LEVEL_CRITICAL, LEVEL_HIGH, LEVEL_ORDER
 from core.database import (
     count_active_bans,
     delete_ban_records,
@@ -20,6 +20,7 @@ from core.database import (
 from core.logger import get_logger
 from core.models import (
     STATUS_ACTIVE,
+    STATUS_EXPIRED,
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_UNBANNED,
@@ -28,10 +29,20 @@ from core.models import (
 from core.validators import InvalidIP, normalize_ip
 from gui.components import PageHeader, export_table_csv, row_menu_button
 from gui.table_select import CheckColumn
+from gui.table_sort import (
+    KIND_DATETIME,
+    KIND_MS,
+    KIND_NUM,
+    KIND_TEXT,
+    ColumnSpec,
+    SortSpec,
+    TableSort,
+)
 from gui.theme import C, small_button_style
 from gui.widgets import (
     EmptyState,
     RiskBadgeDelegate,
+    SortHeader,
     WarnBanner,
     align_headers,
     badge_item,
@@ -90,6 +101,44 @@ COL_SUG_LEVEL = 2
 COL_SUG_REASON = 7
 COL_BAN_CHECK = 0
 COL_BAN_REASON = 3
+
+# 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
+# 两张表各一套：都不给勾选列（点了是全选）与操作列（无值）建规则。
+# 等级按严重度（LEVEL_ORDER）而不是中文笔画；封禁状态按「已封禁 → 处理中 →
+# 失败 → 已解封」的业务序，按本地化文本排会把它排成无意义的顺序。
+# 时长用 duration_sec：显示的是「2 小时」这种带单位的文本，比不了大小。
+SUG_SORT_SPECS = {
+    1: ColumnSpec(KIND_MS, lambda r: r.get("event_ts")),
+    COL_SUG_LEVEL: ColumnSpec(KIND_NUM, lambda r: LEVEL_ORDER.get(str(r.get("risk_level") or ""))),
+    3: ColumnSpec(KIND_TEXT, lambda r: r.get("ip")),
+    4: ColumnSpec(KIND_TEXT, lambda r: r.get("geo").region_short if r.get("geo") else ""),
+    5: ColumnSpec(KIND_NUM, lambda r: r.get("local_port")),
+    6: ColumnSpec(KIND_NUM, lambda r: r.get("risk_score")),
+    COL_SUG_REASON: ColumnSpec(KIND_TEXT, lambda r: r.get("summary")),
+}
+
+#: 「已封禁」最需要先看到，所以它的序号最小
+BAN_STATUS_ORDER = {
+    STATUS_ACTIVE: 0,
+    STATUS_PENDING: 1,
+    STATUS_FAILED: 2,
+    STATUS_EXPIRED: 3,
+    STATUS_UNBANNED: 4,
+}
+
+BAN_SORT_SPECS = {
+    1: ColumnSpec(KIND_NUM, lambda b: b.id),
+    2: ColumnSpec(KIND_TEXT, lambda b: b.ip),
+    COL_BAN_REASON: ColumnSpec(KIND_TEXT, lambda b: b.reason),
+    4: ColumnSpec(KIND_TEXT, lambda b: b.source_label),
+    5: ColumnSpec(KIND_NUM, lambda b: b.risk_score),
+    6: ColumnSpec(KIND_NUM, lambda b: BAN_STATUS_ORDER.get(b.status)),
+    # duration_sec 为 None / 0 都是「永久」（见 BanRecord.duration_label），
+    # 归到空值排最后 —— 永久是最长的时长，不该出现在升序的第一屏
+    7: ColumnSpec(KIND_NUM, lambda b: b.duration_sec or None),
+    8: ColumnSpec(KIND_MS, lambda b: b.expire_at),
+    9: ColumnSpec(KIND_DATETIME, lambda b: b.created_at),
+}
 
 
 class ManualBanDialog(QDialog):
@@ -176,8 +225,14 @@ class BansPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # *_rows 是当前**显示顺序**（点表头后会被重排），行号 == 数据下标；
+        # *_src 是后端返回的原序，只用于「取消排序」时还原
         self._sug_rows = []
+        self._sug_rows_src = []
         self._ban_rows = []
+        self._ban_rows_src = []
+        self.sug_sort = TableSort(SUG_SORT_SPECS)
+        self.ban_sort = TableSort(BAN_SORT_SPECS)
         self._build()
         self.batch_unban_done.connect(self._on_batch_unban_done)
         self.refresh()
@@ -287,6 +342,8 @@ class BansPage(QWidget):
         for i, width in enumerate(SUG_WIDTHS):
             sh.resizeSection(i, width)
         sh.setSectionResizeMode(COL_SUG_REASON, QHeaderView.ResizeMode.Stretch)
+        # 点表头排序（数据层重排 + 重渲染，见 gui/table_sort.py）
+        self.sug_sort_header = SortHeader(self.sug_table, self.sug_sort, self._apply_sug_sort)
         lay.addWidget(self.sug_table, 1)
         return self.sug_panel
 
@@ -387,6 +444,8 @@ class BansPage(QWidget):
         for i, width in enumerate(BAN_WIDTHS):
             h.resizeSection(i, width)
         h.setSectionResizeMode(COL_BAN_REASON, QHeaderView.ResizeMode.Stretch)
+        # 点表头排序（数据层重排 + 重渲染，见 gui/table_sort.py）
+        self.ban_sort_header = SortHeader(self.table, self.ban_sort, self._apply_ban_sort)
         lay.addWidget(self.table, 1)
         return box
 
@@ -410,7 +469,22 @@ class BansPage(QWidget):
             for r in query_risk_events(limit=200, handled=0)
             if r.get("risk_level") in (LEVEL_HIGH, LEVEL_CRITICAL)
         ]
-        self._sug_rows = rows
+        # 排序状态跨刷新保留：用户按评分降序看建议，封完一条回来还想是降序
+        self._sug_rows_src = rows
+        self._sug_rows = self.sug_sort.apply(rows)
+        self._render_suggestions()
+
+    def _apply_sug_sort(self, _state: Optional[SortSpec]) -> None:
+        """按新排序重渲染建议表：勾选按业务 key（事件 id）回放，不是按行号"""
+        keys = {r.get("id") for r in self._checked_suggestions()}
+        self._sug_rows = self.sug_sort.apply(self._sug_rows_src)
+        self._render_suggestions()
+        self.sug_sel.set_checked_rows(
+            i for i, r in enumerate(self._sug_rows) if r.get("id") in keys
+        )
+
+    def _render_suggestions(self) -> None:
+        rows = self._sug_rows
         self.sug_title.setText(f"待确认的封禁建议（{len(rows)}）")
 
         empty = not rows
@@ -679,7 +753,20 @@ class BansPage(QWidget):
 
     def _load_bans(self) -> None:
         rows = query_bans(status=self._status_filter(), keyword=self.search.text().strip())
-        self._ban_rows = rows
+        # 排序状态跨刷新保留：搜索词变了，用户期望的排序方向不变
+        self._ban_rows_src = rows
+        self._ban_rows = self.ban_sort.apply(rows)
+        self._render_bans()
+
+    def _apply_ban_sort(self, _state: Optional[SortSpec]) -> None:
+        """按新排序重渲染封禁记录表：勾选按业务 key（记录 id）回放，不是按行号"""
+        keys = {b.id for b in self._checked_bans()}
+        self._ban_rows = self.ban_sort.apply(self._ban_rows_src)
+        self._render_bans()
+        self.ban_sel.set_checked_rows(i for i, b in enumerate(self._ban_rows) if b.id in keys)
+
+    def _render_bans(self) -> None:
+        rows = self._ban_rows
         self.empty.setVisible(not rows)
         self.table.setVisible(bool(rows))
 

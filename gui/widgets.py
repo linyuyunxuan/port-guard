@@ -6,8 +6,9 @@
 - 自绘控件用 QPainter，不依赖 QSS 做不到的阴影/过渡。
 """
 
-from typing import ClassVar, Optional, Union
+from typing import Callable, ClassVar, Optional, Union
 
+from gui.table_sort import SortSpec, TableSort
 from gui.theme import LEVEL_BADGE_BG, LEVEL_COLORS, C
 from qtcompat import (
     Property,
@@ -30,6 +31,7 @@ from qtcompat import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     Qt,
+    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -558,3 +560,44 @@ def center() -> Qt.AlignmentFlag:
 
 def left() -> Qt.AlignmentFlag:
     return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
+
+class SortHeader:
+    """表头点击 → 数据层重排（画 ▲/▼，但**不开** Qt 原生排序）
+
+    排序键与三态切换本身在 `gui/table_sort.py`（纯 Python，可单测）；本类只做
+    三件必须碰 Qt 的事：接 `sectionClicked`、把新顺序交回页面重渲染、画排序指示。
+
+    刻意**不**调用 `table.setSortingEnabled(True)`：那会让表格行号脱离数据下标，
+    而页面的批量封禁是按行号取记录再拿 IP 的 —— 排序后勾第 3 行会封错 IP。
+    `setSortIndicator()` / `setSortIndicatorShown()` 只影响表头绘制，不触发排序。
+    """
+
+    def __init__(
+        self,
+        table: QTableWidget,
+        sorter: TableSort,
+        on_apply: Callable[[Optional[SortSpec]], None],
+    ) -> None:
+        self._table = table
+        self._sorter = sorter
+        self._on_apply = on_apply
+        table.horizontalHeader().sectionClicked.connect(self._on_clicked)
+
+    def _on_clicked(self, column: int) -> None:
+        # 不可排序的列（勾选列 / 操作列）点了没反应，别把当前排序清掉
+        if not self._sorter.handles(column):
+            return
+        state = self._sorter.click(column)
+        self._on_apply(state)
+        self._show_indicator(state)
+
+    def _show_indicator(self, state: Optional[SortSpec]) -> None:
+        header = self._table.horizontalHeader()
+        if state is None:
+            # 第三态：取消排序，指示箭头一并收掉
+            header.setSortIndicatorShown(False)
+            return
+        order = Qt.SortOrder.DescendingOrder if state.descending else Qt.SortOrder.AscendingOrder
+        header.setSortIndicator(state.column, order)
+        header.setSortIndicatorShown(True)

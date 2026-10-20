@@ -1,13 +1,14 @@
 """PortGuard — IP 归属地查询工具"""
 
-from typing import Any, Iterator, List
+from typing import Any, Iterator, List, Optional
 
 from core.geo_locator import get_locator
 from core.logger import get_logger
 from core.models import ms_to_str
 from gui.components import PageHeader, export_table_csv
+from gui.table_sort import KIND_NUM, KIND_TEXT, ColumnSpec, SortSpec, TableSort
 from gui.theme import C
-from gui.widgets import EmptyState
+from gui.widgets import EmptyState, SortHeader
 from qtcompat import (
     QAbstractItemView,
     QColor,
@@ -31,6 +32,21 @@ from qtcompat import (
 log = get_logger(__name__)
 
 HEADERS = ["IP", "是否命中", "国家", "省份", "城市", "ISP", "国家码", "是否中国"]
+
+# 列排序规则（数据层，见 gui/table_sort.py）。本表没有勾选列，8 列全部可排。
+# 「是否命中」按 0/1 排（命中在前），按「是 / 否」的文本比是笔画序、没有意义；
+# ISP 把库里的占位 "0" 归成空值，与表格里显示的 "-" 一致 —— 未命中的行
+# 在各列上都会落到最后，而不是霸占第一屏。
+SORT_SPECS = {
+    0: ColumnSpec(KIND_TEXT, lambda g: g.ip),
+    1: ColumnSpec(KIND_NUM, lambda g: 0 if g.found else 1),
+    2: ColumnSpec(KIND_TEXT, lambda g: g.country),
+    3: ColumnSpec(KIND_TEXT, lambda g: g.province),
+    4: ColumnSpec(KIND_TEXT, lambda g: g.city),
+    5: ColumnSpec(KIND_TEXT, lambda g: g.isp if g.isp != "0" else ""),
+    6: ColumnSpec(KIND_TEXT, lambda g: g.iso),
+    7: ColumnSpec(KIND_TEXT, lambda g: "中国" if g.is_china else "境外"),
+}
 
 
 def iter_geo_rows(results: List[Any]) -> Iterator[List[Any]]:
@@ -57,7 +73,11 @@ class IpLookupPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # _results 是当前**显示顺序**（点表头后会被重排）；
+        # _results_src 是查询返回的原序，只用于「取消排序」时还原
         self._results: List = []
+        self._results_src: List = []
+        self.sort = TableSort(SORT_SPECS)
         self._build()
 
     def _build(self) -> None:
@@ -151,6 +171,8 @@ class IpLookupPage(QWidget):
         for i, w in enumerate([140, 62, 104, 100, 92, 118, 60, 66]):
             h.resizeSection(i, w)
         h.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        # 点表头排序（数据层重排 + 重渲染，见 gui/table_sort.py）
+        self.sort_header = SortHeader(self.table, self.sort, self._apply_sort)
         rl.addWidget(self.table, 1)
 
         self.empty = EmptyState("尚未查询", "输入 IP 后点查询，结果会显示在这里")
@@ -247,9 +269,30 @@ class IpLookupPage(QWidget):
 
                 results.append(GeoInfo(ip=ip))
 
-        self._results = results
-        self._render(results)
+        self._results_src = results
+        self._results = self.sort.apply(results)
+        self._render(self._results)
         self._update_lib_info()
+
+    def _apply_sort(self, _state: Optional[SortSpec]) -> None:
+        """按新排序重渲染结果表。
+
+        本表没有勾选列，能对应用户意图的只有「当前高亮的那一行」，所以按 IP
+        （这里的业务 key）把高亮放回原来那条记录 —— 排序后眼睛要能接着看。
+        """
+        current = self._current_ip()
+        self._results = self.sort.apply(self._results_src)
+        self._render(self._results)
+        for i, g in enumerate(self._results):
+            if g.ip == current:
+                self.table.selectRow(i)
+                break
+
+    def _current_ip(self) -> Optional[str]:
+        row = self.table.currentRow()
+        if 0 <= row < len(self._results):
+            return str(self._results[row].ip)
+        return None
 
     def _toggle_empty(self) -> None:
         """结果区在「没查」和「查了」之间切换时，空态与表格互斥显示"""
@@ -298,6 +341,7 @@ class IpLookupPage(QWidget):
         self.batch_input.clear()
         self.table.setRowCount(0)
         self._results = []
+        self._results_src = []
         self._toggle_empty()
 
     def _export(self) -> None:
