@@ -65,9 +65,28 @@ def test_addr6_basic():
     assert _addr6(ipaddress.IPv6Address("::1").packed) == "::1"
 
 
-def test_addr6_scope_id():
+def test_addr6_strips_zone_index():
+    """
+    zone index（%接口号）必须被剥掉。
+
+    Python 3.8 的 `ipaddress` 不支持 scoped 地址（`fe80::1%12` 直接 ValueError），
+    而交付栈正是 3.8（Win7 SP1 / Server 2008 R2 上限）。保留 %14 会让链路上的
+    IP 解析全部失败，所以这里连「解析得过」一起断言，而不只是比对字符串。
+    """
     raw = ipaddress.IPv6Address("fe80::1").packed
-    assert _addr6(raw, 12) == "fe80::1%12"
+    got = _addr6(raw)
+    assert got == "fe80::1"
+    assert "%" not in got
+    ipaddress.ip_address(got)  # 3.8 上也不许抛
+
+
+def test_addr6_never_emits_zone_index_for_any_address():
+    """任意地址都不得带 %：这是一条「交付栈能解析」的硬底线"""
+    for text in ("::1", "fe80::1", "2001:db8::1", "::", "ff02::1"):
+        got = _addr6(ipaddress.IPv6Address(text).packed)
+        assert got == text
+        assert "%" not in got
+        ipaddress.ip_address(got)
 
 
 # --------------------------------------------------------------------------- #
@@ -169,7 +188,9 @@ def test_tcp_table_reads_real_data():
     for c in rows:
         assert 0 <= c.local_port <= 65535, f"本地端口越界：{c.local_port}（字节序可疑）"
         assert 0 <= c.remote_port <= 65535, f"远端端口越界：{c.remote_port}（字节序可疑）"
-        # 地址必须能被解析回合法 IP，否则说明地址字节序处理错了
+        # 地址必须能被解析回合法 IP，否则说明地址字节序处理错了。
+        # 交付栈是 py3.8：ipaddress 不认 scoped 地址，所以也顺带守住「不带 %接口号」
+        assert "%" not in c.local_ip and "%" not in c.remote_ip
         ipaddress.ip_address(c.local_ip)
         ipaddress.ip_address(c.remote_ip)
     assert any(c.state == STATE_LISTEN for c in rows), "本机应当至少有一个 LISTEN 端口"

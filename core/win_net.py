@@ -209,11 +209,22 @@ def _addr4(dw: int) -> str:
     return str(ipaddress.IPv4Address(struct.pack("<I", dw & 0xFFFFFFFF)))
 
 
-def _addr6(raw, scope_id: int = 0) -> str:
-    addr = ipaddress.IPv6Address(bytes(raw))
-    if scope_id:
-        return f"{addr}%{scope_id}"
-    return str(addr)
+def _addr6(raw) -> str:
+    """
+    16 字节地址 → IPv6 文本。**不带 zone index（%接口号）**。
+
+    MIB_TCP6ROW 里除了地址还有 dwScopeId，过去会拼成 `fe80::1%14`（RFC 4007 的
+    scoped 地址写法）。这个写法在交付栈上会直接炸：Python 3.8 的 `ipaddress`
+    不支持 scoped 地址（3.9 才支持），`ipaddress.ip_address("fe80::1%14")` 抛
+    ValueError —— 而 Windows 7 SP1 / Server 2008 R2 只能跑 3.8，正好是我们要
+    覆盖的下限系统。链路上凡是解析 IP 的地方（`core.validators.normalize_ip`、
+    `core.geo_locator.lookup`）都会因此失败。
+
+    剥掉它不损失可用信息：只有链路本地地址（fe80::/10）才带 scope_id，而它
+    本来就被 `is_external_ip` 判为「非外部地址」过滤掉了；数据模型里也没有
+    字段能承载「哪个网卡」，留着只会让下游解析失败。
+    """
+    return str(ipaddress.IPv6Address(bytes(raw)))
 
 
 def _state_name(v: int) -> str:
@@ -291,9 +302,9 @@ def _rows_v6() -> List[TcpConn]:
         out.append(
             TcpConn(
                 proto="tcp6",
-                local_ip=_addr6(row.ucLocalAddr, row.dwLocalScopeId),
+                local_ip=_addr6(row.ucLocalAddr),
                 local_port=_port(row.dwLocalPort),
-                remote_ip=_addr6(row.ucRemoteAddr, row.dwRemoteScopeId),
+                remote_ip=_addr6(row.ucRemoteAddr),
                 remote_port=_port(row.dwRemotePort),
                 state=row.dwState,
                 pid=row.dwOwningPid,
@@ -349,6 +360,8 @@ def is_external_ip(ip: str) -> bool:
     """
     if not ip:
         return False
+    # 剥掉 zone index（%接口号）：连接表侧已在 _addr6 剥过，这里是为防火墙日志等
+    # 其它来源兜底 —— 它们也可能给出 scoped 的链路本地地址
     bare = ip.split("%", 1)[0]
     try:
         addr = ipaddress.ip_address(bare)

@@ -12,7 +12,7 @@
 import pytest
 
 from core import database
-from core.models import BanRecord, STATUS_ACTIVE, STATUS_UNBANNED
+from core.models import STATUS_ACTIVE, STATUS_UNBANNED, BanRecord
 
 
 @pytest.fixture(autouse=True)
