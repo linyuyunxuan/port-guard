@@ -93,6 +93,9 @@ ACTION_RULES_SAVE = "rules.save"  # 保存规则
 ACTION_LIST_SAVE = "list.save"  # 黑白名单变更
 ACTION_XDB_SYNC = "xdb.sync"  # 离线库同步
 ACTION_XDB_ROLLBACK = "xdb.rollback"  # 离线库回滚
+ACTION_DB_MAINTENANCE = "db.maintenance"  # 数据库整理 / 重建索引
+ACTION_DB_BACKUP = "db.backup"  # 数据库备份
+ACTION_DB_RESTORE = "db.restore"  # 数据库恢复（整份覆盖，不可撤销）
 
 #: 界面下拉框用：action → 中文名。顺序即下拉顺序（按业务分组）。
 ACTION_LABELS: Dict[str, str] = {
@@ -113,6 +116,9 @@ ACTION_LABELS: Dict[str, str] = {
     ACTION_LIST_SAVE: "黑白名单变更",
     ACTION_XDB_SYNC: "离线库同步",
     ACTION_XDB_ROLLBACK: "离线库回滚",
+    ACTION_DB_MAINTENANCE: "数据库维护",
+    ACTION_DB_BACKUP: "数据库备份",
+    ACTION_DB_RESTORE: "数据库恢复",
 }
 
 #: 稳定的 action 枚举顺序（下拉框 / 测试都按这个来，别用 dict 顺序）

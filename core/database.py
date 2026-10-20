@@ -13,6 +13,7 @@ PortGuard — SQLite 数据层
 
 import datetime
 import json
+import os
 import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Tuple
@@ -167,6 +168,20 @@ def init_db() -> None:
         finally:
             conn.close()
         _initialized = True
+
+
+def reset_init_state() -> None:
+    """清掉进程内的「已初始化」标记，让下一次 `init_db()` 重新建表 + 跑迁移。
+
+    唯一的使用场景是**整份替换库文件之后**（设置页「数据库维护 → 恢复备份」）：
+    文件已经换成另一份、多半还是老版本 schema，但进程内的 `_initialized` 仍是
+    True，`init_db()` 会立刻返回，迁移永远不跑 —— 恢复出来的老库缺列，之后每条
+    查询都炸在 `no such column` 上。`tests/conftest.py` 的 `fresh_db` 出于同样
+    的理由直接改 `_initialized`，这里给它一个公开入口，免得再多一处偷改私有量。
+    """
+    global _initialized
+    with _init_lock:
+        _initialized = False
 
 
 def _fix_insecure_legacy_settings(conn: sqlite3.Connection) -> None:
@@ -571,12 +586,68 @@ def delete_old_audit(days: int) -> int:
 
 
 def vacuum() -> None:
-    """整理数据库文件（长期运行 + 大量删除后建议偶尔执行）"""
+    """整理数据库文件并回收磁盘（长期运行 + 大量删除后建议偶尔执行）。
+
+    VACUUM 会把整库重写一遍，**不能在事务里执行**（否则报
+    `cannot VACUUM from within a transaction`），所以这里用独立短连接、
+    既不 BEGIN 也不 commit。
+
+    收尾补一次 `wal_checkpoint(TRUNCATE)`：VACUUM 之后 `-wal` 里还留着旧的
+    页帧，不截断的话「整理完磁盘没变小」的观感就来自这个文件（它不会自己缩）。
+    """
     conn = _connect()
     try:
         conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         conn.close()
+
+
+def reindex() -> None:
+    """重建全部索引。
+
+    长期运行 + 频繁删改之后索引 B 树会有空洞和碎片，查询退化成更多页读取；
+    `REINDEX` 重建后体积与耗时回到初始水平。比 VACUUM 快得多（只重写索引，
+    不动数据页），但仍是全表量级的写操作 —— 界面侧同样要放到后台线程。
+    """
+    conn = _connect()
+    try:
+        conn.execute("REINDEX")
+    finally:
+        conn.close()
+
+
+def analyze() -> None:
+    """收集查询计划统计（写入 `sqlite_stat1`），让优化器挑到更合适的索引。
+
+    可选动作，界面没有单独入口：本工具的数据量级（几万~几百万行）下，SQLite
+    默认的「无统计信息」启发式已经够用，跑一次 ANALYZE 要把每个索引整份扫一遍，
+    收益与耗时不成比例。保留给脚本 / 排障时手动调用。
+    """
+    conn = _connect()
+    try:
+        conn.execute("ANALYZE")
+    finally:
+        conn.close()
+
+
+def db_size() -> Dict[str, int]:
+    """数据库占用的磁盘字节数：主库 + `-wal` + `-shm` + 合计。
+
+    为什么三个一起算：WAL 模式下刚写完的大批数据还在 `-wal` 里，只看主库会
+    明显偏小（清理完尤其明显）；`-shm` 是共享内存索引，通常几十 KB，但它的
+    有无会让「整理前 / 整理后」的对比凭空抖动。文件不存在按 0 计 —— 首次启动
+    时两个 sidecar 还没建出来。
+    """
+    base = db_path()
+    out: Dict[str, int] = {"main": 0, "wal": 0, "shm": 0, "total": 0}
+    for key, suffix in (("main", ""), ("wal", "-wal"), ("shm", "-shm")):
+        try:
+            out[key] = os.path.getsize(base + suffix)
+        except OSError:
+            out[key] = 0
+        out["total"] += out[key]
+    return out
 
 
 def clear_all_logs() -> None:

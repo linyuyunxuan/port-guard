@@ -14,6 +14,7 @@
 import contextlib
 import datetime
 import secrets
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from app import audit, maintenance
@@ -37,9 +38,10 @@ from core.config import (
     LEVEL_MEDIUM,
     WILDCARD_HOST,
     XDB_UPSTREAM,
+    db_path,
     user_data_dir,
 )
-from core.database import clear_all_logs, count_audit, query_audit
+from core.database import clear_all_logs, count_audit, db_size, query_audit
 from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.components import PageHeader
@@ -81,6 +83,20 @@ LABEL_W = 128
 #: 备份表：行高与列宽（库 / 备份文件 / 大小 / 备份时间）。文件列是唯一的拉伸列
 BACKUP_ROW_H = 24
 BACKUP_WIDTHS = [68, 300, 80, 148]
+
+#: 数据库备份表：库只有一份，不需要「库」列
+DB_BACKUP_WIDTHS = [320, 88, 148]
+
+#: 后台任务进行中的提示语（VACUUM 可能几十秒，必须让用户知道程序没死）
+DB_TASK_TEXT = {
+    "vacuum": "正在整理数据库（VACUUM）…会把整库重写一遍，库越大越久，请勿关闭程序",
+    "reindex": "正在重建全部索引…",
+    "backup": "正在备份数据库…",
+    "restore": "正在恢复数据库…写入器已暂停，期间不会记录新的访问",
+}
+
+#: 任务名（拼「✗ xx 失败」用）
+DB_TASK_NAME = {"vacuum": "整理数据库", "reindex": "重建索引", "backup": "备份", "restore": "恢复"}
 
 # ── 操作审计表 ──
 AUDIT_HEADERS = ["时间", "操作者", "操作", "对象", "摘要", "结果"]
@@ -188,21 +204,28 @@ class SettingsPage(QWidget):
     watch_changed = Signal()  # 本机端口观察的开关/参数发生变化
     # Webhook 测试的结果由后台线程回调，用它跨线程回到主线程再改控件
     webhook_result = Signal(object)
+    # 数据库维护（VACUUM / 重建索引 / 备份 / 恢复）在后台线程跑，结果同样经信号回主线程
+    db_task_done = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._loading = True  # load() 期间不点亮「未保存」
         self._report_url = ""
         self._bak_rows: List[Dict] = []  # 备份表当前行 -> 备份条目（与表格行号同序）
+        self._db_rows: List[Dict] = []  # 数据库备份表当前行 -> 备份条目
+        self._db_busy = False
+        self._db_cursor = False  # 是否压了 Busy 光标（只有压过才去 restore）
         self._dirty = False
         self._hint_timer = QTimer(self)
         self._hint_timer.setSingleShot(True)
         self._hint_timer.timeout.connect(self._reset_hint)
         self.webhook_result.connect(self._on_webhook_result)
+        self.db_task_done.connect(self._on_db_task_done)
         self._build()
         self.load()
         self._wire_dirty()
         self._loading = False
+        self.refresh_db_state()
 
     # ═══════════════════════════════════════════════
     #  界面
@@ -639,6 +662,7 @@ class SettingsPage(QWidget):
     # ── Tab 3：数据与离线库 ──
     def _tab_data(self) -> QWidget:
         page, lay = self._scroll_page()
+        self.tab_data = page
 
         xdb = _Panel("离线库在线同步（IP 归属地）")
 
@@ -846,10 +870,118 @@ class SettingsPage(QWidget):
         b_logs.setObjectName("btn_outline")
         b_logs.clicked.connect(self.logs_open_requested.emit)
         data.add("", (b_clean, b_clear, b_logs))
+
+        self._add_db_section(data)
         lay.addWidget(data)
 
         lay.addStretch(1)
         return page
+
+    def _add_db_section(self, panel: "_Panel") -> None:
+        """「数据管理」里追加数据库文件区：大小 / 整理 / 重建索引 / 备份与恢复。
+
+        与上面的保留期是两件事：那边管「留多久」，这边管「文件本身」——清理只会
+        把行标成可复用，磁盘不会因此变小，真正归还空间得靠 VACUUM。
+
+        耗时操作（VACUUM / 恢复）一律丢后台线程，结果经 `db_task_done` 回到主线程，
+        worker 绝不碰控件 —— 与离线库同步、Webhook 测试同一个套路。
+        """
+        div = QFrame()
+        div.setObjectName("panel_divider")
+        div.setFixedHeight(1)
+        panel.add_block(div)
+
+        title = QLabel("数据库文件（整理 · 备份 · 恢复）")
+        title.setObjectName("panel_title")
+        panel.add_block(title)
+
+        self.lbl_dbsize = QLabel("读取中…")
+        self.lbl_dbsize.setObjectName("mono_hint")
+        self.lbl_dbsize.setWordWrap(True)
+        self.lbl_dbsize.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.lbl_dbpath = QLabel(db_path())
+        self.lbl_dbpath.setObjectName("mono_hint")
+        self.lbl_dbpath.setWordWrap(True)
+        self.lbl_dbpath.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.btn_db_vacuum = QPushButton("整理数据库")
+        self.btn_db_vacuum.setObjectName("btn_outline")
+        self.btn_db_vacuum.setToolTip(
+            "VACUUM：把删掉的空间真正还给磁盘。\n"
+            "会把整库重写一遍 —— 几百 MB 的库要几十秒，期间写入短暂排队；\n"
+            "需要约等于数据库大小的空闲磁盘，空间不够会直接失败（数据不受影响）。"
+        )
+        self.btn_db_vacuum.clicked.connect(lambda: self._db_run("vacuum", maintenance.vacuum_db))
+
+        self.btn_db_reindex = QPushButton("重建索引")
+        self.btn_db_reindex.setObjectName("btn_outline")
+        self.btn_db_reindex.setToolTip(
+            "REINDEX：重建全部索引。\n"
+            "长期增删之后索引 B 树会有空洞，重建后查询更快、体积更小；比整理快得多。"
+        )
+        self.btn_db_reindex.clicked.connect(lambda: self._db_run("reindex", maintenance.reindex_db))
+
+        self.btn_db_backup = QPushButton("立即备份")
+        self.btn_db_backup.setObjectName("btn_outline")
+        self.btn_db_backup.setToolTip(
+            "用 SQLite 在线备份打一份一致性快照。\n"
+            "不需要停服务、不影响写入；最多保留最近 "
+            f"{maintenance.KEEP_DB_BACKUPS} 份，更早的自动删除。"
+        )
+        self.btn_db_backup.clicked.connect(self._db_backup_now)
+
+        self._db_buttons = [
+            self.btn_db_vacuum,
+            self.btn_db_reindex,
+            self.btn_db_backup,
+        ]
+
+        panel.add("数据库大小", self.lbl_dbsize)
+        panel.add("数据库文件", self.lbl_dbpath)
+        panel.add("", (self.btn_db_vacuum, self.btn_db_reindex, self.btn_db_backup))
+
+        self.lbl_db_state = QLabel("")
+        self.lbl_db_state.setObjectName("form_hint")
+        self.lbl_db_state.setWordWrap(True)
+        self.lbl_db_state.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        panel.add_block(self.lbl_db_state, span=False)
+
+        # 备份列表：与离线库那张表同样的取舍（QTableWidget 而不是下拉框，
+        # 否则「选中哪份备份」会被 _wire_dirty 记成「未保存的设置」）
+        self.tbl_db_bak = QTableWidget(0, 3)
+        self.tbl_db_bak.setHorizontalHeaderLabels(["备份文件", "大小", "备份时间"])
+        self.tbl_db_bak.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_db_bak.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_db_bak.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tbl_db_bak.setAlternatingRowColors(True)
+        self.tbl_db_bak.setShowGrid(False)
+        self.tbl_db_bak.setWordWrap(False)
+        self.tbl_db_bak.setTabKeyNavigation(False)
+        self.tbl_db_bak.verticalHeader().setVisible(False)
+        self.tbl_db_bak.verticalHeader().setDefaultSectionSize(BACKUP_ROW_H)
+        dhh = self.tbl_db_bak.horizontalHeader()
+        for i, w in enumerate(DB_BACKUP_WIDTHS):
+            dhh.resizeSection(i, w)
+        dhh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        panel.add_block(self.tbl_db_bak, span=False)
+
+        self.lbl_db_bak = QLabel("")
+        self.lbl_db_bak.setObjectName("form_hint")
+        self.lbl_db_bak.setWordWrap(True)
+        self.lbl_db_bak.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        panel.add_block(self.lbl_db_bak, span=False)
+
+        self.btn_db_restore = QPushButton("恢复到选定备份")
+        self.btn_db_restore.setObjectName("btn_danger")
+        self.btn_db_restore.setToolTip(
+            "用选中的备份整份覆盖当前数据库 —— 备份之后产生的数据会全部消失。\n"
+            "恢复前会自动再备份一次当前库，所以反悔了还能再恢复回来；\n"
+            "恢复期间数据库短暂不可用，完成后写入器自动重启。"
+        )
+        self.btn_db_restore.clicked.connect(self._db_restore)
+        self._db_buttons.append(self.btn_db_restore)
+        panel.add("", self.btn_db_restore)
 
     # ── Tab 4：操作审计 ──
     def _tab_audit(self) -> QWidget:
@@ -968,6 +1100,10 @@ class SettingsPage(QWidget):
         if self.tabs.widget(idx) is self.tab_audit:
             self._refresh_audit_actors()
             self._refresh_audit()
+        elif self.tabs.widget(idx) is self.tab_data:
+            # 数据库大小会随着运行一直变，切过来时重读一次（不常驻轮询：
+            # 每次刷新都要 stat 三个文件 + 列一遍备份目录，白烧 IO）
+            self.refresh_db_state()
 
     def _on_audit_filter(self, *_args: Any) -> None:
         # 条件变了必须回第 1 页：在第 7 页改过滤条件，原 offset 会指向空页
@@ -1733,6 +1869,197 @@ class SettingsPage(QWidget):
             fn = getattr(page, "_update_lib_info", None)
             if callable(fn):
                 fn()
+
+    # ═══════════════════════════════════════════════
+    #  数据库维护（整理 / 重建索引 / 备份 / 恢复）
+    # ═══════════════════════════════════════════════
+
+    def refresh_db_state(self) -> None:
+        """刷新「数据库大小」与备份列表（构造、切到本 tab、任务结束后各调一次）"""
+        try:
+            sz = db_size()
+            self.lbl_dbsize.setText(
+                f"总计 {maintenance.format_size(sz['total'])}"
+                f"（主库 {maintenance.format_size(sz['main'])}"
+                f" · WAL {maintenance.format_size(sz['wal'])}"
+                f" · 共享索引 {maintenance.format_size(sz['shm'])}）"
+            )
+        except Exception:
+            log.exception("读取数据库大小失败")
+            self.lbl_dbsize.setText("读取失败")
+        self._refresh_db_backups()
+
+    def _refresh_db_backups(self) -> None:
+        try:
+            rows = maintenance.list_db_backups()
+        except Exception:
+            log.exception("读取数据库备份失败")
+            rows = []
+        self._db_rows = rows
+
+        self.tbl_db_bak.setRowCount(0)
+        self.tbl_db_bak.setRowCount(len(rows))
+        for i, item in enumerate(rows):
+            self.tbl_db_bak.setItem(i, 0, make_item(item.get("file", ""), mono=True))
+            self.tbl_db_bak.setItem(
+                i,
+                1,
+                make_item(
+                    maintenance.format_size(int(item.get("size", 0) or 0)),
+                    align=Qt.AlignmentFlag.AlignCenter,
+                    mono=True,
+                ),
+            )
+            self.tbl_db_bak.setItem(i, 2, make_item(ms_to_str(item.get("mtime")), mono=True))
+
+        has = bool(rows)
+        self.tbl_db_bak.setVisible(has)
+        self.tbl_db_bak.setFixedHeight(min(28 + BACKUP_ROW_H * len(rows), 176))
+        self.btn_db_restore.setEnabled(has and not self._db_busy)
+        if has:
+            self.tbl_db_bak.selectRow(0)
+            text = (
+                f"共 {len(rows)} 份，最多保留 {maintenance.KEEP_DB_BACKUPS} 份"
+                "（更早的在下次备份时自动删除）。"
+            )
+        else:
+            text = "尚无数据库备份。先点「立即备份」打一份快照，之后才能恢复。"
+        self.lbl_db_bak.setText(text)
+        self.lbl_db_bak.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+
+    def _db_run(self, kind: str, fn) -> None:
+        """把耗时任务丢到后台线程，同一时刻只允许一个。
+
+        VACUUM 与「恢复」同时跑会互相踩（一个要排他锁、一个在换文件），
+        所以用 `_db_busy` 做闸门：任务期间按钮全部禁用，连点也不会重复执行。
+
+        worker 里只调不碰 Qt 的 `app.maintenance` 函数，结果经 `db_task_done`
+        信号排队回主线程 —— 后台线程永远不碰控件。
+        """
+        if self._db_busy:
+            return
+        self._db_busy = True
+        self._set_db_busy(True, DB_TASK_TEXT.get(kind, "处理中…"))
+
+        def work() -> None:
+            try:
+                ok, msg = fn()
+            except Exception as e:  # 兜底：绝不让异常死在后台线程里
+                log.exception("数据库维护任务异常：%s", kind)
+                ok, msg = False, str(e)
+            self.db_task_done.emit((kind, ok, msg))
+
+        threading.Thread(target=work, daemon=True, name=f"db-{kind}").start()
+
+    def _set_db_busy(self, busy: bool, text: str = "") -> None:
+        for b in self._db_buttons:
+            b.setEnabled(not busy)
+        if busy:
+            self.lbl_db_state.setText(text)
+            self.lbl_db_state.setStyleSheet(f"color:{C.warning};font-size:12.5px;")
+            QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+            self._db_cursor = True
+        else:
+            # 只还原自己压上去的那一个：无条件 restore 会把别处压的光标也弹掉
+            if self._db_cursor:
+                with contextlib.suppress(Exception):
+                    QApplication.restoreOverrideCursor()
+                self._db_cursor = False
+            self.btn_db_restore.setEnabled(bool(self._db_rows))
+
+    def _on_db_task_done(self, res: Any) -> None:
+        """后台任务结束（Qt 主线程）：恢复按钮、刷新状态、留痕"""
+        try:
+            kind, ok, msg = res
+        except Exception:
+            log.exception("数据库维护结果格式异常：%r", res)
+            self._db_busy = False
+            self._set_db_busy(False)
+            return
+
+        self._db_busy = False
+        self._set_db_busy(False)
+        self.refresh_db_state()
+
+        if ok:
+            text = f"✓ 已备份：{msg}" if kind == "backup" else f"✓ {msg}"
+        else:
+            text = f"✗ {DB_TASK_NAME.get(kind, kind)}失败：{msg}"
+        self.lbl_db_state.setText(text)
+        self.lbl_db_state.setStyleSheet(f"color:{C.success if ok else C.danger};font-size:12.5px;")
+
+        self._audit_db_task(kind, ok, msg)
+
+        # 恢复换掉的是整份库，设置也可能跟着换（备份来自另一时刻的库）：
+        # 表单按新库重读一遍，且不能因此点亮「未保存」
+        if kind == "restore" and ok:
+            self._loading = True
+            try:
+                self.load()
+                self.refresh_server_state()
+            finally:
+                self._loading = False
+            self._set_dirty(False)
+
+    def _audit_db_task(self, kind: str, ok: bool, msg: str) -> None:
+        """整理 / 备份 / 恢复都要留痕：事后能回答「库是哪天被换掉的」。"""
+        result = audit.RESULT_OK if ok else audit.RESULT_FAIL
+        if kind == "restore":
+            audit.record(
+                audit.ACTION_DB_RESTORE,
+                target_type="database",
+                target_id=db_path(),
+                summary=("恢复数据库：" if ok else "恢复数据库失败：") + msg,
+                result=result,
+                detail=msg,
+            )
+        elif kind == "backup":
+            audit.record(
+                audit.ACTION_DB_BACKUP,
+                target_type="database",
+                target_id=msg if ok else "",
+                summary="备份数据库" + ("成功" if ok else f"失败：{msg}"),
+                result=result,
+            )
+        else:
+            audit.record(
+                audit.ACTION_DB_MAINTENANCE,
+                target_type="database",
+                summary=("整理数据库（VACUUM）：" if kind == "vacuum" else "重建索引：") + msg,
+                result=result,
+                detail=msg,
+            )
+
+    def _db_backup_now(self) -> None:
+        self._db_run("backup", maintenance.backup_db)
+
+    def _db_restore(self) -> None:
+        row = self.tbl_db_bak.currentRow()
+        if not 0 <= row < len(self._db_rows):
+            QMessageBox.information(self, "无法恢复", "请先在上方列表里选中一份备份。")
+            return
+        item = self._db_rows[row]
+        file_name = str(item.get("file", ""))
+        size = maintenance.format_size(int(item.get("size", 0) or 0))
+        when = ms_to_str(item.get("mtime"))
+
+        # 默认按钮必须是「否」：这是全项目唯一一个「点错就永久丢数据」的按钮
+        if (
+            QMessageBox.question(
+                self,
+                "恢复数据库",
+                f"将用这份备份整份覆盖当前数据库：\n{file_name}\n"
+                f"大小 {size} · 备份于 {when}\n\n"
+                "· 备份之后产生的数据会全部消失（访问记录、风险事件、封禁账本、操作审计）；\n"
+                "· 恢复前会自动再备份一次当前库，所以反悔了还能再恢复回来；\n"
+                "· 恢复期间数据库短暂不可用，完成后写入器自动重启。\n\n确认恢复？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self._db_run("restore", lambda: maintenance.restore_db(str(item.get("path", ""))))
 
     # ═══════════════════════════════════════════════
     #  告警测试 / 数据操作

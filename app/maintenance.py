@@ -8,17 +8,22 @@ PortGuard — 数据与文件维护（不依赖 Qt）
 - 日志文件按保留天数清理（按日期滚动后的归档 + 历史遗留归档）
 - 离线库备份保留最近 N 份，其余删除（否则每次同步都留一份 11~37MB 的副本）
 - 下载临时目录清扫（异常中断可能留下 .part）
+- 数据库维护：VACUUM（回收磁盘）/ REINDEX（重建索引）/ 一致性备份 / 整份恢复
 
 ⚠️ 大批量 DELETE 会让 WAL 文件涨到与被删数据同量级，且 SQLite **不会自动把
 这部分空间还给文件系统**（只是留给后续写入复用）。想要真正回收磁盘，需要
-在清理后执行一次 `VACUUM`（设置页「数据库维护」里的入口，P2-7）。
+在清理后执行一次 `VACUUM`（`vacuum_db()`，设置页「数据库维护」里的入口）。
 """
 
+import contextlib
 import os
+import shutil
+import sqlite3
 import time
-from typing import Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app import audit
+from core import database, db_writer
 from core import settings as cfg
 from core.config import (
     DEFAULT_AUDIT_RETENTION_DAYS,
@@ -26,6 +31,7 @@ from core.config import (
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_RISK_RETENTION_DAYS,
     backup_dir,
+    db_path,
     download_dir,
 )
 from core.database import (
@@ -40,6 +46,10 @@ log = get_logger(__name__)
 
 # 每个库保留的备份份数
 KEEP_BACKUPS_PER_FILE = 3
+
+#: 数据库备份保留份数。与离线库同一取法：留 3 份足够覆盖「刚同步 / 刚清理 /
+#: 上一次恢复」三个时间点，再多就是几百 MB × N 的净浪费。
+KEEP_DB_BACKUPS = 3
 
 
 def cleanup_logs(days: int = 0) -> int:
@@ -212,6 +222,286 @@ def cleanup_downloads() -> int:
     except Exception:
         log.exception("清理下载临时目录失败")
     return removed
+
+
+# ═══════════════════════════════════════════════════════════
+#  数据库维护（VACUUM / 重建索引 / 备份与恢复）
+# ═══════════════════════════════════════════════════════════
+
+
+def format_size(n: int) -> str:
+    """字节数 → 人读的大小。数据库动辄几百 MB，用 KB 表示没人看得懂。"""
+    v = float(n or 0)
+    if v < 1024:
+        return f"{v:.0f} B"
+    for unit in ("KB", "MB", "GB"):
+        v /= 1024.0
+        if v < 1024 or unit == "GB":
+            return f"{v:.1f} {unit}"
+    return f"{v:.1f} GB"
+
+
+def _db_base_name() -> str:
+    """备份文件名的主体（`port_guard`）。
+
+    沿用离线库的 `{主体}.{时间戳}.bak` 命名：`cleanup_backups()` 用
+    `rsplit(".", 2)[0]` 分组，这两种命名落在同一套规则里，各自的旧备份各删各的。
+    """
+    return os.path.splitext(os.path.basename(db_path()))[0]
+
+
+def _is_db_backup(file_name: str) -> bool:
+    return file_name.startswith(_db_base_name() + ".") and file_name.endswith(".bak")
+
+
+def list_db_backups() -> List[Dict[str, Any]]:
+    """列出可恢复的数据库备份，新的在前。
+
+    只认 `port_guard.<时间戳>.bak` 这种命名 —— 备份目录里还躺着离线库的
+    `ip2region_v4.<时间戳>.bak`，用 `*.bak` 一把捞会把它们列进「数据库备份」，
+    用户点恢复就直接把 11MB 的归属地库盖到数据库上。
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        d = backup_dir()
+        for f in os.listdir(d):
+            if not _is_db_backup(f):
+                continue
+            p = os.path.join(d, f)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out.append(
+                {
+                    "file": f,
+                    "path": p,
+                    "size": st.st_size,
+                    "mtime": int(st.st_mtime * 1000),
+                }
+            )
+    except Exception:
+        log.exception("读取数据库备份失败")
+        return []
+    out.sort(key=lambda x: (x["mtime"], x["file"]), reverse=True)
+    return out
+
+
+def cleanup_db_backups(keep: int = KEEP_DB_BACKUPS) -> int:
+    """只保留最近 keep 份数据库备份，返回删除个数。
+
+    时间戳单调递增（同秒撞名会顺延，见 `backup_db`），所以按文件名倒序即
+    「新的在前」，不必依赖 mtime —— 备份文件被复制 / 解压过之后 mtime 会乱。
+    """
+    removed = 0
+    try:
+        d = backup_dir()
+        files = [f for f in os.listdir(d) if _is_db_backup(f)]
+        files.sort(reverse=True)
+        for stale in files[max(1, keep) :]:
+            try:
+                os.remove(os.path.join(d, stale))
+                removed += 1
+            except OSError:
+                log.exception("删除旧数据库备份失败：%s", stale)
+        if removed:
+            log.info("已清理 %d 个过期数据库备份", removed)
+    except Exception:
+        log.exception("清理数据库备份失败")
+    return removed
+
+
+def backup_db() -> Tuple[bool, str]:
+    """打一份**一致性快照**，成功返回 (True, 备份文件路径)，失败 (False, 原因)。
+
+    ⚠️ 绝不能用 `shutil.copy2` 直接拷 `.db`：库跑在 WAL 模式下，写入器还有一条
+    长连接，此刻磁盘上的 `port_guard.db` 只是「已 checkpoint 的那部分」，剩下的
+    新数据还在 `-wal` 里 —— 只拷主文件会得到一份**丢掉最后几批写入**的旧快照；
+    把三个文件一起拷又可能拿到写了一半的中间态（拷完主文件、WAL 又被追加）。
+    `Connection.backup()` 由 SQLite 自己在读事务里逐页复制，天然是一个一致点，
+    而且不需要停写入器（P2-7 的硬要求）。
+    """
+    base = db_path()
+    if not os.path.exists(base):
+        return False, f"数据库文件不存在：{base}"
+
+    stamp = int(time.time())
+    dst = os.path.join(backup_dir(), f"{_db_base_name()}.{stamp}.bak")
+    while os.path.exists(dst):
+        # 同一秒内连点两次「立即备份」，后一份会直接把前一份覆盖掉 ——
+        # 而那份恰恰可能是唯一能回退的副本（离线库那边踩过同一个坑）
+        stamp += 1
+        dst = os.path.join(backup_dir(), f"{_db_base_name()}.{stamp}.bak")
+
+    # 先写 .part 再改名：中途失败（磁盘满 / 被中断）不会在列表里留下一个
+    # 看着正常、一恢复就报废的半截文件
+    tmp = dst + ".part"
+    try:
+        src_conn = sqlite3.connect(base, timeout=10.0)
+        try:
+            src_conn.execute("PRAGMA busy_timeout=10000")
+            dst_conn = sqlite3.connect(tmp)
+            try:
+                src_conn.backup(dst_conn)
+                # 备份文件必须自包含：WAL 模式下 destination 也可能落到 WAL，
+                # 那样单拿一个 .bak 出去就是残缺的
+                dst_conn.execute("PRAGMA journal_mode=DELETE")
+            finally:
+                dst_conn.close()
+        finally:
+            src_conn.close()
+        os.replace(tmp, dst)
+    except Exception as e:
+        log.exception("备份数据库失败")
+        _remove_quietly(tmp)
+        _remove_quietly(tmp + "-journal")
+        return False, str(e)
+
+    cleanup_db_backups()
+    log.info("数据库已备份：%s（%s）", dst, format_size(os.path.getsize(dst)))
+    return True, dst
+
+
+def _remove_quietly(path: str) -> None:
+    with contextlib.suppress(OSError):
+        os.remove(path)
+
+
+def _replace_with_retry(src: str, dst: str, attempts: int = 20) -> None:
+    """`os.replace` 覆盖一个可能正被别的连接打开着的库文件。
+
+    Windows 上「替换目标是打开状态」会直接 PermissionError（不是排队等锁），
+    而本程序的统计定时器 / 页面刷新都是短连接，随时可能在那一瞬间开着一个读
+    连接。这类占用只持续几毫秒，重试几次即可，否则恢复会随机失败在一个跟用户
+    操作完全无关的时刻。
+    """
+    last: Optional[BaseException] = None
+    for _ in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:  # 只重试「被占用」，其它错误立刻抛
+            last = e
+            time.sleep(0.1)
+    raise RuntimeError(f"数据库文件仍被占用，替换失败：{last}")
+
+
+def restore_db(path: str, backup_current: bool = True) -> Tuple[bool, str]:
+    """用备份整份替换当前库，返回 (ok, 一句话结果)。
+
+    **顺序是有讲究的，改之前先读完这段**：
+
+    1. 先把待恢复的备份**复制到库目录下的暂存文件**。放在备份之前做，是因为
+       备份完成后会回收旧备份（只留 3 份）—— 用户若挑中的正是最旧那份，
+       它会在这中间被删掉，恢复就无从谈起；复制完成后再回收就伤不到它了。
+    2. 备份当前库（`backup_current`）。恢复是**不可撤销**的覆盖，先留一条退路；
+       备份失败时**中止恢复** —— 没有退路的破坏性操作不做。
+    3. 停写入器。它握着一条长连接和一批可能未提交的数据，不停就换文件等于把
+       正在写的库从脚下抽走：Windows 上复制会 PermissionError，侥幸成功也会把
+       后到的数据写进旧文件的句柄（静默丢失）或直接报错。
+    4. `os.replace` 覆盖主库 + 删掉 `-wal` / `-shm`。旧的 WAL 属于旧文件，
+       留着它下次打开会拿旧页帧去「恢复」新文件。
+    5. `reset_init_state()` + `init_db()` + `settings.invalidate()`：备份可能
+       来自老版本，表结构要靠迁移补齐；设置缓存里还是旧库的值。
+    6. 重启写入器（原本在跑才重启）。
+
+    第 4 步失败也照样走 5、6：库还是原来那份（`os.replace` 是原子的），
+    总好过整个程序从此不写库。
+    """
+    src = str(path or "")
+    if not src or not os.path.isfile(src):
+        return False, f"备份文件不存在：{src or '（空路径）'}"
+
+    staging = db_path() + ".restore"
+    try:
+        _remove_quietly(staging)
+        shutil.copyfile(src, staging)
+    except Exception as e:
+        log.exception("准备恢复文件失败")
+        _remove_quietly(staging)
+        return False, f"读取备份文件失败：{e}"
+
+    pre = ""
+    if backup_current:
+        ok, msg = backup_db()
+        if not ok:
+            _remove_quietly(staging)
+            return False, f"恢复前备份当前库失败，已中止：{msg}"
+        pre = os.path.basename(msg)
+
+    writer = db_writer.peek_writer()
+    was_running = bool(writer and writer.running)
+    db_writer.stop_writer(timeout=10.0)
+
+    err = ""
+    try:
+        _replace_with_retry(staging, db_path())
+        _remove_quietly(db_path() + "-wal")
+        _remove_quietly(db_path() + "-shm")
+    except Exception as e:
+        log.exception("覆盖数据库文件失败")
+        err = f"覆盖数据库文件失败：{e}"
+    finally:
+        _remove_quietly(staging)
+        database.reset_init_state()
+        try:
+            database.init_db()
+        except Exception as e:
+            log.exception("恢复后初始化数据库失败")
+            err = err or f"文件已替换，但重新初始化数据库失败：{e}（请重启程序）"
+        cfg.invalidate()
+        with contextlib.suppress(Exception):
+            cfg.warm()  # 恢复后立刻会被高频读，预热一次省掉逐条回源
+        if was_running:
+            db_writer.start_writer()
+
+    if err:
+        return False, err
+    name = os.path.basename(src)
+    tail = f"（恢复前已备份当前库：{pre}）" if pre else ""
+    log.info("数据库已从备份恢复：%s", name)
+    return True, f"已恢复到 {name}{tail}"
+
+
+def vacuum_db() -> Tuple[bool, str]:
+    """整理数据库并回收磁盘，返回 (ok, 一句话结果)。
+
+    ⚠️ 几百 MB 的库要跑几十秒，**调用方必须放到后台线程**（界面层已如此）。
+
+    先 flush 一次写入器再动手：VACUUM 收尾需要短暂的排他锁，撞上一批正在提交的
+    写入会一路等到 busy_timeout（30s），界面看着像卡死。
+    """
+    before = 0
+    try:
+        w = db_writer.peek_writer()
+        if w is not None:
+            w.flush(timeout=5.0)
+        before = database.db_size()["total"]
+        database.vacuum()
+        after = database.db_size()["total"]
+        msg = f"数据库已整理：{format_size(before)} → {format_size(after)}"
+        log.info(msg)
+        return True, msg
+    except Exception as e:
+        log.exception("整理数据库失败")
+        return False, str(e)
+
+
+def reindex_db() -> Tuple[bool, str]:
+    """重建全部索引，返回 (ok, 一句话结果)。同样要放后台线程。"""
+    try:
+        w = db_writer.peek_writer()
+        if w is not None:
+            w.flush(timeout=5.0)
+        before = database.db_size()["total"]
+        database.reindex()
+        after = database.db_size()["total"]
+        msg = f"索引已重建：{format_size(before)} → {format_size(after)}"
+        log.info(msg)
+        return True, msg
+    except Exception as e:
+        log.exception("重建索引失败")
+        return False, str(e)
 
 
 #: `run_all()` 返回值的字段顺序。改这里必须同步改 gui/mixins.py 的解包。
