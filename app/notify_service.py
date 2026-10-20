@@ -53,7 +53,11 @@ class NotifyService:
         self._bucket = TokenBucket(rate=webhook.DEFAULT_MAX_PER_MIN / 60.0, burst=1)
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self._working = False
+        # 「已入队且还没处理完」的条数。不能用「队列空 + 正在干活」来判定空闲：
+        # 工作线程是先把元素取走（队列变空）再置标志的，中间存在一个窗口，
+        # 主线程正好在这时查就会误判为空闲 —— 曾让 wait_idle 提前返回、测试间歇红。
+        # 计数从入队开始，到 _deliver 结束才减，窗口不存在。
+        self._inflight = 0
         self._lock = threading.Lock()
         self._last_error = ""
         self.sent = 0
@@ -129,6 +133,8 @@ class NotifyService:
             self.dropped += 1
             log.warning("Webhook 队列已满（%d），丢弃一条告警", MAX_QUEUE)
             return False
+        with self._lock:
+            self._inflight += 1
         self._ensure_worker()
         return True
 
@@ -175,13 +181,13 @@ class NotifyService:
             except queue.Empty:
                 continue
             try:
-                self._working = True
                 self._deliver(alert)
             except Exception:
                 log.exception("处理 Webhook 告警异常")
             finally:
-                self._working = False
                 self._q.task_done()
+                with self._lock:
+                    self._inflight -= 1
 
     def _deliver(self, alert: Dict) -> None:
         s = self._settings()
@@ -237,12 +243,19 @@ class NotifyService:
             self._thread = None
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
-        """等到队列排空（测试与退出前用）。超时返回 False"""
+        """
+        等到「队列里没有、也没有正在处理的」为止（测试与退出前用）。超时返回 False。
+
+        只看 _inflight 就够：每入队一条就 +1，处理完才 -1，
+        所以「已取走但还没处理」这段时间计数恒 ≥ 1，不会出现提前返回。
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if self._q.empty() and not self._working:
+            with self._lock:
+                inflight = self._inflight
+            if inflight == 0 and self._q.empty():
                 return True
-            time.sleep(0.01)
+            time.sleep(0.005)
         return False
 
     @staticmethod

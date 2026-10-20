@@ -127,6 +127,19 @@ def send_now(monkeypatch):
     monkeypatch.setattr(notify_service, "RETRY_DELAYS", (0.0, 0.0))
 
 
+#: 排空队列的等待上限。给得宽是刻意的：机器忙（别人并行跑全量）时线程调度会变慢，
+#: 而 wait_idle 是**条件等待**不是固定 sleep —— 超时给大只是把上界放宽，
+#: 正常情况仍是处理完立刻返回，不会影响用例时长。
+DRAIN_TIMEOUT = 15.0
+
+
+def _drain(svc) -> None:
+    """等到后台线程真的处理完，超时则给出可读的失败信息（而不是让后面的计数断言红）"""
+    assert svc.wait_idle(DRAIN_TIMEOUT), (
+        f"{DRAIN_TIMEOUT}s 内队列没排空：{svc.stats()}，last_error={svc.last_error!r}"
+    )
+
+
 # ═══════════════════════════════════════════
 #  静默 / 门槛 / 限流
 # ═══════════════════════════════════════════
@@ -140,8 +153,9 @@ def test_disabled_or_url_empty_sends_nothing(isolated_env, rec, svc):
     _hook_cfg(webhook_url="")
     assert svc.send(dict(ALERT)) is False
 
-    svc.wait_idle(1.0)
+    _drain(svc)
     assert rec.count == 0, "未启用 / 未配地址时必须一条都不发（且不能刷日志报错）"
+    assert svc.pending == 0
 
 
 def test_level_gate_filters_lower_alerts(isolated_env, rec, svc):
@@ -152,9 +166,32 @@ def test_level_gate_filters_lower_alerts(isolated_env, rec, svc):
     assert svc.send(low) is False
     assert svc.send(dict(ALERT)) is True  # critical ≥ high
 
-    assert svc.wait_idle(3.0)
+    _drain(svc)
     assert rec.count == 1
     assert svc.skipped == 1
+
+
+def test_wait_idle_waits_for_inflight_item(isolated_env, rec, svc, monkeypatch):
+    """回归：元素已出队、但还没处理完时，wait_idle 必须继续等。
+
+    原实现按「队列空 + 正在干活」判定空闲，而「正在干活」是在取出元素之后才置的 ——
+    中间那个窗口会让 wait_idle 立刻返回，count 还是 0，负载高时便间歇红。
+    这里人为拉长该窗口（等价于机器忙时的线程调度），锁住修复。
+    """
+    init_db()
+    _hook_cfg()
+    real_get = svc._q.get
+
+    def slow_get(*args, **kwargs):
+        item = real_get(*args, **kwargs)
+        time.sleep(0.3)  # 模拟「已出队、尚未处理」这段被拉长
+        return item
+
+    monkeypatch.setattr(svc._q, "get", slow_get)
+    assert svc.send(dict(ALERT)) is True
+
+    _drain(svc)
+    assert rec.count == 1, "wait_idle 提前返回了：出队后、处理前的窗口没有覆盖住"
 
 
 def test_rate_limit_caps_burst(isolated_env, rec, svc):
@@ -164,7 +201,7 @@ def test_rate_limit_caps_burst(isolated_env, rec, svc):
     for _ in range(5):
         svc.send(dict(ALERT))
 
-    assert svc.wait_idle(3.0)
+    _drain(svc)
     assert rec.count == 1, "去掉限流这里会变成 5 —— 这条就是为此而写"
     assert svc.sent == 1
     assert svc.throttled == 4
@@ -179,7 +216,7 @@ def test_payload_and_headers(isolated_env, rec, svc):
     init_db()
     _hook_cfg()
     svc.send(dict(ALERT))
-    assert svc.wait_idle(3.0)
+    _drain(svc)
 
     req = rec.last
     assert isinstance(req.data, bytes), "py3.8 的 Request(data=) 只接受 bytes"
@@ -197,7 +234,7 @@ def test_signature_matches_hmac_of_body(isolated_env, rec, svc):
     init_db()
     _hook_cfg(webhook_secret=SECRET)
     svc.send(dict(ALERT))
-    assert svc.wait_idle(3.0)
+    _drain(svc)
 
     body = rec.last.data
     got = rec.header(webhook.SIG_HEADER)
@@ -211,7 +248,7 @@ def test_no_signature_without_secret(isolated_env, rec, svc):
     init_db()
     _hook_cfg(webhook_secret="")
     svc.send(dict(ALERT))
-    assert svc.wait_idle(3.0)
+    _drain(svc)
     assert rec.header(webhook.SIG_HEADER) is None
     assert rec.header(webhook.TS_HEADER)
 
@@ -233,9 +270,9 @@ def test_retry_then_success(isolated_env, rec, svc, monkeypatch):
     ]
 
     svc.send(dict(ALERT))
-    assert svc.wait_idle(3.0)
+    _drain(svc)
     assert rec.count == 3, "失败必须重试（共 3 次尝试）"
-    # time.sleep 被打桩后 wait_idle 的轮询（0.01s）也会进来，只挑重试的等待
+    # time.sleep 被打桩后 wait_idle 内部的轮询也会进来，只挑重试的等待
     assert [s for s in sleeps if s > 0.1] == [1.0, 3.0], "退避必须是递增的 1s / 3s"
     assert svc.sent == 1 and svc.failed == 0
 
@@ -245,7 +282,7 @@ def test_all_failed_counts_once(isolated_env, rec, svc, send_now):
     _hook_cfg()
     rec.script = [urllib.error.URLError("down")]
     svc.send(dict(ALERT))
-    assert svc.wait_idle(3.0)
+    _drain(svc)
     assert rec.count == 3
     assert svc.sent == 0 and svc.failed == 1
 
@@ -255,7 +292,7 @@ def test_http_4xx_is_not_retried(isolated_env, rec, svc, send_now):
     _hook_cfg()
     rec.script = [_Resp(404)]
     svc.send(dict(ALERT))
-    assert svc.wait_idle(3.0)
+    _drain(svc)
     assert rec.count == 1, "4xx 重试没有意义"
     assert svc.failed == 1
 
@@ -264,7 +301,7 @@ def test_invalid_url_never_touches_network(isolated_env, rec, svc, send_now):
     init_db()
     _hook_cfg(webhook_url="http://public.example.com/hook")  # 明文 http 且是域名
     svc.send(dict(ALERT))
-    assert svc.wait_idle(3.0)
+    _drain(svc)
     assert rec.count == 0
     assert svc.failed == 1
     assert "https" in svc.last_error
@@ -341,11 +378,11 @@ def test_send_returns_immediately(isolated_env, rec, svc):
     """调用方是 Qt 主线程的事件泵 —— 卡在这里就等于冻界面"""
     init_db()
     _hook_cfg()
-    rec.delay = 0.6
+    rec.delay = 1.0  # 卡住 1 秒的「网络」；返回必须远快于它
     t0 = time.time()
     assert svc.send(dict(ALERT)) is True
     assert time.time() - t0 < 0.3
-    assert svc.wait_idle(5.0)
+    _drain(svc)
     assert rec.count == 1
 
 
