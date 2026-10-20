@@ -36,12 +36,43 @@ def auto_ban_record(rec: AccessRecord, result: RiskResult) -> None:
     与手动封禁的关系：这里只是把「已经在 ban_records 里落一条 pending」
     与「真的去改防火墙」串起来，最终结果通过 bus.emit_ban 回给 UI，
     与手动封禁走的是同一个封禁页展示。
+
+    已处于封禁状态（ban_list 中该 IP 有 active 记录）时直接返回：
+    不插记录、不调防火墙、不发 emit_ban。与手动路径 app/ban_service.py
+    的口径一致。这一步是必须的 —— 自动路径是「每次达标事件都触发一次」，
+    同一个攻击者持续扫描会在每秒都满足封禁条件，缺了查重就会不断
+    insert 新记录并新建防火墙规则（规则名带随机后缀，不会互相覆盖），
+    最终规则数无限增长、封禁页被重复记录填满。
     """
-    from core.database import insert_ban, update_ban
+    from core.database import find_active_ban_by_ip, insert_ban, update_ban
     from core.firewall import block_ip
 
     if is_never_ban(rec.ip):
         return
+
+    # 已封禁则直接返回。查库失败不能阻断封禁（宁可多一次封禁尝试，
+    # 也不能因为一次查询异常就放过正在扫描的 IP），所以异常只记日志。
+    #
+    # 只按 active 查重、不拦 pending：pending 在本函数内是「插库 → 调防火墙 →
+    # 回填 active/failed」之间的瞬态，正常情况下几毫秒就消失；而一旦进程在这
+    # 个窗口里被杀掉（关机 / 崩溃），残留的 pending 就再没人回填，若把 pending
+    # 也算作「已在封禁中」，这个 IP 将被永久漏封，是比偶发重复更糟的结果。
+    # 至于两条上报线程同时命中的并发窗口（微秒级），不值得为此在高频上报路径
+    # 上加全局锁 —— 后续真要收紧，应该走数据库唯一约束而不是锁。
+    existing = None
+    try:
+        existing = find_active_ban_by_ip(rec.ip)
+    except Exception:
+        log.exception("自动封禁：查询已有封禁记录失败 ip=%s", rec.ip)
+    if existing:
+        # 自动路径高频触发，用 debug 而不是 warning，避免刷屏淹没真正的问题
+        log.debug(
+            "自动封禁跳过：ip=%s 已在封禁中（记录 #%s）",
+            rec.ip,
+            existing.id,
+        )
+        return
+
     duration = cfg.get_int("default_ban_duration_sec", 3600)
     expire = int(time.time() * 1000) + duration * 1000
     rec_ban = BanRecord(
