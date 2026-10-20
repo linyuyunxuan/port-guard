@@ -16,14 +16,15 @@
 所以每个用例都先用中间件把它改成想模拟的来源地址。
 """
 
+import contextlib
 import time
 from typing import Any, Dict, List
 
 import pytest
 
+from core import database, db_writer
 from core import settings as cfg
 from core.database import init_db, query_access_logs
-from core.db_writer import get_writer, start_writer
 
 httpx = pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
@@ -59,15 +60,74 @@ def _make_client(source_ip: str) -> TestClient:
     return TestClient(app)
 
 
+class _InlineWriter(db_writer.BatchWriter):
+    """提交即落库的写入器：不启后台线程，也不留长连接。
+
+    为什么在这里不用真的 `BatchWriter`：本文件要验的是「来源 IP 能不能被伪造」
+    和「时间戳会不会被纠偏」，与攒批、异步刷盘无关。而真写入器是**后台线程
+    + 长连接**：全仓只有本文件启动全局写入器，也只有它会出现
+    `attempt to write a readonly database` —— 写入线程手里那条长连接一旦与
+    `tests/conftest.py` 的 `fresh_db` 夹具「每个用例删一次库文件」撞上，
+    SQLite 就把它判成只读，本批数据整批回滚，断言随即拿不到行。
+    交付栈（py3.8）连跑时约 1/8 复现，且常连累相邻用例一起红。
+    具体是删库那一刻还是 WAL 重建那一刻失效取决于时序、无法稳定复现；
+    能确定的是错误只出在这条长连接上，而它与本文件的断言目标无关。
+
+    去掉线程与长连接后，每次提交都是「建连 → 事务 → 提交 → 关连接」，
+    没有任何句柄能活到下一次夹具删库，竞争从根上不存在，不靠 sleep 掩盖。
+
+    不降低覆盖：攒批、队列溢出、stop 榨干队列、commit 次数等语义由
+    tests/test_db_writer.py 用真的 BatchWriter 专门覆盖（9 条用例）；
+    这里仍然走 database.insert_access_log_sql / insert_risk_event_sql 与
+    真实 schema，HTTP → pipeline → 落库 → 查询 的链路一步没少，
+    少的只是「排队等线程」这一段与本文件断言无关的延迟。
+    """
+
+    def _commit(self, fill) -> bool:
+        conn = database.connect_for_writer()
+        try:
+            conn.execute("BEGIN")
+            fill(conn)
+            conn.commit()
+        except Exception:
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            self.errors += 1
+            raise
+        else:
+            self.written += 1
+            self.batches += 1
+        finally:
+            conn.close()
+        return True
+
+    def submit_access(self, rec) -> bool:
+        return self._commit(lambda conn: database.insert_access_log_sql(conn, rec))
+
+    def submit_risk(self, rec, result) -> bool:
+        def fill(conn):
+            access_id = database.insert_access_log_sql(conn, rec)
+            database.insert_risk_event_sql(conn, rec, result, access_id)
+
+        return self._commit(fill)
+
+    def flush(self, timeout: float = 5.0) -> bool:
+        """同步写入，提交返回时已经落库，没有可等的东西"""
+        return True
+
+
 @pytest.fixture
 def env(isolated_env):
     init_db()
-    start_writer()
+    # 顶替全局后台写入器，理由见 _InlineWriter 的说明
+    db_writer.set_writer(_InlineWriter())
     cfg.warm()
     cfg.set("api_key", "")
     cfg.set("rate_limit_per_sec", 0)  # 关掉限流，单测专注可信度逻辑
     cfg.set("trust_reported_ip", "1")
     cfg.set("report_max_ts_skew_sec", 300)
+    yield
+    db_writer.set_writer(None)
 
 
 @pytest.fixture
@@ -84,13 +144,6 @@ def rec_capture(monkeypatch) -> List[Any]:
     return captured
 
 
-def _flush_db() -> None:
-    """等批量写入线程落盘，好在库里断言"""
-    w = get_writer()
-    if w:
-        w.flush(timeout=5)
-
-
 # ═══════════════════════════════════════════════
 #  来源 IP 信任判定
 # ═══════════════════════════════════════════════
@@ -102,7 +155,6 @@ def test_loopback_source_keeps_body_ip(env, monkeypatch):
         d = c.post("/api/v1/access/report", json=dict(GOOD, ip="203.0.113.10")).json()["data"]
     assert d["ip"] == "203.0.113.10"
 
-    _flush_db()
     rows = query_access_logs(keyword="203.0.113.10")
     assert len(rows) == 1
 
@@ -113,7 +165,6 @@ def test_untrusted_source_ignores_body_ip(env, monkeypatch):
         d = c.post("/api/v1/access/report", json=dict(GOOD, ip="203.0.113.10")).json()["data"]
     assert d["ip"] == LAN
 
-    _flush_db()
     rows = query_access_logs(keyword=LAN)
     assert len(rows) == 1
     assert query_access_logs(keyword="203.0.113.10") == []
@@ -166,7 +217,6 @@ def test_batch_uses_peer_ip_for_untrusted_source(env, monkeypatch):
         r = c.post("/api/v1/access/batch", json={"items": items})
     assert r.status_code == 200
 
-    _flush_db()
     assert [x.ip for x in query_access_logs(keyword="203.0.113.1") if x.ip] == []
     assert all(x.ip == LAN for x in query_access_logs(keyword=LAN))
 
