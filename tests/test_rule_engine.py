@@ -296,3 +296,61 @@ def test_engine_handles_10k_ips_without_breaking(engine):
     for i in range(10_000):
         engine.evaluate(_rec(ip=f"198.18.{i // 250}.{i % 250}"))
     assert engine.window_size() <= 10_001
+
+
+def test_save_config_keeps_params_the_ui_cannot_edit(engine, tmp_path):
+    """保存配置不得丢掉「界面上没有控件」的命中条件。
+
+    规则页只把 RULE_PARAMS 里的可编辑参数（窗口秒数、阈值、端口列表）提交回来，
+    若按传入配置整体覆盖，`sensitive_path_login.paths/status`、`scanner_ua.empty_ua`
+    这类命中条件会被静默删除：规则还在、开关还开着，但永远不再命中，且不报错。
+    本机实测发生过一次（工作区 rules.json 被整体重写后三个字段消失）。
+    """
+    path = tmp_path / "rules.json"
+    engine._path = str(path)
+    engine._cfg["rules"]["sensitive_path_login"]["paths"] = ["/admin", "/.env"]
+    engine._cfg["rules"]["sensitive_path_login"]["status"] = [401, 403]
+    engine._cfg["rules"]["scanner_ua"]["empty_ua"] = True
+
+    # 模拟规则页：只提交界面上能改的字段
+    ui_cfg = json.loads(json.dumps(engine._cfg))
+    ui_cfg["rules"]["sensitive_path_login"] = {
+        "enabled": True,
+        "score": 70,
+        "level": "high",
+        "action": "suggest_ban",
+        "window_sec": 120,  # 用户改了窗口
+        "threshold": 5,
+    }
+    ui_cfg["rules"]["scanner_ua"] = {
+        "enabled": True,
+        "score": 45,
+        "level": "medium",
+        "action": "alert",
+        "patterns": ["nmap", "sqlmap"],
+    }
+
+    engine.save_config(ui_cfg)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))["rules"]
+    # 界面改的值必须生效
+    assert saved["sensitive_path_login"]["window_sec"] == 120
+    assert saved["sensitive_path_login"]["threshold"] == 5
+    # 界面改不到的命中条件必须原样保留
+    assert saved["sensitive_path_login"]["paths"] == ["/admin", "/.env"]
+    assert saved["sensitive_path_login"]["status"] == [401, 403]
+    assert saved["scanner_ua"]["empty_ua"] is True
+
+
+def test_save_config_allows_dropping_a_rule_entirely(engine, tmp_path):
+    """合并只补「同一条规则」的缺失键；整条规则被删掉时必须真的删掉。"""
+    path = tmp_path / "rules.json"
+    engine._path = str(path)
+    ui_cfg = json.loads(json.dumps(engine._cfg))
+    ui_cfg["rules"].pop("port_scan")
+
+    engine.save_config(ui_cfg)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))["rules"]
+    assert "port_scan" not in saved
+    assert "blacklist" in saved

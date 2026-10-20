@@ -396,14 +396,52 @@ class RuleEngine:
         with self._lock:
             return json.loads(json.dumps(self._cfg))
 
+    def _merge_rules(self, cfg: Dict) -> Dict:
+        """把「现有规则配置」补进待保存配置的空缺处（只补 rules 层）。
+
+        界面只暴露了 `RULE_PARAMS` 里的可编辑参数（窗口秒数、阈值、端口列表…），
+        而 `sensitive_path_login.paths/status`、`scanner_ua.empty_ua` 这类**命中条件**
+        在界面上没有控件。若按传入配置整体覆盖，用户点一次「保存并生效」就会把它们
+        静默删掉：规则还在、开关还开着，但永远不再命中，且不报任何错——
+        这是最难排查的一类故障（本机实测已发生过一次）。
+
+        因此这里按「现有 ∪ 传入」合并：传入的优先，现有的只补缺失键。
+        规则被整条删除时（传入里没有该 rule_id）不受影响。
+        """
+        old = self._cfg.get("rules")
+        new = cfg.get("rules")
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return cfg
+        merged = dict(cfg)
+        rules = {}
+        for rid, body in new.items():
+            base = old.get(rid)
+            if isinstance(base, dict) and isinstance(body, dict):
+                item = dict(base)
+                item.update(body)
+            else:
+                item = body
+            rules[rid] = item
+        lost = {
+            rid: sorted(set(old.get(rid, {}) if isinstance(old.get(rid), dict) else {}) - set(body))
+            for rid, body in new.items()
+            if isinstance(old.get(rid), dict)
+            and set(old[rid]) - set(body if isinstance(body, dict) else {})
+        }
+        merged["rules"] = rules
+        if lost:
+            log.info("规则配置保存：保留了界面不可编辑的命中条件 %s", lost)
+        return merged
+
     def save_config(self, cfg: Dict) -> None:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        payload = self._merge_rules(cfg)
         tmp = self._path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self._path)
         with self._lock:
-            self._cfg = cfg
+            self._cfg = payload
             self._compile()
 
     def rule(self, rule_id: str) -> Dict:
