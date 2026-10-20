@@ -311,6 +311,15 @@ DEFAULT_SETTINGS = {
     "xdb_last_check_at": "0",  # epoch 毫秒
     "xdb_last_update_at": "0",  # epoch 毫秒
     "xdb_last_result": "",  # 最近一次同步结果摘要
+    # ── 外部告警通道（Webhook）──
+    "webhook_enabled": "0",  # 1=启用外部告警推送（默认关闭）
+    "webhook_url": "",  # 对端接收地址，留空=不发送
+    "webhook_secret": "",  # HMAC-SHA256 签名密钥，留空=不签名
+    "webhook_timeout_sec": "10",  # 单次请求超时（秒，1-30）
+    "webhook_min_level": LEVEL_HIGH,  # 低于该级别的告警不推送（默认只推高风险及以上）
+    "webhook_max_per_min": "20",  # 每分钟最多推送条数（令牌桶限流）
+    "webhook_verify_ssl": "1",  # 1=校验证书；0=关闭校验（仅排查老旧服务器 TLS 兼容问题）
+    "webhook_allow_http": "0",  # 1=允许明文 http，且仅限内网 IP 地址（域名仍拒绝）
 }
 
 # 外部可关闭的联网行为（企业内网无出口时用环境变量一键关掉）

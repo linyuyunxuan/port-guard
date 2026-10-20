@@ -1010,6 +1010,12 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         except Exception:
             log.exception("停止日志页定时器失败")
         try:
+            from app.notify_service import get_service as get_notify_service
+
+            get_notify_service().stop(timeout=3.0)
+        except Exception:
+            log.exception("停止告警推送线程失败")
+        try:
             server_ctl.stop()
         except Exception:
             log.exception("停止服务失败")

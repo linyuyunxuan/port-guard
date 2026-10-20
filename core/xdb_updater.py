@@ -220,6 +220,17 @@ def _custom_proxy_handler():
     return urllib.request.ProxyHandler({"http": proxy, "https": proxy})
 
 
+def proxy_handler():
+    """
+    对外暴露的代理策略（设置项 xdb_proxy），供其它联网模块复用。
+
+    Webhook 告警（core/webhook.py）必须走同一套，否则会出现
+    「离线库能下载、告警发不出去」的割裂。返回 None 表示没配代理，
+    调用方直接 build_opener() 走系统 / 环境变量代理即可。
+    """
+    return _custom_proxy_handler()
+
+
 def _open(url: str, timeout: float, direct: bool, extra_headers: Optional[Dict] = None):
     proxy = _custom_proxy_handler()
     op = urllib.request.build_opener(proxy) if proxy is not None else _opener(direct)

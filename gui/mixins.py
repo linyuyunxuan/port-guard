@@ -16,6 +16,7 @@ import contextlib
 from typing import TYPE_CHECKING, Dict, Optional
 
 from app import ban_service, maintenance, server_ctl
+from app.notify_service import get_service as get_notify_service
 from app.xdb_service import get_service as get_xdb_service
 from core import report_server
 from core import settings as cfg
@@ -152,8 +153,12 @@ class EventPumpMixin(_HostBase):
                 self.page_events.refresh()
 
         # 3) 告警
+        notify = get_notify_service()
         for a in bus.drain_alert(50):
             self.alerter.notify(a)
+            # 外部通道（Webhook）：入队即返回，真正的 HTTP 在后台线程。
+            # 这里绝不能同步发请求 —— 事件泵跑在 Qt 主线程上，会直接冻住界面。
+            notify.send(a)
 
         # 4) 封禁结果
         bans = bus.drain_ban(200)

@@ -147,6 +147,8 @@ class SettingsPage(QWidget):
     xdb_check_requested = Signal()  # 只检查
     logs_open_requested = Signal()
     watch_changed = Signal()  # 本机端口观察的开关/参数发生变化
+    # Webhook 测试的结果由后台线程回调，用它跨线程回到主线程再改控件
+    webhook_result = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -156,6 +158,7 @@ class SettingsPage(QWidget):
         self._hint_timer = QTimer(self)
         self._hint_timer.setSingleShot(True)
         self._hint_timer.timeout.connect(self._reset_hint)
+        self.webhook_result.connect(self._on_webhook_result)
         self._build()
         self.load()
         self._wire_dirty()
@@ -504,6 +507,88 @@ class SettingsPage(QWidget):
         note.setObjectName("hint")
         note.setWordWrap(True)
         lay.addWidget(note)
+
+        # ── 外部告警通道 ──
+        hook = _Panel("外部告警通道（Webhook）")
+        self.tg_hook = ToggleSwitch(False)
+        self.tg_hook.toggled.connect(self._on_hook_toggle)
+        self.lbl_hook = QLabel("")
+        self.lbl_hook.setObjectName("form_hint")
+        hook.add("启用推送", _row_widget(self.tg_hook, self.lbl_hook, spacing=10))
+
+        self.ed_hook_url = QLineEdit()
+        self.ed_hook_url.setPlaceholderText("https://alert.example.com/hooks/portguard")
+        self.ed_hook_url.setMaximumWidth(560)
+        hook.add("接收地址", self.ed_hook_url)
+
+        self.ed_hook_secret = QLineEdit()
+        self.ed_hook_secret.setPlaceholderText("留空=不签名；填写后每条约附带 HMAC-SHA256 签名")
+        self.ed_hook_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ed_hook_secret.setMaximumWidth(420)
+        b_secret = QPushButton("显示")
+        b_secret.setObjectName("btn_outline")
+        b_secret.setFixedWidth(52)
+        b_secret.clicked.connect(self._toggle_secret_echo)
+        hook.add("签名密钥", _row_widget(self.ed_hook_secret, b_secret, spacing=8))
+
+        self.cb_hook_level = QComboBox()
+        self.cb_hook_level.addItems(LEVEL_LABELS)
+        self.cb_hook_level.setFixedWidth(140)
+
+        self.sp_hook_timeout = QSpinBox()
+        self.sp_hook_timeout.setRange(1, 30)
+        self.sp_hook_timeout.setValue(10)
+        self.sp_hook_timeout.setSuffix(" 秒")
+        self.sp_hook_timeout.setFixedWidth(120)
+
+        self.sp_hook_max = QSpinBox()
+        self.sp_hook_max.setRange(1, 600)
+        self.sp_hook_max.setValue(20)
+        self.sp_hook_max.setSuffix(" 条/分钟")
+        self.sp_hook_max.setFixedWidth(140)
+
+        hook.add("推送级别", self.cb_hook_level)
+        hook.add("请求超时", self.sp_hook_timeout)
+        hook.add("推送限流", self.sp_hook_max)
+
+        self.tg_hook_http = ToggleSwitch(False)
+        hook.add(
+            "允许内网 http",
+            _row_widget(self.tg_hook_http, self._sw_label("仅内网 IP，域名仍拒绝"), spacing=10),
+        )
+        self.tg_hook_ssl = ToggleSwitch(True)
+        self.tg_hook_ssl.toggled.connect(self._on_hook_ssl_toggle)
+        hook.add(
+            "校验 TLS 证书",
+            _row_widget(self.tg_hook_ssl, self._sw_label("关闭后链路上可被窃听"), spacing=10),
+        )
+
+        # 只在关闭校验时出现（P1-4）：这是明确的安全降级，必须当场说清代价
+        self.warn_hook = WarnBanner(
+            "已关闭 TLS 证书校验：告警内容在链路上可能被中间人窃听或篡改。"
+            "仅用于排查老旧服务器（如 Server 2008 R2 的 TLS 兼容问题），问题解决后请立即恢复。",
+            level="danger",
+        )
+        self.warn_hook.setVisible(False)
+        hook.add_block(self.warn_hook)
+
+        self.lbl_hook_state = QLabel("未测试")
+        self.lbl_hook_state.setObjectName("form_hint")
+        self.lbl_hook_state.setWordWrap(True)
+        b_hook_test = QPushButton("发送测试")
+        b_hook_test.setObjectName("btn_outline")
+        b_hook_test.clicked.connect(self._test_webhook)
+        hook.add("连通性", _row_widget(self.lbl_hook_state, b_hook_test, spacing=10))
+        lay.addWidget(hook)
+
+        note_hook = QLabel(
+            "告警以 JSON POST 送达：ip / level / score / reason / geo / local_port / ts / host；"
+            "配置密钥后附带 X-PortGuard-Signature（对端用同一密钥复算即可验真伪）。"
+            "推送在后台线程进行并按限流发送，不影响界面响应。"
+        )
+        note_hook.setObjectName("hint")
+        note_hook.setWordWrap(True)
+        lay.addWidget(note_hook)
         lay.addStretch(1)
         return page
 
@@ -764,6 +849,21 @@ class SettingsPage(QWidget):
         self.cb_popup.setCurrentIndex(max(0, min(idx, self.cb_popup.count() - 1)))
         self.sp_merge.setValue(cfg.get_int("alert_merge_sec", 60))
 
+        # 外部告警通道（Webhook）
+        self.tg_hook.setChecked(cfg.get_bool("webhook_enabled", False))
+        self.ed_hook_url.setText(cfg.get("webhook_url", ""))
+        self.ed_hook_secret.setText(cfg.get("webhook_secret", ""))
+        lvl = (cfg.get("webhook_min_level", LEVEL_HIGH) or LEVEL_HIGH).strip().lower()
+        self.cb_hook_level.setCurrentIndex(
+            max(0, LEVEL_ITEMS.index(lvl)) if lvl in LEVEL_ITEMS else 2
+        )
+        self.sp_hook_timeout.setValue(cfg.get_int("webhook_timeout_sec", 10))
+        self.sp_hook_max.setValue(cfg.get_int("webhook_max_per_min", 20))
+        self.tg_hook_http.setChecked(cfg.get_bool("webhook_allow_http", False))
+        self.tg_hook_ssl.setChecked(cfg.get_bool("webhook_verify_ssl", True))
+        self._on_hook_toggle(self.tg_hook.isChecked())
+        self._on_hook_ssl_toggle(self.tg_hook_ssl.isChecked())
+
         # 数据
         self.sp_retention.setValue(cfg.get_int("log_retention_days", 30))
         self.sp_maint_hour.setValue(cfg.get_int("maintenance_hour", 3))
@@ -822,6 +922,14 @@ class SettingsPage(QWidget):
                     else LEVEL_ITEMS[self.cb_popup.currentIndex() - 1]
                 ),
                 "alert_merge_sec": self.sp_merge.value(),
+                "webhook_enabled": "1" if self.tg_hook.isChecked() else "0",
+                "webhook_url": self.ed_hook_url.text().strip(),
+                "webhook_secret": self.ed_hook_secret.text().strip(),
+                "webhook_min_level": LEVEL_ITEMS[max(0, self.cb_hook_level.currentIndex())],
+                "webhook_timeout_sec": self.sp_hook_timeout.value(),
+                "webhook_max_per_min": self.sp_hook_max.value(),
+                "webhook_allow_http": "1" if self.tg_hook_http.isChecked() else "0",
+                "webhook_verify_ssl": "1" if self.tg_hook_ssl.isChecked() else "0",
                 "log_retention_days": self.sp_retention.value(),
                 "maintenance_hour": self.sp_maint_hour.value(),
                 "monitor_buffer_size": self.sp_buffer.value(),
@@ -1155,6 +1263,54 @@ class SettingsPage(QWidget):
                 "local_port": 8080,
             }
         )
+
+    # ═══════════════════════════════════
+    #  外部告警通道（Webhook）
+    # ═══════════════════════════════════
+
+    def _on_hook_toggle(self, on: bool) -> None:
+        self.lbl_hook.setText(
+            "启用后按推送级别实时外发" if on else "关闭：仅本机托盘 / 声音 / 弹窗"
+        )
+
+    def _on_hook_ssl_toggle(self, on: bool) -> None:
+        self.warn_hook.setVisible(not on)
+
+    def _toggle_secret_echo(self) -> None:
+        if self.ed_hook_secret.echoMode() == QLineEdit.EchoMode.Password:
+            self.ed_hook_secret.setEchoMode(QLineEdit.EchoMode.Normal)
+        else:
+            self.ed_hook_secret.setEchoMode(QLineEdit.EchoMode.Password)
+
+    def _webhook_form(self) -> dict:
+        """表单当前值（含未保存的改动），供「发送测试」直接验证"""
+        return {
+            "url": self.ed_hook_url.text().strip(),
+            "secret": self.ed_hook_secret.text().strip(),
+            "timeout": self.sp_hook_timeout.value(),
+            "allow_http": self.tg_hook_http.isChecked(),
+            "verify_ssl": self.tg_hook_ssl.isChecked(),
+        }
+
+    def _test_webhook(self) -> None:
+        from app import notify_service
+
+        self.lbl_hook_state.setText("发送中…")
+        self.lbl_hook_state.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
+        notify_service.get_service().test(
+            overrides=self._webhook_form(), on_done=self.webhook_result.emit
+        )
+
+    def _on_webhook_result(self, res) -> None:
+        ok, kind, status, message = res
+        if ok:
+            text, color = f"✓ 已送达（HTTP {status}）", C.success
+        else:
+            text = f"✗ {message}"
+            # 「配置不对」是提醒而不是故障，别用红色吓人
+            color = C.warning if kind in ("invalid", "timeout") else C.danger
+        self.lbl_hook_state.setText(text)
+        self.lbl_hook_state.setStyleSheet(f"color:{color};font-size:12.5px;")
 
     def _clean_logs(self) -> None:
         """手动立即清理：访问记录 + 磁盘上的过期日志文件"""
