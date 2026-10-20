@@ -89,6 +89,59 @@ def test_addr6_never_emits_zone_index_for_any_address():
         ipaddress.ip_address(got)
 
 
+def test_rows_v6_strips_zone_index_from_link_local(monkeypatch):
+    """
+    zone index 必须在**完整解析链路**上被剥掉，而不只是在 `_addr6` 的签名上。
+
+    上面两条用例其实守不住这个缺陷：`_addr6` 的 scope_id 默认是 0，而旧实现
+    只在 scope_id 非 0 时才拼 `%`，所以直接调 `_addr6(packed)` 无论改没改对
+    都是绿的。真正会产出 `fe80::1%14` 的是 MIB_TCP6ROW 里 dwLocalScopeId
+    那一路 —— 这里伪造一段内核缓冲区，让 `_rows_v6()` 走完整流程，
+    旧实现必挂。
+    """
+
+    def _dw_port(p: int) -> int:
+        """端口号按网络字节序塞进 DWORD 低 16 位（与 _port 的读法对称）"""
+        return struct.unpack("<I", struct.pack(">H", p) + b"\x00\x00")[0]
+
+    row = struct.pack(
+        "<16sII16sIIII",  # MIB_TCP6ROW_OWNER_PID
+        ipaddress.IPv6Address("fe80::1").packed,
+        14,  # dwLocalScopeId：链路本地地址必带的接口索引
+        _dw_port(18080),
+        ipaddress.IPv6Address("fe80::abcd").packed,
+        12,  # dwRemoteScopeId
+        _dw_port(51514),
+        STATE_ESTABLISHED,
+        4321,  # dwOwningPid
+    )
+    # 缓冲区必须与 winsock2.h 对齐，否则下面的地址断言可能是「假绿」
+    assert len(row) == win_net._ROW6_SIZE
+    buf = struct.pack("<I", 1) + row  # dwNumEntries = 1
+
+    def _fake_query(af: int):
+        return buf if af == win_net.AF_INET6 else None
+
+    monkeypatch.setattr(win_net, "_query_raw", _fake_query)
+
+    conns = win_net._rows_v6()
+    assert len(conns) == 1
+    c = conns[0]
+    # 先确认伪造的缓冲区本身没写错，再断言地址
+    assert c.proto == "tcp6"
+    assert c.local_port == 18080
+    assert c.remote_port == 51514
+    assert c.state == STATE_ESTABLISHED
+    assert c.pid == 4321
+    # 真正要守的：地址是干净的，且两栈都能直接喂给 ipaddress
+    assert c.local_ip == "fe80::1"
+    assert c.remote_ip == "fe80::abcd"
+    assert "%" not in c.local_ip
+    assert "%" not in c.remote_ip
+    ipaddress.ip_address(c.local_ip)
+    ipaddress.ip_address(c.remote_ip)
+
+
 # --------------------------------------------------------------------------- #
 # 结构体尺寸（与 winsock2.h 对齐）
 # --------------------------------------------------------------------------- #
