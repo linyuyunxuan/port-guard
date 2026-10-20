@@ -20,7 +20,12 @@ from app.notify_service import get_service as get_notify_service
 from app.xdb_service import get_service as get_xdb_service
 from core import report_server
 from core import settings as cfg
-from core.config import LEVEL_LABEL
+from core.config import (
+    DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_BAN_RETENTION_DAYS,
+    DEFAULT_RISK_RETENTION_DAYS,
+    LEVEL_LABEL,
+)
 from core.database import count_active_bans, count_risk_unhandled, count_today
 from core.event_bus import bus
 from core.logger import get_logger
@@ -272,19 +277,32 @@ class EventPumpMixin(_HostBase):
             self._refresh_stats(force=True)
 
     def _cleanup_logs(self) -> None:
-        """定期清理：访问记录、日志文件、离线库备份、下载残留（每天到点跑一次）"""
+        """
+        定期清理：四张表 + 日志文件 + 备份 + 下载残留（每天到点跑一次）。
+
+        四张表各有各的保留期（`run_all` 内部按 `*_retention_days` 分别读），
+        这里只负责编排与日志，不再逐个调 cleanup_* —— 少一个就漏一张表，
+        而漏掉的表是没有别的机制兜底的。
+        """
         if not maintenance.due_today():
             return
         try:
-            n_rows = maintenance.cleanup_logs()
-            n_files = maintenance.cleanup_log_files()
-            maintenance.cleanup_backups()
-            maintenance.cleanup_downloads()
+            rows, risk, bans, audits, n_files, n_bak, n_tmp = maintenance.run_all()
             log.info(
-                "定期清理完成：访问记录 %d 条、日志文件 %d 个（保留 %d 天）",
-                n_rows,
-                n_files,
+                "定期清理完成：访问 %d 条（保留 %d 天）、风险事件 %d 条（%d 天）、"
+                "终态封禁 %d 条（%d 天）、审计 %d 条（%d 天）、"
+                "日志文件 %d 个、备份 %d 个、下载残留 %d 个",
+                rows,
                 cfg.get_int("log_retention_days", 30),
+                risk,
+                cfg.get_int("risk_retention_days", DEFAULT_RISK_RETENTION_DAYS),
+                bans,
+                cfg.get_int("ban_retention_days", DEFAULT_BAN_RETENTION_DAYS),
+                audits,
+                cfg.get_int("audit_retention_days", DEFAULT_AUDIT_RETENTION_DAYS),
+                n_files,
+                n_bak,
+                n_tmp,
             )
         except Exception:
             log.exception("定期清理失败")

@@ -17,7 +17,7 @@ from core.logger import get_logger
 log = get_logger(__name__)
 
 # 当前程序支持的 schema 版本（每加一版 +1 并在下方登记 DDL）
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # version -> DDL 列表（从上一版升级到该版需要执行的语句）
 MIGRATIONS: Dict[int, List[str]] = {
@@ -28,6 +28,38 @@ MIGRATIONS: Dict[int, List[str]] = {
     # v2：给 ban_list 补「解封人/解封原因」审计字段（示例性迁移，验证链路可用）
     2: [
         "ALTER TABLE ban_list ADD COLUMN unblocked_by TEXT",
+    ],
+    # v3：操作审计表 + 未处理事件计数的覆盖索引（P2-3 / P2-5）
+    #
+    # 两件事放同一版是有意为之：它们都被同一个「保留期清理」需求驱动，
+    # 分开 bump 会让两个并行改动各自把 SCHEMA_VERSION 加一遍，迁移号直接打架。
+    3: [
+        # ── audit_log：谁在什么时候做了什么 ──
+        # ts 用 epoch 毫秒（与 event_ts / expire_at 同口径），**不用**
+        # datetime('now','localtime') 字符串 —— 那是 ban_list.created_at 的历史
+        # 包袱，本地时间字符串在跨时区/夏令时会偏，也没法直接做范围比较。
+        """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          INTEGER NOT NULL,
+            actor       TEXT NOT NULL,
+            action      TEXT NOT NULL,
+            target_type TEXT NOT NULL DEFAULT '',
+            target_id   TEXT,
+            summary     TEXT NOT NULL DEFAULT '',
+            before_json TEXT,
+            after_json  TEXT,
+            result      TEXT NOT NULL DEFAULT 'ok',
+            detail      TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_audit_ts    ON audit_log(ts)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_act   ON audit_log(action)",
+        # ── 覆盖索引：count_risk_unhandled() 每 2 秒跑一次全表 COUNT ──
+        # (handled, id) 两列都在索引里，SQLite 扫索引即可计数，不必回表读行，
+        # 事件攒到几十万条时这才是能扛住的做法。
+        "CREATE INDEX IF NOT EXISTS idx_event_handled_id ON risk_event(handled, id)",
     ],
 }
 

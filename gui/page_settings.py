@@ -14,17 +14,21 @@
 import contextlib
 import datetime
 import secrets
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from app import maintenance
+from app import audit, maintenance
 from core import firewall, report_server, xdb_updater
 from core import settings as cfg
 from core.config import (
     BAN_DURATION_TIER_DEFAULTS,
+    DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_BAN_RETENTION_DAYS,
     DEFAULT_ESCALATION_FACTOR,
     DEFAULT_ESCALATION_MAX_SEC,
     DEFAULT_LISTEN_HOST,
     DEFAULT_LISTEN_PORT,
+    DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_RISK_RETENTION_DAYS,
     DEFAULT_TS_SKEW_SEC,
     LEVEL_CRITICAL,
     LEVEL_HIGH,
@@ -35,12 +39,12 @@ from core.config import (
     XDB_UPSTREAM,
     user_data_dir,
 )
-from core.database import clear_all_logs, delete_old_access
+from core.database import clear_all_logs, count_audit, query_audit
 from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.components import PageHeader
 from gui.theme import C
-from gui.widgets import ToggleSwitch, WarnBanner, make_item
+from gui.widgets import ToggleSwitch, WarnBanner, align_headers, make_item
 from qtcompat import (
     QAbstractItemView,
     QApplication,
@@ -77,6 +81,27 @@ LABEL_W = 128
 #: 备份表：行高与列宽（库 / 备份文件 / 大小 / 备份时间）。文件列是唯一的拉伸列
 BACKUP_ROW_H = 24
 BACKUP_WIDTHS = [68, 300, 80, 148]
+
+# ── 操作审计表 ──
+AUDIT_HEADERS = ["时间", "操作者", "操作", "对象", "摘要", "结果"]
+AUDIT_WIDTHS = [148, 130, 100, 90, 420, 60]
+AUDIT_CENTER_COLS = [0, 2, 3, 5]
+COL_AUDIT_SUMMARY = 4
+AUDIT_RESULT_LABEL = {
+    "ok": "成功",
+    "fail": "失败",
+    "skipped": "未执行",
+}
+
+
+def _audit_target(row: Dict[str, Any]) -> str:
+    """审计记录的「对象」列：类型 + id，缺一补一，都没有就 `-`"""
+    t = str(row.get("target_type") or "")
+    i = row.get("target_id")
+    i = "" if i is None else str(i)
+    if t and i:
+        return f"{t} #{i}"
+    return t or i or "-"
 
 
 def _xdb_label(name: str) -> str:
@@ -200,11 +225,15 @@ class SettingsPage(QWidget):
         head.add_action(self.btn_save)
         outer.addWidget(head)
 
-        # ── 三个 tab ──
+        # ── 四个 tab ──
         self.tabs = QTabWidget()
         self.tabs.addTab(self._tab_service(), "服务与采集")
         self.tabs.addTab(self._tab_guard(), "防护与告警")
         self.tabs.addTab(self._tab_data(), "数据与离线库")
+        self.tabs.addTab(self._tab_audit(), "操作审计")
+        # 审计表只在切到该 tab 时才查：它可能在别的 tab 上被大量写入
+        # （封禁 / 保存设置都会记），常驻刷新是白烧 IO。
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self.tabs, 1)
 
     # ── Tab 1：服务与采集 ──
@@ -718,11 +747,48 @@ class SettingsPage(QWidget):
         lay.addWidget(xdb)
 
         data = _Panel("数据管理")
+        # 四张表各自的保留期。**不要合并成一个「统一保留 N 天」** ——
+        # 见 core.config 的 DEFAULT_*_RETENTION_DAYS：流水最短、结论次之、
+        # 封禁账本最长（要回答「是不是惯犯」），审计自己也要有期限。
         self.sp_retention = QSpinBox()
         self.sp_retention.setRange(1, 3650)
-        self.sp_retention.setValue(30)
+        self.sp_retention.setValue(DEFAULT_LOG_RETENTION_DAYS)
         self.sp_retention.setSuffix(" 天")
         self.sp_retention.setFixedWidth(120)
+        self.sp_retention.setToolTip(
+            "access_log 访问流水：原始事实，保留最短。\n同时决定磁盘日志文件的保留天数。"
+        )
+
+        self.sp_risk_retention = QSpinBox()
+        self.sp_risk_retention.setRange(1, 3650)
+        self.sp_risk_retention.setValue(DEFAULT_RISK_RETENTION_DAYS)
+        self.sp_risk_retention.setSuffix(" 天")
+        self.sp_risk_retention.setFixedWidth(120)
+        self.sp_risk_retention.setToolTip(
+            "risk_event 风险事件：规则算出的结论。\n"
+            "刻意比流水长 —— 否则「这条访问曾被判严重风险」会比流水更早消失。"
+        )
+
+        self.sp_ban_retention = QSpinBox()
+        self.sp_ban_retention.setRange(1, 3650)
+        self.sp_ban_retention.setValue(DEFAULT_BAN_RETENTION_DAYS)
+        self.sp_ban_retention.setSuffix(" 天")
+        self.sp_ban_retention.setFixedWidth(120)
+        self.sp_ban_retention.setToolTip(
+            "ban_list 封禁账本：只清已解封 / 已到期 / 失败的终态记录。\n"
+            "「已封禁」和「处理中」永不清理 —— 前者背后是一条真实存在的防火墙\n"
+            "规则，删了记账规则就变成没人认领的无主规则。"
+        )
+
+        self.sp_audit_retention = QSpinBox()
+        self.sp_audit_retention.setRange(1, 3650)
+        self.sp_audit_retention.setValue(DEFAULT_AUDIT_RETENTION_DAYS)
+        self.sp_audit_retention.setSuffix(" 天")
+        self.sp_audit_retention.setFixedWidth(120)
+        self.sp_audit_retention.setToolTip(
+            "audit_log 操作审计：默认 180 天，够覆盖一次季度回溯。\n"
+            "不给它期限的话，审计表自己就会变成新的无界增长表。"
+        )
 
         self.sp_buffer = QSpinBox()
         self.sp_buffer.setRange(500, 100000)
@@ -743,10 +809,21 @@ class SettingsPage(QWidget):
         self.sp_maint_hour.setSuffix(" 点")
         self.sp_maint_hour.setFixedWidth(120)
 
-        data.add("日志保留", self.sp_retention)
+        data.add("访问流水保留", self.sp_retention)
+        data.add("风险事件保留", self.sp_risk_retention)
+        data.add("封禁记录保留", self.sp_ban_retention)
+        data.add("操作审计保留", self.sp_audit_retention)
         data.add("自动清理时刻", self.sp_maint_hour)
         data.add("监控缓冲行数", self.sp_buffer)
         data.add("归属地缓存条数", self.sp_cache)
+
+        self.warn_wal = WarnBanner(
+            "清理会批量删除数据，SQLite 的 WAL 文件会随之涨到与被删数据同量级，"
+            "且这部分空间不会自动还给文件系统（只是留给后续写入复用）。"
+            "要真正回收磁盘，需要另外执行一次数据库整理（VACUUM）。",
+            level="info",
+        )
+        data.add_block(self.warn_wal)
 
         self.lbl_logfile = QLabel(log_file())
         self.lbl_logfile.setObjectName("mono_hint")
@@ -773,6 +850,200 @@ class SettingsPage(QWidget):
 
         lay.addStretch(1)
         return page
+
+    # ── Tab 4：操作审计 ──
+    def _tab_audit(self) -> QWidget:
+        """
+        审计留痕查看：分页 + 按操作者 / 操作类型过滤。
+
+        这个 tab **只读**，且刻意不放任何「删除 / 清空」按钮 —— 审计表的价值
+        就在于它不能被使用者自己抹掉，想删只能靠保留期（`audit_retention_days`）
+        到期被定期清理带走。
+        """
+        page = QWidget()
+        self.tab_audit = page
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 8, 8, 8)
+        lay.setSpacing(8)
+
+        self._audit_page = 0
+        #: 每页条数。审计一次操作一条，量不大，但也别一次拉全表
+        self._audit_size = 50
+
+        # ── 过滤条 ──
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        self.cb_audit_actor = QComboBox()
+        self.cb_audit_actor.setFixedWidth(150)
+        self.cb_audit_actor.currentIndexChanged.connect(self._on_audit_filter)
+
+        self.cb_audit_action = QComboBox()
+        self.cb_audit_action.setFixedWidth(150)
+        self.cb_audit_action.addItem("全部操作", "")
+        for act in audit.ACTIONS:
+            self.cb_audit_action.addItem(audit.action_label(act), act)
+        self.cb_audit_action.currentIndexChanged.connect(self._on_audit_filter)
+
+        self.ed_audit_kw = QLineEdit()
+        self.ed_audit_kw.setPlaceholderText("搜索摘要 / 对象 / 详情")
+        self.ed_audit_kw.setFixedWidth(220)
+        self.ed_audit_kw.returnPressed.connect(self._on_audit_filter)
+
+        b_search = QPushButton("筛选")
+        b_search.setObjectName("btn_outline")
+        b_search.setFixedWidth(72)
+        b_search.clicked.connect(self._on_audit_filter)
+
+        b_refresh = QPushButton("刷新")
+        b_refresh.setObjectName("btn_primary")
+        b_refresh.setFixedWidth(72)
+        b_refresh.clicked.connect(self._refresh_audit)
+
+        bar.addWidget(QLabel("操作者"))
+        bar.addWidget(self.cb_audit_actor)
+        bar.addSpacing(6)
+        bar.addWidget(QLabel("操作"))
+        bar.addWidget(self.cb_audit_action)
+        bar.addSpacing(6)
+        bar.addWidget(self.ed_audit_kw)
+        bar.addWidget(b_search)
+        bar.addWidget(b_refresh)
+        bar.addStretch(1)
+        lay.addLayout(bar)
+
+        # ── 表格 ──
+        self.tbl_audit = QTableWidget(0, len(AUDIT_HEADERS))
+        self.tbl_audit.setHorizontalHeaderLabels(AUDIT_HEADERS)
+        self.tbl_audit.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_audit.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_audit.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tbl_audit.setAlternatingRowColors(True)
+        self.tbl_audit.setShowGrid(False)
+        self.tbl_audit.setWordWrap(False)
+        self.tbl_audit.setTabKeyNavigation(False)
+        self.tbl_audit.verticalHeader().setVisible(False)
+        self.tbl_audit.verticalHeader().setDefaultSectionSize(26)
+        self.tbl_audit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        align_headers(self.tbl_audit, AUDIT_CENTER_COLS)
+        hh = self.tbl_audit.horizontalHeader()
+        for i, w in enumerate(AUDIT_WIDTHS):
+            hh.resizeSection(i, w)
+        # 摘要是唯一拉伸列：其余列都是定长（时间 / 人名 / 枚举），
+        # 横向滚动是硬约束 —— 表格不许出现横向滚动条
+        hh.setSectionResizeMode(COL_AUDIT_SUMMARY, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.tbl_audit, 1)
+
+        # ── 分页 ──
+        pager = QHBoxLayout()
+        pager.setSpacing(8)
+        self.btn_audit_prev = QPushButton("上一页")
+        self.btn_audit_prev.setObjectName("btn_outline")
+        self.btn_audit_prev.setFixedWidth(80)
+        self.btn_audit_prev.clicked.connect(lambda: self._goto_audit_page(self._audit_page - 1))
+        self.btn_audit_next = QPushButton("下一页")
+        self.btn_audit_next.setObjectName("btn_outline")
+        self.btn_audit_next.setFixedWidth(80)
+        self.btn_audit_next.clicked.connect(lambda: self._goto_audit_page(self._audit_page + 1))
+        self.lbl_audit_page = QLabel("共 0 条，第 1/1 页")
+        self.lbl_audit_page.setStyleSheet(f"color:{C.text_secondary};font-size:12px;")
+        pager.addWidget(self.btn_audit_prev)
+        pager.addWidget(self.btn_audit_next)
+        pager.addSpacing(6)
+        pager.addWidget(self.lbl_audit_page)
+        pager.addStretch(1)
+        lay.addLayout(pager)
+
+        self.lbl_audit_hint = QLabel(
+            "记录谁在何时做了什么：本机操作记 Windows 用户名，"
+            "程序自动（到期巡检 / 定期清理 / 自动封禁）记 system，"
+            "HTTP 上报触发的记 http:<来源IP>。"
+        )
+        self.lbl_audit_hint.setObjectName("form_hint")
+        self.lbl_audit_hint.setWordWrap(True)
+        lay.addWidget(self.lbl_audit_hint)
+        return page
+
+    # ── 审计 tab 数据 ──
+    def _on_tab_changed(self, idx: int) -> None:
+        if self.tabs.widget(idx) is self.tab_audit:
+            self._refresh_audit_actors()
+            self._refresh_audit()
+
+    def _on_audit_filter(self, *_args: Any) -> None:
+        # 条件变了必须回第 1 页：在第 7 页改过滤条件，原 offset 会指向空页
+        self._audit_page = 0
+        self._refresh_audit()
+
+    def _goto_audit_page(self, page: int) -> None:
+        self._audit_page = max(0, int(page))
+        self._refresh_audit()
+
+    def _refresh_audit(self) -> None:
+        """按当前条件重查一页审计记录"""
+        actor = self.cb_audit_actor.currentData() or ""
+        action = self.cb_audit_action.currentData() or ""
+        kw = self.ed_audit_kw.text().strip()
+        try:
+            total = count_audit(actor=actor, action=action, keyword=kw)
+            rows = query_audit(
+                limit=self._audit_size,
+                offset=self._audit_page * self._audit_size,
+                actor=actor,
+                action=action,
+                keyword=kw,
+            )
+        except Exception:
+            log.exception("查询审计记录失败")
+            self.lbl_audit_page.setText("查询失败")
+            return
+
+        # 末尾页被删空时退回最后一页（否则用户看到空表以为数据没了）
+        pages = max(1, (total + self._audit_size - 1) // self._audit_size)
+        if self._audit_page >= pages:
+            self._audit_page = max(0, pages - 1)
+            if self._audit_page and not rows:
+                self._refresh_audit()
+                return
+
+        self.tbl_audit.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            self._set_audit_row(i, r)
+        self.btn_audit_prev.setEnabled(self._audit_page > 0)
+        self.btn_audit_next.setEnabled(self._audit_page + 1 < pages)
+        self.lbl_audit_page.setText(f"共 {total} 条，第 {self._audit_page + 1}/{pages} 页")
+
+    def _set_audit_row(self, row: int, r: Dict[str, Any]) -> None:
+        result = str(r.get("result") or "")
+        color = C.danger if result == audit.RESULT_FAIL else None
+        cells = [
+            make_item(audit.fmt_ts(r.get("ts")), mono=True),
+            make_item(audit.actor_label(r.get("actor") or ""), tip=r.get("actor") or ""),
+            make_item(audit.action_label(r.get("action") or "")),
+            make_item(_audit_target(r)),
+            make_item(r.get("summary") or "", color=color, tip=r.get("detail") or ""),
+            make_item(AUDIT_RESULT_LABEL.get(result, result), color=color),
+        ]
+        for col, it in enumerate(cells):
+            self.tbl_audit.setItem(row, col, it)
+
+    def _refresh_audit_actors(self) -> None:
+        """重载「操作者」下拉框。保留当前选中项，避免刷新把筛选条件打回全部"""
+        from core.database import list_audit_actors
+
+        current = self.cb_audit_actor.currentData() or ""
+        try:
+            actors = list_audit_actors()
+        except Exception:
+            log.exception("读取审计操作者列表失败")
+            actors = []
+        self.cb_audit_actor.blockSignals(True)
+        self.cb_audit_actor.clear()
+        self.cb_audit_actor.addItem("全部操作者", "")
+        for a in actors:
+            self.cb_audit_actor.addItem(audit.actor_label(a), a)
+        idx = self.cb_audit_actor.findData(current)
+        self.cb_audit_actor.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cb_audit_actor.blockSignals(False)
 
     # ── 小工具 ──
     @staticmethod
@@ -917,8 +1188,17 @@ class SettingsPage(QWidget):
         self._on_hook_toggle(self.tg_hook.isChecked())
         self._on_hook_ssl_toggle(self.tg_hook_ssl.isChecked())
 
-        # 数据
-        self.sp_retention.setValue(cfg.get_int("log_retention_days", 30))
+        # 数据（四张表各自的保留期）
+        self.sp_retention.setValue(cfg.get_int("log_retention_days", DEFAULT_LOG_RETENTION_DAYS))
+        self.sp_risk_retention.setValue(
+            cfg.get_int("risk_retention_days", DEFAULT_RISK_RETENTION_DAYS)
+        )
+        self.sp_ban_retention.setValue(
+            cfg.get_int("ban_retention_days", DEFAULT_BAN_RETENTION_DAYS)
+        )
+        self.sp_audit_retention.setValue(
+            cfg.get_int("audit_retention_days", DEFAULT_AUDIT_RETENTION_DAYS)
+        )
         self.sp_maint_hour.setValue(cfg.get_int("maintenance_hour", 3))
         self.sp_buffer.setValue(cfg.get_int("monitor_buffer_size", 5000))
         self.sp_cache.setValue(cfg.get_int("geo_cache_size", 20000))
@@ -930,6 +1210,9 @@ class SettingsPage(QWidget):
         # 本机端口访问观察
         self._watch_load()
         self._refresh_watch_state()
+
+        # 操作审计：下拉框 + 首屏数据
+        self._refresh_audit_actors()
         self._set_dirty(False)
 
     def save(self) -> None:
@@ -984,6 +1267,10 @@ class SettingsPage(QWidget):
                 "webhook_allow_http": "1" if self.tg_hook_http.isChecked() else "0",
                 "webhook_verify_ssl": "1" if self.tg_hook_ssl.isChecked() else "0",
                 "log_retention_days": self.sp_retention.value(),
+                # 另外三张表各自的保留期（语义见 core.config.DEFAULT_*_RETENTION_DAYS）
+                "risk_retention_days": self.sp_risk_retention.value(),
+                "ban_retention_days": self.sp_ban_retention.value(),
+                "audit_retention_days": self.sp_audit_retention.value(),
                 "maintenance_hour": self.sp_maint_hour.value(),
                 "monitor_buffer_size": self.sp_buffer.value(),
                 "geo_cache_size": self.sp_cache.value(),
@@ -1021,6 +1308,25 @@ class SettingsPage(QWidget):
             set_retention(self.sp_retention.value())
         except Exception:
             log.exception("应用日志保留天数失败")
+
+        # 审计：只记「改了哪些键」，不记值 —— api_key / webhook_secret 是
+        # 真正的凭据，把新值写进审计表等于把密钥复制一份到明文可查的地方。
+        audit.record(
+            audit.ACTION_SETTINGS_SAVE,
+            target_type="setting",
+            summary="保存设置",
+            after={
+                "auto_mode": self.tg_auto.isChecked(),
+                "auto_ban_threshold": self.sp_threshold.value(),
+                "listen_host": WILDCARD_HOST if lan else DEFAULT_LISTEN_HOST,
+                "log_retention_days": self.sp_retention.value(),
+                "risk_retention_days": self.sp_risk_retention.value(),
+                "ban_retention_days": self.sp_ban_retention.value(),
+                "audit_retention_days": self.sp_audit_retention.value(),
+                "webhook_enabled": self.tg_hook.isChecked(),
+            },
+            detail="API Key 与 Webhook 密钥的值不写入审计",
+        )
 
         self._set_dirty(False)
         self._flash_saved()
@@ -1382,8 +1688,27 @@ class SettingsPage(QWidget):
             ok, err = xdb_updater.restore_backup(name, path)
         except Exception as e:
             log.exception("回滚离线库失败")
+            audit.record(
+                audit.ACTION_XDB_ROLLBACK,
+                target_type="xdb",
+                target_id=file_name,
+                summary=f"回滚{label}失败：{e}",
+                result=audit.RESULT_FAIL,
+            )
             QMessageBox.warning(self, "回滚失败", str(e))
             return
+
+        # 回滚会换掉归属地库 —— 之后所有 IP 的判定结果都可能变，必须留痕
+        audit.record(
+            audit.ACTION_XDB_ROLLBACK,
+            target_type="xdb",
+            target_id=file_name,
+            summary=f"回滚{label}到 {file_name}" + ("" if ok else f"（未完成：{err}）"),
+            before={"lib": name},
+            after={"lib": name, "file": file_name, "ok": ok},
+            result=audit.RESULT_OK if ok else audit.RESULT_FAIL,
+            detail=err or "",
+        )
 
         # 回滚本身也产生了一份新备份，列表与「当前库」两处都要跟着变
         self._refresh_backups()
@@ -1478,15 +1803,38 @@ class SettingsPage(QWidget):
         self.lbl_hook_state.setStyleSheet(f"color:{color};font-size:12.5px;")
 
     def _clean_logs(self) -> None:
-        """手动立即清理：访问记录 + 磁盘上的过期日志文件"""
-        days = self.sp_retention.value()
-        n = delete_old_access(days)
-        n_files = maintenance.cleanup_log_files(days)
+        """
+        手动立即清理：四张表 + 磁盘上的过期日志文件。
+
+        四张表走各自的保留期（不是同一个 days）—— 按钮叫「清理过期日志」，
+        但漏掉 risk_event / ban_list / audit_log 才是之前真正的缺口：那三张表
+        从来没有清理入口，只会在磁盘上一直长。
+        """
+        rows = maintenance.cleanup_logs()
+        risk = maintenance.cleanup_risk()
+        bans = maintenance.cleanup_bans()
+        n_files = maintenance.cleanup_log_files()
+        audit.record(
+            audit.ACTION_DATA_CLEANUP,
+            target_type="data",
+            summary=f"手动清理：访问 {rows}、事件 {risk}、封禁 {bans}、日志文件 {n_files}",
+            after={
+                "access_log": rows,
+                "risk_event": risk,
+                "ban_list": bans,
+                "log_files": n_files,
+            },
+        )
         QMessageBox.information(
             self,
             "完成",
-            f"已清理 {n} 条超过 {days} 天的访问记录，"
-            f"以及 {n_files} 个过期日志文件。\n\n日志文件：{log_file()}",
+            f"已清理访问记录 {rows} 条、风险事件 {risk} 条、终态封禁记录 {bans} 条，"
+            f"以及 {n_files} 个过期日志文件。\n\n"
+            f"保留期：访问 {self.sp_retention.value()} 天 / "
+            f"事件 {self.sp_risk_retention.value()} 天 / "
+            f"封禁 {self.sp_ban_retention.value()} 天。\n"
+            f"「已封禁」和「处理中」的封禁记录不会被清理。\n\n"
+            f"日志文件：{log_file()}",
         )
 
     def _clear_logs(self) -> None:
@@ -1502,4 +1850,11 @@ class SettingsPage(QWidget):
         ):
             return
         clear_all_logs()
+        # 这是全项目破坏性最大的一个按钮，必须留痕：事后唯一能回答
+        # 「数据是哪天没的、谁点的」的就是这条记录。
+        audit.record(
+            audit.ACTION_DATA_CLEAR,
+            target_type="data",
+            summary="清空全部访问日志与风险事件（封禁列表不受影响）",
+        )
         QMessageBox.information(self, "完成", "日志已清空。")

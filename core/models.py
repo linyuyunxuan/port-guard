@@ -396,6 +396,9 @@ class BanRecord:
     created_at: str = ""
     updated_at: str = ""
     error_msg: str = ""
+    #: 谁解封的（v2 迁移加的列，长期为空是因为一直没有写入点；现在由审计
+    #: 埋点统一填，口径见 app.audit.ACTOR_*）
+    unblocked_by: str = ""
 
     @property
     def status_label(self) -> str:

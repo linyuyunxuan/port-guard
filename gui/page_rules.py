@@ -12,6 +12,7 @@
 
 from typing import Dict, List, Tuple
 
+from app import audit
 from core.config import (
     LEVEL_CRITICAL,
     LEVEL_HIGH,
@@ -434,15 +435,40 @@ class RulesPage(QWidget):
         # 区域访问白名单规则（顶层数组，与 rules 并列）
         region_rules = self.tab_region.collect()
         cfg["region_rules"] = region_rules
+        enabled = sum(1 for r in region_rules if r.get("enabled", True))
         try:
             eng.save_config(cfg)
             eng.reload()
         except Exception as e:
             QMessageBox.warning(self, "保存失败", str(e))
+            audit.record(
+                audit.ACTION_RULES_SAVE,
+                target_type="rule",
+                summary=f"保存规则失败：{e}",
+                result=audit.RESULT_FAIL,
+            )
             return
+        # 审计：规则是「什么样的访问算风险」的唯一权威，改错会直接导致漏判
+        # 或误判。只记每条规则的开关与分值，不记区域规则的完整明细（量大且
+        # 真正的差异在开关/分值上）。
+        audit.record(
+            audit.ACTION_RULES_SAVE,
+            target_type="rule",
+            summary=f"保存规则（{len(self._cards)} 条引擎规则、{len(region_rules)} 条区域规则）",
+            after={
+                "rules": {
+                    rid: {
+                        "enabled": (c.collect() or {}).get("enabled"),
+                        "score": (c.collect() or {}).get("score"),
+                    }
+                    for rid, c in self._cards.items()
+                },
+                "region_rules": len(region_rules),
+                "region_enabled": enabled,
+            },
+        )
         self._clear_dirty()
         self.rules_saved.emit()
-        enabled = sum(1 for r in region_rules if r.get("enabled", True))
         QMessageBox.information(
             self,
             "已保存",
@@ -473,13 +499,35 @@ class RulesPage(QWidget):
                 "存在非法条目",
                 "以下条目不是合法 IP 或 CIDR，已忽略：\n" + "\n".join(bad[:20]),
             )
+        # 审计要记「加了谁、删了谁」，所以必须在覆盖 eng.blacklist **之前**
+        # 取旧集合 —— 覆盖之后旧值就没了，只剩「现在有多少条」。
+        old_black = set(eng.blacklist.entries())
+        old_white = set(eng.whitelist.entries())
         eng.blacklist = black
         eng.whitelist = white
         try:
             eng.save_lists()
         except Exception as e:
             QMessageBox.warning(self, "保存失败", str(e))
+            audit.record(
+                audit.ACTION_LIST_SAVE,
+                target_type="list",
+                summary=f"保存黑白名单失败：{e}",
+                result=audit.RESULT_FAIL,
+            )
             return
+        audit.record(
+            audit.ACTION_LIST_SAVE,
+            target_type="list",
+            summary=(
+                f"黑名单 {len(black)} 条（+{len(set(black.entries()) - old_black)}"
+                f" -{len(old_black - set(black.entries()))}）、"
+                f"白名单 {len(white)} 条（+{len(set(white.entries()) - old_white)}"
+                f" -{len(old_white - set(white.entries()))}）"
+            ),
+            before={"black": sorted(old_black), "white": sorted(old_white)},
+            after={"black": sorted(black.entries()), "white": sorted(white.entries())},
+        )
         self.rules_saved.emit()
         QMessageBox.information(
             self, "已保存", f"黑名单 {len(black)} 条，白名单 {len(white)} 条，已即时生效。"

@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+from app import audit
 from core import settings as cfg
 from core import xdb_updater
 from core.logger import get_logger
@@ -20,6 +21,24 @@ from core.logger import get_logger
 log = get_logger(__name__)
 
 DoneFn = Optional[Callable[[object], None]]
+
+
+def _record(actor: str, ok: bool, message: str, auto: bool) -> None:
+    """
+    同步 / 探测结果写一条审计。
+
+    只记结论（成功 / 失败 + 一句话），不记下载字节数之类的过程量 ——
+    过程已经由 bus.emit_xdb 推给界面了，审计里重复一遍只会让表变胖。
+    """
+    audit.record(
+        audit.ACTION_XDB_SYNC,
+        actor=actor,
+        target_type="xdb",
+        summary=("自动同步" if auto else "手动同步") + ("成功" if ok else f"失败：{message}"),
+        after={"ok": ok, "auto": auto, "message": message},
+        result=audit.RESULT_OK if ok else audit.RESULT_FAIL,
+        detail=message or "",
+    )
 
 
 class XdbSyncService:
@@ -74,10 +93,14 @@ class XdbSyncService:
             try:
                 res = xdb_updater.update(force=force)
                 self._last_error = "" if res.ok else res.message
+                # 手动触发：actor 取当前登录用户。放在 try 内，只有真的
+                # 拿到结果才记 —— 连 update() 都没跑成功时下面 except 记失败。
+                _record(audit.actor_local(), res.ok, res.message, auto=False)
             except Exception as e:
                 log.exception("离线库同步异常")
                 self._last_error = str(e)
                 res = None
+                _record(audit.actor_local(), False, str(e), auto=False)
             if on_done:
                 try:
                     on_done(res)
@@ -123,6 +146,9 @@ class XdbSyncService:
                 if auto_download:
                     upd = xdb_updater.update()
                     ok, message = upd.ok, upd.message
+                    # 定时自动同步：actor 是 system，不是当前登录的用户 ——
+                    # 用户没点过任何按钮，记成人名会误导排查。
+                    _record(audit.ACTOR_SYSTEM, ok, message, auto=True)
                 else:
                     chk = xdb_updater.check()
                     ok, message = chk.ok, chk.message
@@ -144,6 +170,7 @@ class XdbSyncService:
                 log.exception("自动同步离线库失败")
                 self._last_error = str(e)
                 ok, message = False, str(e)
+                _record(audit.ACTOR_SYSTEM, False, str(e), auto=True)
             if on_done:
                 try:
                     on_done({"ok": ok, "message": message})

@@ -372,8 +372,10 @@ class PortWatcher:
             tags=tags,
             event_ts=ts or now_ms(),
         )
-        # 与业务系统上报共用同一条链路（归属地/评分/落库/告警/自动封禁）
-        process_record(rec, allow_auto_ban=self.config.allow_auto_ban)
+        # 与业务系统上报共用同一条链路（归属地/评分/落库/告警/自动封禁）。
+        # actor=system：本机采集不是任何「人」发起的，也不是外部上报，
+        # 是程序自己在看自己 —— 审计里必须能和人工操作区分开。
+        process_record(rec, allow_auto_ban=self.config.allow_auto_ban, actor="system")
         with self._lock:
             self._stats["emitted"] += 1
 

@@ -242,6 +242,24 @@ DEFAULT_ESCALATION_FACTOR = 2
 DEFAULT_ESCALATION_MAX_SEC = 7 * 24 * 3600
 
 
+# ═══════════════════════════════════════════════════════════
+#  保留期（定期清理）
+#
+#  ⚠️ 三张派生/记账表各有各的保留期，**不要合并成一个**：
+#  · access_log 是原始事实流水，最短（30 天）；
+#  · risk_event 是规则算出的结论 —— 流水没了但结论还在，才会出现「这条访问
+#    曾经被判严重风险、但流水查不到」的断档，所以它比流水留得更久（90 天）；
+#  · ban_list  是封禁账本，只清终态记录，且它要回答「这个 IP 是不是惯犯」
+#    （递增封禁靠它数历史次数），清太狠会让递增失效，故最长（180 天）；
+#  · audit_log 是审计留痕，要能回溯一个季度（180 天）。
+# ═══════════════════════════════════════════════════════════
+
+DEFAULT_LOG_RETENTION_DAYS = 30
+DEFAULT_RISK_RETENTION_DAYS = 90
+DEFAULT_BAN_RETENTION_DAYS = 180
+DEFAULT_AUDIT_RETENTION_DAYS = 180
+
+
 # ── 默认设置（写入 settings 表）──
 DEFAULT_SETTINGS = {
     # 服务
@@ -280,7 +298,11 @@ DEFAULT_SETTINGS = {
     "alert_popup_level": LEVEL_CRITICAL,
     "alert_merge_sec": "60",  # 同 IP 告警合并窗口
     # 数据
-    "log_retention_days": "30",  # 访问记录 + 日志文件的保留天数
+    "log_retention_days": str(DEFAULT_LOG_RETENTION_DAYS),  # 访问记录 + 日志文件的保留天数
+    # ── 其余三张表各自的保留期（见 DEFAULT_*_RETENTION_DAYS 说明）──
+    "risk_retention_days": str(DEFAULT_RISK_RETENTION_DAYS),  # risk_event
+    "ban_retention_days": str(DEFAULT_BAN_RETENTION_DAYS),  # ban_list（仅终态记录）
+    "audit_retention_days": str(DEFAULT_AUDIT_RETENTION_DAYS),  # audit_log
     "maintenance_hour": "3",  # 每天几点执行定期清理（0-23）
     "maintenance_last_date": "",  # 最近一次清理日期 YYYY-MM-DD（内部状态）
     "log_level": "INFO",

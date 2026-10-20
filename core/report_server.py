@@ -256,7 +256,10 @@ def _process(
 
     # 归属地 / 规则评估 / 落库 / UI 投递 / 告警 / 自动封禁 全部收在 core.pipeline，
     # 与「本机端口访问采集」共用同一条链路 —— 两条来源的结论必须一致。
-    result = process_record(rec)
+    #
+    # actor 用 **TCP 对端地址**而不是 body 里的 ip：审计要回答的是「谁让我们
+    # 封的」，那是发起请求的机器，不是它声称的受害者 IP。
+    result = process_record(rec, actor="http:" + (fallback_ip or "unknown"))
     return result_payload(rec, result)
 
 

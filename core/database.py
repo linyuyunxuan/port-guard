@@ -21,6 +21,8 @@ from core.config import BIND_ALL_HOSTS, DEFAULT_SETTINGS, db_path
 from core.logger import get_logger
 from core.models import (
     STATUS_ACTIVE,
+    STATUS_EXPIRED,
+    STATUS_FAILED,
     STATUS_UNBANNED,
     AccessRecord,
     BanRecord,
@@ -482,6 +484,92 @@ def delete_old_access(days: int) -> int:
         conn.close()
 
 
+#: 允许被保留期清理**自动**删掉的封禁状态。
+#
+# 这一组是白名单而不是黑名单，原因：ban_list 的 status 里唯一「对应一条真实
+# 存在的 Windows 防火墙规则」的是 active。删掉 active 记录只是删了记账，
+# 防火墙里的规则还在，从此变成没人认领的无主规则（只能靠对账兜底发现）。
+# 反过来，写死「只删这三种终态」意味着将来新增状态时**默认不被清理** ——
+# 新增状态出 bug 的后果顶多是库变大，不会静默制造无主规则。
+CLEANABLE_BAN_STATUS = (STATUS_UNBANNED, STATUS_EXPIRED, STATUS_FAILED)
+
+
+def delete_old_risk_events(days: int) -> int:
+    """
+    删除超过保留期的风险事件，返回删除条数。
+
+    ⚠️ 保留期**刻意独立于** access_log（`risk_retention_days` 默认比
+    `log_retention_days` 长）：事件是规则算出来的结论，流水是原始事实。
+    共用 30 天的话，「这台机器三个月前被判过严重风险」这件事会比流水更早消失，
+    而事件页的「未处理」计数也会在某天早上突然掉一大截，很难解释。
+    """
+    if days <= 0:
+        return 0
+    cutoff = now_ms() - days * 86400 * 1000
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM risk_event WHERE event_ts < ?", (cutoff,))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def delete_old_bans(days: int) -> int:
+    """
+    删除超过保留期的**终态**封禁记录，返回删除条数。
+
+    三条硬边界（缺一条就是线上事故）：
+    1. `active` **永不清理** —— 它对应一条真实存在的防火墙规则，删库记录会让
+       规则变无主（既不能被到期巡检解封，也不会出现在「已封禁」列表里）；
+    2. `pending` **永不清理** —— 它是「插库 → 调防火墙 → 回填 active/failed」
+       之间的瞬态，进程被杀就会残留。把它清掉等于替用户做了一次「这次封禁
+       没发生过」的决定，而这个决定本不该由清理任务来做；
+    3. 其余状态（`failed` / `expired` / `unbanned`）才是可清理的终态。
+
+    ⚠️ 时间列是字符串：`created_at` 由 `datetime('now','localtime')` 生成
+    （见 SCHEMA），格式 `YYYY-MM-DD HH:MM:SS`，定长下字典序即时间序，所以
+    这里只能写 `datetime(created_at) < datetime('now','localtime','-N days')`。
+    这是 ban_list 的历史包袱，与全项目 epoch 毫秒口径不一致，改表结构要另开
+    一次迁移。
+    """
+    if days <= 0:
+        return 0
+    placeholders = ", ".join("?" for _ in CLEANABLE_BAN_STATUS)
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            # 状态数量固定且来自模块级常量元组，不是外部输入
+            f"DELETE FROM ban_list WHERE status IN ({placeholders}) "  # noqa: S608
+            "AND datetime(created_at) < datetime('now','localtime',?)",
+            [*CLEANABLE_BAN_STATUS, f"-{int(days)} days"],
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def delete_old_audit(days: int) -> int:
+    """
+    删除超过保留期的审计记录，返回删除条数。
+
+    审计表本身也是无界增长的：自动封禁、到期巡检、定期清理都会持续写入。
+    不给它保留期，等于一边修「派生表永久增长」一边新造一张永久增长的表。
+    默认 180 天 —— 足够覆盖一次季度审计回溯。
+    """
+    if days <= 0:
+        return 0
+    cutoff = now_ms() - days * 86400 * 1000
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def vacuum() -> None:
     """整理数据库文件（长期运行 + 大量删除后建议偶尔执行）"""
     conn = _connect()
@@ -733,6 +821,9 @@ def update_ban(ban_id: Optional[int], **fields) -> None:
 
 
 def _row_to_ban(r: sqlite3.Row) -> BanRecord:
+    # unblocked_by 是 v2 迁移才加的列。这里按列名先判一次再取，避免拿到
+    # 老库（或测试里手工建的、没跑迁移的表）时 KeyError 把整个列表页打崩。
+    keys = r.keys()
     return BanRecord(
         id=r["id"],
         ip=r["ip"],
@@ -746,6 +837,7 @@ def _row_to_ban(r: sqlite3.Row) -> BanRecord:
         created_at=r["created_at"] or "",
         updated_at=r["updated_at"] or "",
         error_msg=r["error_msg"] or "",
+        unblocked_by=(r["unblocked_by"] or "") if "unblocked_by" in keys else "",
     )
 
 
@@ -834,8 +926,20 @@ def list_expired_bans(now: Optional[int] = None) -> List[BanRecord]:
         conn.close()
 
 
-def mark_ban_unbanned(ban_id: Optional[int], new_status: str = STATUS_UNBANNED) -> None:
-    update_ban(ban_id, status=new_status)
+def mark_ban_unbanned(
+    ban_id: Optional[int], new_status: str = STATUS_UNBANNED, unblocked_by: Optional[str] = None
+) -> None:
+    """
+    把封禁记录标记为「已解封」，可选同时记下是谁解的。
+
+    `unblocked_by` 是 v2 迁移就加好的列，此前**一个写入点都没有** ——
+    解封人字段长期空置，「谁在何时解封了谁」这个问题根本答不上来。
+    口径见 app.audit 的 ACTOR_*（本地用户名 / system / http:<来源IP>）。
+    """
+    fields: Dict[str, Any] = {"status": new_status}
+    if unblocked_by:
+        fields["unblocked_by"] = str(unblocked_by)
+    update_ban(ban_id, **fields)
 
 
 def count_active_bans() -> int:
@@ -887,5 +991,151 @@ def delete_ban_records(ban_ids: List[int]) -> int:
         cur = conn.executemany("DELETE FROM ban_list WHERE id = ?", [(i,) for i in ids])
         conn.commit()
         return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════
+#  操作审计（audit_log）
+# ═══════════════════════════════════════════════════════════
+#
+# 本模块只提供「原始读写」。**谁该在什么时候记一条**，是 app.audit 的职责 ——
+# 埋点分散在各业务动作里，塞进这里的写函数会让它们被迫多收一个 actor 参数，
+# 而这些函数被 GUI / 业务层 / 测试多处直接调用，签名一改全得跟着改。
+
+_INSERT_AUDIT_SQL = """
+INSERT INTO audit_log
+   (ts, actor, action, target_type, target_id, summary, before_json, after_json, result, detail)
+VALUES (?,?,?,?,?,?,?,?,?,?)
+"""
+
+
+def insert_audit(
+    ts: int,
+    actor: str,
+    action: str,
+    target_type: str = "",
+    target_id: Optional[str] = None,
+    summary: str = "",
+    before_json: Optional[str] = None,
+    after_json: Optional[str] = None,
+    result: str = "ok",
+    detail: str = "",
+) -> int:
+    """
+    写一条审计记录，返回 rowid。失败会**抛出**——调用方（app.audit.record）
+    负责兜住异常，因为审计写不进去绝不能反过来中断业务动作。
+    """
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            _INSERT_AUDIT_SQL,
+            (
+                int(ts),
+                str(actor),
+                str(action),
+                str(target_type),
+                None if target_id is None else str(target_id),
+                str(summary),
+                before_json,
+                after_json,
+                str(result),
+                str(detail),
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def _audit_where(
+    actor: str = "",
+    action: str = "",
+    keyword: str = "",
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+) -> Tuple[str, List[Any]]:
+    """与查询/计数共用的 WHERE 片段（全部走参数绑定）"""
+    sql = ""
+    args: List[Any] = []
+    if actor:
+        sql += " AND actor = ?"
+        args.append(actor)
+    if action:
+        sql += " AND action = ?"
+        args.append(action)
+    if keyword:
+        sql += " AND (summary LIKE ? OR detail LIKE ? OR target_id LIKE ?)"
+        like = f"%{keyword}%"
+        args += [like, like, like]
+    if since_ts is not None:
+        sql += " AND ts >= ?"
+        args.append(int(since_ts))
+    if until_ts is not None:
+        sql += " AND ts < ?"
+        args.append(int(until_ts))
+    return sql, args
+
+
+def query_audit(
+    limit: int = 200,
+    offset: int = 0,
+    actor: str = "",
+    action: str = "",
+    keyword: str = "",
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """按条件取审计记录（最新在前）。`since_ts`/`until_ts` 为左闭右开 epoch 毫秒。"""
+    where, args = _audit_where(actor, action, keyword, since_ts, until_ts)
+    sql = "SELECT * FROM audit_log WHERE 1=1" + where  # noqa: S608
+    sql += " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?"
+    args += [limit, offset]
+    conn = _connect()
+    try:
+        return [dict(r) for r in conn.execute(sql, args)]
+    finally:
+        conn.close()
+
+
+def count_audit(
+    actor: str = "",
+    action: str = "",
+    keyword: str = "",
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+) -> int:
+    """与 `query_audit` **同条件**的总条数（分页用）"""
+    where, args = _audit_where(actor, action, keyword, since_ts, until_ts)
+    sql = "SELECT COUNT(*) c FROM audit_log WHERE 1=1" + where  # noqa: S608
+    conn = _connect()
+    try:
+        return int(conn.execute(sql, args).fetchone()["c"])
+    finally:
+        conn.close()
+
+
+def list_audit_actors(limit: int = 50) -> List[str]:
+    """
+    列出出现过的 actor（供界面的「操作者」下拉框用），按最近出现排序。
+
+    为什么不做成 `SELECT DISTINCT`：审计表会一直涨，「谁出现过」这个集合
+    本身是有界的小集合，但 DISTINCT 会全表扫；按 ts 走索引取最近若干条再
+    在 Python 里去重，实际更快也更符合「下拉框只放近期的人」的直觉。
+    """
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT actor FROM audit_log ORDER BY ts DESC LIMIT ?", (max(1, int(limit)) * 20,)
+        )
+        seen: List[str] = []
+        for r in rows:
+            a = r["actor"]
+            if a and a not in seen:
+                seen.append(a)
+                if len(seen) >= limit:
+                    break
+        return seen
     finally:
         conn.close()

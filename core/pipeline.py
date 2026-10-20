@@ -16,14 +16,14 @@ PortGuard — 记录处理流水线（上报来源 / 本机采集来源共用）
 """
 
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from core import settings as cfg
 from core.db_writer import get_writer
 from core.event_bus import bus
 from core.geo_locator import get_locator
 from core.logger import get_logger
-from core.models import STATUS_ACTIVE, AccessRecord, BanRecord, RiskResult
+from core.models import STATUS_ACTIVE, STATUS_FAILED, AccessRecord, BanRecord, RiskResult
 from core.rule_engine import get_engine, is_never_ban
 
 log = get_logger(__name__)
@@ -60,7 +60,7 @@ def _resolve_ban_duration(ip: str, result: RiskResult) -> int:
     return decision.seconds
 
 
-def auto_ban_record(rec: AccessRecord, result: RiskResult) -> None:
+def auto_ban_record(rec: AccessRecord, result: RiskResult, actor: Optional[str] = None) -> None:
     """
     自动模式：无需人工确认直接封禁（默认关闭，需在设置页显式开启）。
 
@@ -135,6 +135,47 @@ def auto_ban_record(rec: AccessRecord, result: RiskResult) -> None:
         log.warning("自动封禁生效 ip=%s rule=%s score=%d", rec.ip, name, result.score)
     else:
         log.error("自动封禁失败 ip=%s err=%s", rec.ip, err)
+
+    # 审计。这里必须记 —— 自动封禁是**唯一没有人在场**的封禁路径，
+    # 事后「这个 IP 为什么被封」只能靠这条记录回答。actor 由调用方带进来：
+    # HTTP 上报是 `http:<来源IP>`，本机采集是 `system`（见 process_record）。
+    #
+    # 懒导入而不是顶层导入：core.pipeline 被 core.report_server 顶层导入，
+    # 而 app.audit 又依赖 core.database，顶层互引会在部分入口下成环。
+    # 本文件 `from app.ban_service import ...` 也是同样的懒导入写法。
+    from app.audit import ACTION_BAN_AUTO as _ACTION
+    from app.audit import ACTOR_SYSTEM as _SYSTEM
+    from app.audit import RESULT_FAIL as _FAIL
+    from app.audit import RESULT_OK as _OK
+    from app.audit import record as _audit
+
+    _audit(
+        _ACTION,
+        actor=actor or _SYSTEM,
+        target_type="ban",
+        target_id=ban_id,
+        summary=(
+            f"自动封禁 {rec.ip}"
+            + (f" {duration} 秒" if duration else " 永久")
+            + ("成功" if ok else f"失败：{err}")
+        ),
+        before={
+            "ip": rec.ip,
+            "score": result.score,
+            "level": result.level,
+            "matched": result.matched_rules,
+            "reason": result.reason,
+        },
+        after={
+            "ban_id": ban_id,
+            "status": STATUS_ACTIVE if ok else STATUS_FAILED,
+            "rule": name,
+            "duration_sec": duration,
+        },
+        result=_OK if ok else _FAIL,
+        detail=err or "",
+    )
+
     bus.emit_ban(
         {
             "ip": rec.ip,
@@ -153,6 +194,7 @@ def process_record(
     *,
     allow_auto_ban: bool = True,
     emit_alert: bool = True,
+    actor: Optional[str] = None,
 ) -> RiskResult:
     """
     处理一条已构造好的访问记录。
@@ -161,6 +203,8 @@ def process_record(
     · allow_auto_ban —— 是否允许触发自动封禁。本机采集在「仅观察」模式下
       会传 False（用户可能只是想知道谁在访问，不想因为自采数据就封人）。
     · emit_alert —— 是否投递告警事件（托盘气泡/声音）。
+    · actor —— 这条记录的「发起人」，只用于自动封禁的审计。
+      HTTP 上报传 `http:<来源IP>`，本机采集传 `system`，留空按 system 处理。
 
     返回评估结果（调用方通常还需要它来构造响应体）。
     """
@@ -209,7 +253,7 @@ def process_record(
             and cfg.get_bool("auto_mode", False)
             and result.score >= cfg.get_int("auto_ban_threshold", 90)
         ):
-            auto_ban_record(rec, result)
+            auto_ban_record(rec, result, actor=actor)
 
     return result
 
