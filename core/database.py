@@ -365,14 +365,25 @@ def _row_to_access(r: sqlite3.Row) -> AccessRecord:
     )
 
 
-def query_access_logs(
-    limit: int = 500,
-    offset: int = 0,
+def _access_where(
     keyword: str = "",
     level: str = "",
     port: Optional[int] = None,
-) -> List[AccessRecord]:
-    sql = "SELECT * FROM access_log WHERE 1=1"
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+) -> Tuple[str, List[Any]]:
+    """访问日志的 WHERE 片段（不含 `WHERE 1=1`），供查询与计数**共用**。
+
+    为什么必须共用：`count_access_logs` 要回答「共 N 条 / 第 x/y 页」，
+    一旦它和列表查询各写一份条件，改一处漏一处就会变成「显示 200 条、
+    分页却说 3 页」这种最难自查的错。测试里有一条专门盯这个
+    （`tests/test_query_access.py::test_count_matches_query`）。
+
+    ⚠️ `keyword` 是 `%kw%` 前缀通配，`ip / path / user_agent` 三列的
+    LIKE 都**走不了索引**（`idx_access_ip` 只对 `ip = ?` 有效），
+    所以调用方要把单页条数压住，别让它扫全表。
+    """
+    sql = ""
     args: List[Any] = []
     if keyword:
         sql += " AND (ip LIKE ? OR path LIKE ? OR user_agent LIKE ?)"
@@ -384,11 +395,59 @@ def query_access_logs(
     if port:
         sql += " AND local_port = ?"
         args.append(port)
+    if since_ts is not None:
+        sql += " AND event_ts >= ?"
+        args.append(int(since_ts))
+    if until_ts is not None:
+        sql += " AND event_ts < ?"
+        args.append(int(until_ts))
+    return sql, args
+
+
+def query_access_logs(
+    limit: int = 500,
+    offset: int = 0,
+    keyword: str = "",
+    level: str = "",
+    port: Optional[int] = None,
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+) -> List[AccessRecord]:
+    """按条件取历史访问记录（最新在前）。
+
+    `since_ts` / `until_ts` 是 epoch 毫秒的**左闭右开**区间
+    （`event_ts >= since_ts AND event_ts < until_ts`），与 `query_risk_events`
+    同口径：右端取开区间，是为了让「结束日期」直接传「次日零点」，
+    否则选到 10-19 这天时 23:59:59.999 会漏掉。
+
+    `offset` 配合 `count_access_logs` 做分页：先 count 拿总数，再按
+    `offset = 页码 * limit` 逐页取。
+    """
+    where, args = _access_where(keyword, level, port, since_ts, until_ts)
+    # `where` 里只有固定片段，所有外部值都走参数绑定（见 _access_where）
+    sql = "SELECT * FROM access_log WHERE 1=1" + where  # noqa: S608
     sql += " ORDER BY event_ts DESC, id DESC LIMIT ? OFFSET ?"
     args += [limit, offset]
     conn = _connect()
     try:
         return [_row_to_access(r) for r in conn.execute(sql, args)]
+    finally:
+        conn.close()
+
+
+def count_access_logs(
+    keyword: str = "",
+    level: str = "",
+    port: Optional[int] = None,
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+) -> int:
+    """与 `query_access_logs` **同条件**的总条数（分页用）。"""
+    where, args = _access_where(keyword, level, port, since_ts, until_ts)
+    sql = "SELECT COUNT(*) c FROM access_log WHERE 1=1" + where  # noqa: S608
+    conn = _connect()
+    try:
+        return int(conn.execute(sql, args).fetchone()["c"])
     finally:
         conn.close()
 

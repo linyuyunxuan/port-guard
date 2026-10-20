@@ -23,6 +23,7 @@ from core.logger import get_logger
 from core.rule_engine import get_engine, is_never_ban
 from gui.components import ShieldMark, TopStatusBar
 from gui.mixins import EventPumpMixin, ServerCtlMixin
+from gui.page_access import AccessPage
 from gui.page_bans import BansPage, ManualBanDialog
 from gui.page_events import EventsPage
 from gui.page_iplookup import IpLookupPage
@@ -69,6 +70,7 @@ log = get_logger(__name__)
 NAV_ITEMS = [
     ("实时监控", "监控"),
     ("风险事件", "事件"),
+    ("历史访问", "访问"),
     ("封禁管理", "封禁"),
     ("规则配置", "规则"),
     ("IP 查询", "查询"),
@@ -77,15 +79,26 @@ NAV_ITEMS = [
 ]
 
 # 侧栏分组：(分组标题, [NAV_ITEMS 下标])
-# 顺序即导航顺序，也是 Ctrl+1..7 的顺序 —— 只在这里维护一份下标表，
+# 顺序即导航顺序，也是 Ctrl+1..8 的顺序 —— 只在这里维护一份下标表，
 # _build_sidebar / _setup_shortcuts / _switch_page 都从 NAV_ITEMS 取名字。
+# ⚠️ 页面栈下标 = NAV_ITEMS 下标（见 _build_ui 的 addWidget 顺序），
+# 插入新页时必须同时改 gui/mixins.py 里那几处「当前页」判断。
 NAV_GROUPS = [
-    ("监控", (0, 1)),
-    ("处置", (2,)),
-    ("配置", (3, 4, 5, 6)),
+    ("监控", (0, 1, 2)),
+    ("处置", (3,)),
+    ("配置", (4, 5, 6, 7)),
 ]
 
-PAGE_MONITOR, PAGE_EVENTS, PAGE_BANS, PAGE_RULES, PAGE_LOOKUP, PAGE_LOGS, PAGE_SETTINGS = range(7)
+(
+    PAGE_MONITOR,
+    PAGE_EVENTS,
+    PAGE_ACCESS,
+    PAGE_BANS,
+    PAGE_RULES,
+    PAGE_LOOKUP,
+    PAGE_LOGS,
+    PAGE_SETTINGS,
+) = range(8)
 
 
 def _make_icon(color: Optional[str] = None, size: int = 64) -> QIcon:
@@ -349,8 +362,10 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         col.addWidget(self.stack, 1)
         root.addWidget(content, 1)
 
+        # addWidget 的顺序必须与 NAV_ITEMS 一致：栈下标就是导航下标
         self.page_monitor = MonitorPage()
         self.page_events = EventsPage()
+        self.page_access = AccessPage()
         self.page_bans = BansPage()
         self.page_rules = RulesPage()
         self.page_iplookup = IpLookupPage()
@@ -359,6 +374,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         for p in (
             self.page_monitor,
             self.page_events,
+            self.page_access,
             self.page_bans,
             self.page_rules,
             self.page_iplookup,
@@ -493,7 +509,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         return self.sidebar
 
     def _setup_shortcuts(self) -> None:
-        """Ctrl+1…7 切页（与侧栏顺序一致，导航项 tooltip 已标出）"""
+        """Ctrl+1…8 切页（与侧栏顺序一致，导航项 tooltip 已标出）"""
         self._shortcuts: List[QShortcut] = []
         for idx in range(len(NAV_ITEMS)):
             sc = QShortcut(QKeySequence(f"Ctrl+{idx + 1}"), self)
@@ -550,6 +566,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             b.setChecked(i == idx)
         if idx == PAGE_EVENTS:
             self.page_events.refresh()
+        elif idx == PAGE_ACCESS:
+            self.page_access.refresh()
         elif idx == PAGE_BANS:
             self.page_bans.refresh()
         elif idx == PAGE_LOOKUP:
@@ -604,6 +622,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self.page_monitor.ask_ban.connect(self.request_ban)
         self.page_events.ask_ban.connect(self.request_ban)
         self.page_events.ask_ban_many.connect(self.request_ban_many)
+        self.page_access.ask_ban.connect(self.request_ban)
+        self.page_access.ask_lookup.connect(self._goto_lookup)
         self.page_bans.ask_ban.connect(self.request_ban)
         self.page_bans.ask_ban_many.connect(self.request_ban_many)
         self.page_bans.ask_lookup.connect(self._goto_lookup)

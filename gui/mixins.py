@@ -30,6 +30,7 @@ from qtcompat import QTimer
 if TYPE_CHECKING:
     from core.alerts import Alerter
     from core.geo_locator import GeoLocator
+    from gui.page_access import AccessPage
     from gui.page_bans import BansPage
     from gui.page_events import EventsPage
     from gui.page_iplookup import IpLookupPage
@@ -68,6 +69,7 @@ class EventPumpMixin(_HostBase):
     stack: "QStackedWidget"
     page_monitor: "MonitorPage"
     page_events: "EventsPage"
+    page_access: "AccessPage"
     page_bans: "BansPage"
     page_settings: "SettingsPage"
     page_iplookup: "IpLookupPage"
@@ -148,8 +150,10 @@ class EventPumpMixin(_HostBase):
                     f"{res.score} 分 · {rec.geo.region_short if rec.geo else '未知'}",
                     C.warning,
                 )
-            # 页面不可见时不刷新（原实现每次事件都重载整表）
-            if self.stack.currentIndex() == 1:
+            # 页面不可见时不刷新（原实现每次事件都重载整表）。
+            # 判据用「当前页是不是这个页面对象」而不是下标常量：导航顺序会变
+            # （P2-4 在事件页与封禁页之间插了「历史访问」），写死下标就会静默刷错页。
+            if self.stack.currentWidget() is self.page_events:
                 self.page_events.refresh()
 
         # 3) 告警
@@ -168,7 +172,7 @@ class EventPumpMixin(_HostBase):
                     self._set_status(f"封禁 {b.get('ip')} 失败：{b.get('error')}", C.danger)
                 else:
                     self._set_status(f"已封禁 {b.get('ip')}", C.success)
-            if self.stack.currentIndex() == 2 and self.page_bans.isVisible():
+            if self.stack.currentWidget() is self.page_bans and self.page_bans.isVisible():
                 self.page_bans.refresh()
             self._refresh_stats(force=True)
 
@@ -263,7 +267,7 @@ class EventPumpMixin(_HostBase):
             return
         if done:
             self._set_status(f"已自动解封 {len(done)} 个到期 IP", C.success)
-            if self.stack.currentIndex() == 2:
+            if self.stack.currentWidget() is self.page_bans:
                 self.page_bans.refresh()
             self._refresh_stats(force=True)
 
