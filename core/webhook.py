@@ -133,6 +133,10 @@ def build_payload(alert: Dict, host: str = "") -> Dict[str, Any]:
         "reason": alert.get("reason", ""),
         "geo": alert.get("geo", ""),
         "local_port": alert.get("local_port", 0),
+        # 处置结论（allow/alert/confirm/block）：对端据此决定是否还要转发给
+        # 值班人 —— 「已拦截」只是知会，「待确认」才需要人来看。
+        # 只增字段不改老字段，老对接方按原样解析不受影响。
+        "disposition": alert.get("disposition", ""),
     }
 
 

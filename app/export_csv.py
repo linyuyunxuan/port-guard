@@ -22,7 +22,14 @@ import os
 from typing import Any, Iterable, Iterator, List, Optional, Sequence
 
 from core.config import LEVEL_LABEL
-from core.models import HANDLED_LABEL, BanRecord, GeoInfo, ms_to_str
+from core.models import (
+    HANDLED_LABEL,
+    BanRecord,
+    GeoInfo,
+    disposition_label,
+    disposition_of,
+    ms_to_str,
+)
 from core.rules_meta import rule_label
 from core.validators import safe_text
 
@@ -172,6 +179,7 @@ EVENT_CSV_HEADERS = [
     "评分",
     "命中规则",
     "处理状态",
+    "处置结果",
     "摘要",
 ]
 
@@ -216,6 +224,7 @@ def iter_event_rows(rows: Sequence[Any]) -> Iterator[List[Any]]:
             r.get("risk_score", 0),
             _rules_cell(r.get("matched_rules")),
             HANDLED_LABEL.get(r.get("handled", 0), "-"),
+            disposition_label(disposition_of(r)),
             r.get("summary") or "",
         ]
 

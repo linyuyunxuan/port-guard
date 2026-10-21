@@ -40,6 +40,7 @@ from core.database import (
 from core.event_bus import bus
 from core.logger import get_logger
 from core.models import (
+    DISPOSITION_BLOCK,
     STATUS_ACTIVE,
     STATUS_EXPIRED,
     STATUS_FAILED,
@@ -472,9 +473,13 @@ def execute(
     # 「封了但状态没变」—— 这正是要被修掉的那个反馈。
     if ok:
         try:
-            marked = set_risk_handled_by_ip(rec.ip, 1)
+            # 处置结论一并改成「已拦截」：这条 IP 之后的访问真的会被防火墙挡下，
+            # 事件页若还写「仅提醒」，用户会以为封禁只在库里生效。
+            # 注意 disposition 是整批改（含人工忽略过的行）—— 按 IP 生效的
+            # 防火墙不区分单条事件，事实就是它们都被拦了。
+            marked = set_risk_handled_by_ip(rec.ip, 1, disposition=DISPOSITION_BLOCK)
             if marked:
-                log.info("封禁 %s 后回填 %d 条事件为已确认", rec.ip, marked)
+                log.info("封禁 %s 后回填 %d 条事件为已确认/已拦截", rec.ip, marked)
         except Exception:
             # 回填失败不该让封禁本身变成失败：规则已经写进防火墙了
             log.exception("封禁后回填事件状态失败 ip=%s", rec.ip)

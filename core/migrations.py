@@ -17,7 +17,7 @@ from core.logger import get_logger
 log = get_logger(__name__)
 
 # 当前程序支持的 schema 版本（每加一版 +1 并在下方登记 DDL）
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # version -> DDL 列表（从上一版升级到该版需要执行的语句）
 MIGRATIONS: Dict[int, List[str]] = {
@@ -60,6 +60,26 @@ MIGRATIONS: Dict[int, List[str]] = {
         # (handled, id) 两列都在索引里，SQLite 扫索引即可计数，不必回表读行，
         # 事件攒到几十万条时这才是能扛住的做法。
         "CREATE INDEX IF NOT EXISTS idx_event_handled_id ON risk_event(handled, id)",
+    ],
+    # v4：risk_event 补「处置结论」列（已放行 / 仅提醒 / 待确认 / 已拦截）
+    #
+    # 为什么要存而不是查的时候算：处置是**当时那一刻**的事实。事后按「这个 IP
+    # 现在有没有被封」去推，上周只提醒过的记录会显示成「已拦截」，复盘时就会
+    # 误判「当时是不是已经拦住了」。
+    4: [
+        "ALTER TABLE risk_event ADD COLUMN disposition TEXT NOT NULL DEFAULT ''",
+        # 回填老记录：忽略过的记「已忽略」，其余按等级给基础结论
+        # （高危/严重 = 待确认，其余 = 仅提醒）。
+        # **不能**回填成「已拦截」—— 那时自动封禁默认关闭，绝大多数根本没拦。
+        """
+        UPDATE risk_event SET disposition = CASE
+            WHEN handled = 2 THEN 'ignored'
+            WHEN risk_level IN ('high', 'critical') THEN 'confirm'
+            ELSE 'alert'
+        END
+        WHERE disposition IS NULL OR disposition = ''
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_event_disposition ON risk_event(disposition)",
     ],
 }
 

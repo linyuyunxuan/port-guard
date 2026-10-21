@@ -113,8 +113,21 @@ Qt5 线从 Win7 SP1 起（Win7 上要先装 KB2999226）。
 ```json
 {"success": true, "data": {"id": 1287, "ip": "113.118.113.77",
  "geo": "中国·广东省·深圳市·电信", "risk_score": 0, "risk_level": "normal",
- "matched_rules": [], "suggest_ban": false}}
+ "matched_rules": [], "suggest_ban": false,
+ "disposition": "allow", "disposition_label": "已放行"}}
 ```
+
+`disposition` 是**处置结论** —— 这条访问到底被怎么处理了，业务系统不必自己猜：
+
+| 值 | 含义 | 说明 |
+| --- | --- | --- |
+| `allow` | 已放行 | 未命中规则，或命中白名单 / 区域放行规则 |
+| `alert` | 仅提醒 | 低中危：记录并提醒，**没有拦截** |
+| `confirm` | 待确认 | 高危 / 严重：建议封禁，等人工在界面上确认 |
+| `block` | 已拦截 | 该 IP 已在封禁中，或本次触发了自动封禁并写入了防火墙 |
+
+它和 HTTP 层无关（PortGuard 不代理流量）：`block` 表示**该 IP 的后续连接**会被 Windows
+防火墙挡下，本次已到达的请求仍然会照常走完。
 
 ### curl 示例
 

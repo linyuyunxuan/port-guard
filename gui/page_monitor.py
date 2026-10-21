@@ -11,7 +11,16 @@ from core.config import (
     LEVEL_LABEL,
 )
 from core.database import find_active_ban_by_ip
-from core.models import AccessRecord
+from core.models import (
+    DISPOSITION_ALERT,
+    DISPOSITION_ALLOW,
+    DISPOSITION_BLOCK,
+    DISPOSITION_CONFIRM,
+    DISPOSITION_HINT,
+    DISPOSITION_IGNORED,
+    AccessRecord,
+    disposition_label,
+)
 from gui.components import PageHeader
 from gui.theme import C
 from gui.widgets import (
@@ -58,6 +67,7 @@ HEADERS = [
     "请求",
     "状态",
     "命中规则",
+    "处置",
     "服务器",
 ]
 
@@ -66,8 +76,23 @@ HEADERS = [
 # 不再按设计稿估数：归属地要装下「加利福尼亚州 弗里蒙特」(140)，
 # 端口要装下 5 位数 18080 (51)，协议要装下 HTTPS (37+16=53)，
 # 命中规则要装下「管理端口归属地检测」(108+16=124)。
-COL_WIDTHS = [72, 60, 120, 146, 58, 60, 150, 52, 140, 80]
+# 处置列 62：装「已放行/已拦截/仅提醒/待确认」四个三字词（实测 39 + 内边距 16）。
+COL_WIDTHS = [72, 60, 120, 146, 58, 60, 150, 52, 140, 62, 80]
 COL_REQUEST = 6
+COL_DISPOSITION = 9
+
+#: 处置结论 → 文字色（与风险事件页同一套口径，改一处就两边一起变）
+_DISPOSITION_COLOR = {
+    DISPOSITION_ALLOW: C.text_muted,
+    DISPOSITION_ALERT: C.text_secondary,
+    DISPOSITION_CONFIRM: C.warning,
+    DISPOSITION_BLOCK: C.success,
+    DISPOSITION_IGNORED: C.text_muted,
+}
+
+
+def _disposition_color(disposition: str) -> str:
+    return _DISPOSITION_COLOR.get(disposition, C.text_secondary)
 
 
 class AccessTableModel(QAbstractTableModel):
@@ -122,6 +147,8 @@ class AccessTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole:
             if col == 2:
                 return QBrush(QColor(C.text_link))
+            if col == COL_DISPOSITION:
+                return QBrush(QColor(_disposition_color(rec.disposition)))
             return None
 
         if role == Qt.ItemDataRole.FontRole:
@@ -135,7 +162,7 @@ class AccessTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.UserRole:
             return rec
 
-        if role == Qt.ItemDataRole.TextAlignmentRole and col in (1, 4, 5, 7):
+        if role == Qt.ItemDataRole.TextAlignmentRole and col in (1, 4, 5, 7, COL_DISPOSITION):
             return int(Qt.AlignmentFlag.AlignCenter)
 
         return None
@@ -163,6 +190,10 @@ class AccessTableModel(QAbstractTableModel):
         if col == 8:
             return rec.matched_str or "-"
         if col == 9:
+            # 空表示这条记录没经过处置判定（历史缓冲 / 手工构造），显示 "-"
+            # 而不是硬编「已放行」—— 没判定过和判定为放行是两件事
+            return disposition_label(rec.disposition) if rec.disposition else "-"
+        if col == 10:
             return rec.server_name or rec.host or "-"
         return ""
 
@@ -181,6 +212,11 @@ class AccessTableModel(QAbstractTableModel):
         ]
         if rec.matched_rules:
             lines.append(f"命中规则：{rec.matched_str}")
+        if rec.disposition:
+            hint = DISPOSITION_HINT.get(rec.disposition)
+            lines.append(
+                f"处置结果：{disposition_label(rec.disposition)}" + (f"（{hint}）" if hint else "")
+            )
         if rec.tags:
             lines.append(f"标签：{rec.tags}")
         return "\n".join(lines)

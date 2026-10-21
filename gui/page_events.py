@@ -26,7 +26,19 @@ from core.database import (
     set_risk_handled_batch,
 )
 from core.logger import get_logger
-from core.models import HANDLED_LABEL, ms_to_str
+from core.models import (
+    DISPOSITION_ALERT,
+    DISPOSITION_ALLOW,
+    DISPOSITION_BLOCK,
+    DISPOSITION_CONFIRM,
+    DISPOSITION_HINT,
+    DISPOSITION_IGNORED,
+    DISPOSITION_ORDER,
+    HANDLED_LABEL,
+    disposition_label,
+    disposition_of,
+    ms_to_str,
+)
 from core.rules_meta import rule_label
 from gui.components import (
     MenuEntry,
@@ -83,6 +95,7 @@ HEADERS = [
     "路径",
     "评分",
     "命中规则",
+    "处置",
     "状态",
     "操作",
 ]
@@ -106,10 +119,11 @@ COL_PORT = 5
 COL_PATH = 6
 COL_SCORE = 7
 COL_RULE = 8
-COL_STATUS = 9
-COL_ACTION = 10
+COL_DISPOSITION = 9
+COL_STATUS = 10
+COL_ACTION = 11
 
-COL_WIDTHS = [32, 160, 56, 130, 108, 52, 109, 46, 141, 68, 88]
+COL_WIDTHS = [32, 160, 56, 130, 108, 52, 109, 46, 141, 72, 68, 88]
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 勾选列（点了是全选）与操作列（无值）不给规则 —— 点这两列表头不排序。
@@ -126,6 +140,7 @@ SORT_SPECS = {
     COL_RULE: ColumnSpec(
         KIND_TEXT, lambda r: "、".join(rule_label(x) for x in r.get("matched_rules", [])) or ""
     ),
+    COL_DISPOSITION: ColumnSpec(KIND_NUM, lambda r: DISPOSITION_ORDER.get(disposition_of(r))),
     COL_STATUS: ColumnSpec(KIND_NUM, lambda r: r.get("handled", 0)),
 }
 
@@ -133,7 +148,7 @@ SORT_SPECS = {
 ELIDE_OK_COLS = (COL_PATH, COL_RULE)
 
 # 居中对齐的列（表头与数据必须一致，否则一列会被读成两根轴）
-CENTER_COLS = (COL_CHECK, COL_LEVEL, COL_PORT, COL_SCORE, COL_STATUS)
+CENTER_COLS = (COL_CHECK, COL_LEVEL, COL_PORT, COL_SCORE, COL_DISPOSITION, COL_STATUS)
 
 # 时间筛选：右端一律取「次日零点」的左闭右开区间
 RANGE_ALL = "全部时间"
@@ -147,6 +162,17 @@ RANGE_CHOICES = [RANGE_ALL, RANGE_TODAY, RANGE_7D, RANGE_30D, RANGE_CUSTOM]
 def _day_start(d: datetime.date) -> datetime.datetime:
     return datetime.datetime(d.year, d.month, d.day)
 
+
+#: 处置结论 → 文字颜色。
+# 红色刻意不在这里出现：红色留给等级徽章（一屏几十行时红色必须稀缺）。
+# 「待确认」用琥珀色表达「等你来决定」，「已拦截」用绿色表达「已处置完」。
+_DISPOSITION_COLOR = {
+    DISPOSITION_ALLOW: C.text_muted,
+    DISPOSITION_ALERT: C.text_secondary,
+    DISPOSITION_CONFIRM: C.warning,
+    DISPOSITION_BLOCK: C.success,
+    DISPOSITION_IGNORED: C.text_muted,
+}
 
 #: handled 值 → 审计 action。0 是「未处理」，不会被写进审计（没有这个动作）。
 _HANDLED_ACTION = {
@@ -216,6 +242,7 @@ class EventDetailDialog(QDialog):
         geo = row.get("geo")
         # row 取出的值类型是 Any|None，先归一化成 str 再查表，避免把 None 当字典键
         risk_level = str(row.get("risk_level") or "")
+        disp = disposition_of(row)
         lines = [
             f"事件 ID：#{row.get('id')}",
             f"时间：{ms_to_str(row.get('event_ts'))}",
@@ -226,6 +253,9 @@ class EventDetailDialog(QDialog):
             f"风险评分：{row.get('risk_score')}",
             f"风险等级：{LEVEL_LABEL.get(risk_level, risk_level)}",
             f"命中规则：{'、'.join(rule_label(r) for r in row.get('matched_rules', [])) or '-'}",
+            # 处置放在「处理状态」之前：用户更关心「拦没拦」，再关心「人看过没有」
+            f"处置结果：{disposition_label(disp)}"
+            + (f"（{DISPOSITION_HINT[disp]}）" if DISPOSITION_HINT.get(disp) else ""),
             f"处理状态：{HANDLED_LABEL.get(row.get('handled', 0), '-')}",
             "",
             "摘要：",
@@ -642,6 +672,17 @@ class EventsPage(QWidget):
                     ),
                 )
                 self.table.setItem(i, COL_RULE, make_item(matched, tip=matched))
+                disp = disposition_of(r)
+                self.table.setItem(
+                    i,
+                    COL_DISPOSITION,
+                    make_item(
+                        disposition_label(disp),
+                        _DISPOSITION_COLOR.get(disp, C.text_secondary),
+                        Qt.AlignmentFlag.AlignCenter,
+                        tip=DISPOSITION_HINT.get(disp, ""),
+                    ),
+                )
                 hcolor = {0: C.text_secondary, 1: C.success, 2: C.text_muted}.get(
                     handled, C.text_secondary
                 )

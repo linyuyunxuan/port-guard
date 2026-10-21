@@ -19,11 +19,20 @@ import time
 from typing import Any, Dict, Optional
 
 from core import settings as cfg
+from core.database import find_active_ban_by_ip
 from core.db_writer import get_writer
 from core.event_bus import bus
 from core.geo_locator import get_locator
 from core.logger import get_logger
-from core.models import STATUS_ACTIVE, STATUS_FAILED, AccessRecord, BanRecord, RiskResult
+from core.models import (
+    DISPOSITION_BLOCK,
+    STATUS_ACTIVE,
+    STATUS_FAILED,
+    AccessRecord,
+    BanRecord,
+    RiskResult,
+    disposition_base,
+)
 from core.rule_engine import get_engine, is_never_ban
 
 log = get_logger(__name__)
@@ -60,13 +69,23 @@ def _resolve_ban_duration(ip: str, result: RiskResult) -> int:
     return decision.seconds
 
 
-def auto_ban_record(rec: AccessRecord, result: RiskResult, actor: Optional[str] = None) -> None:
+def auto_ban_record(
+    rec: AccessRecord,
+    result: RiskResult,
+    actor: Optional[str] = None,
+    existing: Optional[BanRecord] = None,
+) -> bool:
     """
     自动模式：无需人工确认直接封禁（默认关闭，需在设置页显式开启）。
 
     与手动封禁的关系：这里只是把「已经在 ban_records 里落一条 pending」
     与「真的去改防火墙」串起来，最终结果通过 bus.emit_ban 回给 UI，
     与手动封禁走的是同一个封禁页展示。
+
+    参数 `existing` 由 `process_record` 预先查好传进来（它本来就要查一次来判断
+    处置结论是「已拦截」还是「待确认」），省掉高频路径上的第二次查库。
+
+    返回「本次是否真的把这批访问拦下来了」——用于决定这条记录的处置结论。
 
     已处于封禁状态（ban_list 中该 IP 有 active 记录）时直接返回：
     不插记录、不调防火墙、不发 emit_ban。与手动路径 app/ban_service.py
@@ -75,11 +94,11 @@ def auto_ban_record(rec: AccessRecord, result: RiskResult, actor: Optional[str] 
     insert 新记录并新建防火墙规则（规则名带随机后缀，不会互相覆盖），
     最终规则数无限增长、封禁页被重复记录填满。
     """
-    from core.database import find_active_ban_by_ip, insert_ban, update_ban
+    from core.database import insert_ban, update_ban
     from core.firewall import block_ip
 
     if is_never_ban(rec.ip):
-        return
+        return False
 
     # 已封禁则直接返回。查库失败不能阻断封禁（宁可多一次封禁尝试，
     # 也不能因为一次查询异常就放过正在扫描的 IP），所以异常只记日志。
@@ -90,11 +109,11 @@ def auto_ban_record(rec: AccessRecord, result: RiskResult, actor: Optional[str] 
     # 也算作「已在封禁中」，这个 IP 将被永久漏封，是比偶发重复更糟的结果。
     # 至于两条上报线程同时命中的并发窗口（微秒级），不值得为此在高频上报路径
     # 上加全局锁 —— 后续真要收紧，应该走数据库唯一约束而不是锁。
-    existing = None
-    try:
-        existing = find_active_ban_by_ip(rec.ip)
-    except Exception:
-        log.exception("自动封禁：查询已有封禁记录失败 ip=%s", rec.ip)
+    if existing is None:
+        try:
+            existing = find_active_ban_by_ip(rec.ip)
+        except Exception:
+            log.exception("自动封禁：查询已有封禁记录失败 ip=%s", rec.ip)
     if existing:
         # 自动路径高频触发，用 debug 而不是 warning，避免刷屏淹没真正的问题
         log.debug(
@@ -102,7 +121,7 @@ def auto_ban_record(rec: AccessRecord, result: RiskResult, actor: Optional[str] 
             rec.ip,
             existing.id,
         )
-        return
+        return True
 
     duration = _resolve_ban_duration(rec.ip, result)
     expire = int(time.time() * 1000) + duration * 1000
@@ -187,6 +206,7 @@ def auto_ban_record(rec: AccessRecord, result: RiskResult, actor: Optional[str] 
             "auto": True,
         }
     )
+    return bool(ok)
 
 
 def process_record(
@@ -219,7 +239,43 @@ def process_record(
     rec.matched_rules = result.matched_rules
     rec.suggest_ban = result.suggest_ban
 
-    # 3. 投递落库（非阻塞：入队即返回，由单写线程批量提交）
+    # 3. 处置结论必须在**落库与告警之前**定下来，因为两者说的都是「最终结论」：
+    #    落库存的是结论，弹窗显示的是结论。事后再改就得改两处，界面还可能先
+    #    弹「仅提醒」再跳成「已拦截」—— 用户看不懂到底拦没拦。
+    #
+    #    顺序也因此调整过：原来 `emit_alert` 在前、自动封禁在后，弹窗只能写
+    #    「风险评分 90」，因为它说不出这次到底拦没拦。现在先封、后提醒。
+    #    代价是告警延后一次防火墙写入（几十~几百毫秒），换弹窗里一句确定的
+    #    「已拦截」，这个交换是值得的：告警的价值在于让人知道结果，不在于抢秒。
+    if not result.disposition:
+        # 引擎漏填时兜底（自定义引擎 / 老插件）；正常路径上引擎已经填好
+        result.disposition = disposition_base(result.level, result.whitelisted)
+    if result.is_risk:
+        existing = None
+        try:
+            existing = find_active_ban_by_ip(rec.ip)
+        except Exception:
+            # 查库失败不能阻断主流程：宁可当成「没封过」，也不能因为一次
+            # 查询异常就丢掉这条风险记录的告警。
+            log.exception("查询封禁状态失败 ip=%s", rec.ip)
+        # 两种「已拦截」：这个 IP 本来就在封禁中（防火墙前面已经挡住了），
+        # 或者本次触发了自动封禁并且真的写进了防火墙。
+        # 写成一条 `or` 是为了让「结论只有一个赋值点」—— 分成两个分支各自赋值
+        # 的话，以后加第三种拦截来源必然只改一处。
+        if existing is not None or (
+            allow_auto_ban
+            and result.suggest_ban
+            and cfg.get_bool("auto_mode", False)
+            and result.score >= cfg.get_int("auto_ban_threshold", 90)
+            # 自动封禁默认关闭，条件全满足才会走到调用；and 短路保证了顺序
+            and auto_ban_record(rec, result, actor=actor, existing=existing)
+        ):
+            result.disposition = DISPOSITION_BLOCK
+
+    # 实时监控页直接读 rec.disposition（它不查库，也不需要知道具体封禁记录）
+    rec.disposition = result.disposition
+
+    # 4. 投递落库（非阻塞：入队即返回，由单写线程批量提交）
     writer = get_writer()
     if result.is_risk:
         # 风险条目：访问日志 + 风险事件在同一事务内写入并关联 access_id
@@ -227,10 +283,10 @@ def process_record(
     else:
         writer.submit_access(rec)
 
-    # 4. 投递给 UI（实时监控）
+    # 5. 投递给 UI（实时监控）
     bus.emit_access(rec)
 
-    # 5. 风险事件后续处理
+    # 6. 风险事件后续处理
     if result.is_risk:
         bus.emit_risk({"record": rec, "result": result})
 
@@ -243,23 +299,16 @@ def process_record(
                     "reason": result.reason or "命中风险规则",
                     "geo": geo.display,
                     "local_port": rec.local_port,
+                    # 弹窗/托盘气泡/Webhook 都靠这个字段回答「到底拦没拦」
+                    "disposition": result.disposition,
                 }
             )
-
-        # 自动封禁模式（默认关闭）
-        if (
-            allow_auto_ban
-            and result.suggest_ban
-            and cfg.get_bool("auto_mode", False)
-            and result.score >= cfg.get_int("auto_ban_threshold", 90)
-        ):
-            auto_ban_record(rec, result, actor=actor)
 
     return result
 
 
 def result_payload(rec: AccessRecord, result: RiskResult) -> Dict[str, Any]:
-    """上报接口的响应体（与 v1.x 保持完全一致的字段）"""
+    """上报接口的响应体（与 v1.x 保持完全一致的字段；新增字段只增不改）"""
     return {
         "id": None,
         "ip": rec.ip,
@@ -268,4 +317,8 @@ def result_payload(rec: AccessRecord, result: RiskResult) -> Dict[str, Any]:
         "risk_level": result.level,
         "matched_rules": result.matched_rules,
         "suggest_ban": result.suggest_ban,
+        # v1.2 新增：业务系统据此判断「这次访问到底被拦了没有」，
+        # 不必再去查封禁列表 —— 也避免它自己猜（猜错就会重复告警）。
+        "disposition": result.disposition,
+        "disposition_label": result.disposition_label,
     }

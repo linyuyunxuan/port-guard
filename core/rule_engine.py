@@ -27,7 +27,13 @@ from core.config import (
     whitelist_path,
 )
 from core.logger import get_logger
-from core.models import AccessRecord, GeoInfo, RiskResult
+from core.models import (
+    DISPOSITION_ALLOW,
+    AccessRecord,
+    GeoInfo,
+    RiskResult,
+    disposition_base,
+)
 from core.rules_meta import (
     REGION_ACTION_KEYS,
     region_rule_key,
@@ -503,6 +509,7 @@ class RuleEngine:
                 suggest_ban=False,
                 whitelisted=True,
                 reason="命中白名单，已豁免",
+                disposition=DISPOSITION_ALLOW,
             )
 
         # ── 区域规则：action=allow 优先级最高，命中即豁免 ──
@@ -517,6 +524,7 @@ class RuleEngine:
                     suggest_ban=False,
                     whitelisted=True,
                     reason=f"命中区域放行规则「{r['name']}」，已豁免",
+                    disposition=DISPOSITION_ALLOW,
                 )
 
         score = 0
@@ -636,8 +644,15 @@ class RuleEngine:
         level = self.level_of(score)
         suggest = level in (LEVEL_HIGH, LEVEL_CRITICAL) and ip not in self.whitelist
         reason = "命中规则：" + "、".join(rule_label(m) for m in matched) if matched else ""
+        # 这里只给「基础结论」：是否已拦截要等 pipeline 查完 ban_list 才知道，
+        # 引擎不该碰数据库（它是纯计算层，单测里只喂规则和记录）。
         return RiskResult(
-            score=score, level=level, matched_rules=matched, suggest_ban=suggest, reason=reason
+            score=score,
+            level=level,
+            matched_rules=matched,
+            suggest_ban=suggest,
+            reason=reason,
+            disposition=disposition_base(level),
         )
 
     @staticmethod

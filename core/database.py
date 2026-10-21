@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS risk_event (
     summary       TEXT,
     geo           TEXT,
     handled       INTEGER NOT NULL DEFAULT 0,
+    disposition   TEXT NOT NULL DEFAULT '',
     event_ts      INTEGER NOT NULL,
     created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -667,8 +668,8 @@ def clear_all_logs() -> None:
 _INSERT_RISK_SQL = """
 INSERT INTO risk_event
    (access_id, ip, local_port, path, risk_score, risk_level,
-    matched_rules, summary, geo, handled, event_ts)
-VALUES (?,?,?,?,?,?,?,?,?,0,?)
+    matched_rules, summary, geo, handled, disposition, event_ts)
+VALUES (?,?,?,?,?,?,?,?,?,0,?,?)
 """
 
 
@@ -688,6 +689,7 @@ def insert_risk_event_sql(
             json.dumps(result.matched_rules, ensure_ascii=False),
             result.reason,
             (rec.geo or GeoInfo()).to_json(),
+            result.disposition or "",
             rec.event_ts,
         ),
     )
@@ -787,7 +789,7 @@ def set_risk_handled_batch(event_ids: List[int], handled: int) -> int:
         conn.close()
 
 
-def set_risk_handled_by_ip(ip: str, handled: int = 1) -> int:
+def set_risk_handled_by_ip(ip: str, handled: int = 1, disposition: Optional[str] = None) -> int:
     """把某个 IP 的**未处理**事件整批改状态，返回实际更新的行数。
 
     封禁成功后必须调一次：否则用户封完 IP 回到事件页一看，同一批 IP 还挂在
@@ -798,6 +800,10 @@ def set_risk_handled_by_ip(ip: str, handled: int = 1) -> int:
       翻成「已确认」；
     · **`ip = ?` 等值匹配**：`query_bans` 那种 `ip LIKE %kw%` 会把 1.2.3.4
       和 1.2.3.40 一起改掉。
+
+    `disposition` 单独传：封禁是按 IP 生效的，防火墙不会区分「这条事件当初
+    是已忽略还是已确认」，所以处置结论**整批**改成「已拦截」才有意义；
+    而 handled 属于人的判断，仍只动未处理的。
     """
     key = (ip or "").strip()
     if not key:
@@ -807,6 +813,8 @@ def set_risk_handled_by_ip(ip: str, handled: int = 1) -> int:
         cur = conn.execute(
             "UPDATE risk_event SET handled = ? WHERE ip = ? AND handled = 0", (handled, key)
         )
+        if disposition:
+            conn.execute("UPDATE risk_event SET disposition = ? WHERE ip = ?", (disposition, key))
         conn.commit()
         return int(cur.rowcount or 0)
     finally:
