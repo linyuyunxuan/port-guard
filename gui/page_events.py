@@ -11,6 +11,9 @@
 3. **删除只删 risk_event，不动 access_log**：访问流水是原始事实，
    事件是规则算出来的派生结论。删事件表示「这条结论我不认」，
    不应该连带把「这台机器确实来过」的原始记录也抹掉。
+4. **不设「状态」列**：操作列已经写明封没封（「封禁」/「已封禁」），
+   再摆一列「未处理/已确认/已忽略」等于同一件事说两遍，还容易被误读成
+   「已确认 = 已拦截」。人工处理状态收敛进「处置」列，见 `_disposition_cell`。
 """
 
 import datetime
@@ -96,13 +99,12 @@ HEADERS = [
     "评分",
     "命中规则",
     "处置",
-    "状态",
     "操作",
 ]
 
 # 列宽取「实测最宽文字 + 16px padding + 8px 余量」，按 PySide2（交付栈）的字体
 # 度量算——它比 PySide6 宽 6~20%，按开发栈定宽会在客户机上截断。
-# 有界内容（时间 / 等级 / IP / 归属地 / 端口 / 评分 / 状态）一律给足，不许截断：
+# 有界内容（时间 / 等级 / IP / 归属地 / 端口 / 评分 / 处置）一律给足，不许截断：
 # 截了用户就分不清是哪条记录。无界内容（路径 / 命中规则）交给 tooltip 兜底，
 # 第 6 列（路径）同时是唯一的拉伸列。
 # 时间列用 `MM-DD HH:MM:SS`：事件页是事后复盘，同一分钟可能有十几条爆破记录，
@@ -120,15 +122,14 @@ COL_PATH = 6
 COL_SCORE = 7
 COL_RULE = 8
 COL_DISPOSITION = 9
-COL_STATUS = 10
-COL_ACTION = 11
+COL_ACTION = 10
 
-COL_WIDTHS = [32, 160, 56, 130, 108, 52, 109, 46, 141, 72, 68, 88]
+COL_WIDTHS = [32, 160, 56, 130, 108, 52, 109, 46, 141, 72, 88]
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 勾选列（点了是全选）与操作列（无值）不给规则 —— 点这两列表头不排序。
-# 等级 / 状态按**语义序**排而不是按中文笔画：等级取 LEVEL_ORDER 的严重度，
-# 状态取 handled 的 0/1/2；按本地化文本排的话「严/高/中/低」是乱序。
+# 等级按**语义序**排而不是按中文笔画：等级取 LEVEL_ORDER 的严重度，按本地化
+# 文本排的话「严/高/中/低」是乱序；处置同样按 DISPOSITION_ORDER 的处置先后排。
 SORT_SPECS = {
     COL_TIME: ColumnSpec(KIND_MS, lambda r: r.get("event_ts")),
     COL_LEVEL: ColumnSpec(KIND_NUM, lambda r: LEVEL_ORDER.get(str(r.get("risk_level") or ""))),
@@ -141,14 +142,13 @@ SORT_SPECS = {
         KIND_TEXT, lambda r: "、".join(rule_label(x) for x in r.get("matched_rules", [])) or ""
     ),
     COL_DISPOSITION: ColumnSpec(KIND_NUM, lambda r: DISPOSITION_ORDER.get(disposition_of(r))),
-    COL_STATUS: ColumnSpec(KIND_NUM, lambda r: r.get("handled", 0)),
 }
 
 #: 内容无界的列：允许省略号，但必须有 tooltip 兜底
 ELIDE_OK_COLS = (COL_PATH, COL_RULE)
 
 # 居中对齐的列（表头与数据必须一致，否则一列会被读成两根轴）
-CENTER_COLS = (COL_CHECK, COL_LEVEL, COL_PORT, COL_SCORE, COL_DISPOSITION, COL_STATUS)
+CENTER_COLS = (COL_CHECK, COL_LEVEL, COL_PORT, COL_SCORE, COL_DISPOSITION)
 
 # 时间筛选：右端一律取「次日零点」的左闭右开区间
 RANGE_ALL = "全部时间"
@@ -173,6 +173,37 @@ _DISPOSITION_COLOR = {
     DISPOSITION_BLOCK: C.success,
     DISPOSITION_IGNORED: C.text_muted,
 }
+
+
+def _disposition_cell(row: Dict, handled: int) -> Tuple[str, str, str]:
+    """处置列 = 这条事件的**最终结论**（文本, 颜色, tooltip）。
+
+    本页没有独立的「状态」列：操作列已经写明封没封（「封禁」/「已封禁」），
+    再放一列「未处理/已确认/已忽略」就是同一件事说两遍，而且两张表对着看时
+    容易把「状态=已确认」误读成「已拦截」。所以人工处理状态收敛进本列：
+
+    · 已忽略 —— 直接盖掉系统判定。人主动放弃的事件必须一眼可见，
+      否则「这条我不管了」在表里彻底隐形；
+    · 已确认 且系统判定仍是「待确认」—— 显示「已确认」。保留「待确认」会
+      自相矛盾：用户刚点过确认，回来还看到它在等自己确认；
+    · 其余已确认（已拦截 / 仅提醒 / 已放行）—— 结论本身比「人看过」重要，
+      文案不动，只在 tooltip 里补一句。
+    """
+    disp = disposition_of(row)
+    text = disposition_label(disp)
+    tip = DISPOSITION_HINT.get(disp, "")
+    if handled == 2:
+        return (
+            disposition_label(DISPOSITION_IGNORED),
+            C.text_muted,
+            f"{DISPOSITION_HINT.get(DISPOSITION_IGNORED, '')}（系统判定：{text}）",
+        )
+    if handled == 1 and disp == DISPOSITION_CONFIRM:
+        return HANDLED_LABEL.get(1, text), C.text_link, f"{tip}（已人工确认）"
+    if handled == 1:
+        tip = f"{tip}（已人工确认）"
+    return text, _DISPOSITION_COLOR.get(disp, C.text_secondary), tip
+
 
 #: handled 值 → 审计 action。0 是「未处理」，不会被写进审计（没有这个动作）。
 _HANDLED_ACTION = {
@@ -385,7 +416,7 @@ class EventsPage(QWidget):
         self.merge = QCheckBox("同类合并")
         self.merge.setChecked(True)
         self.merge.setToolTip(
-            "同一「IP + 端口 + 路径 + 等级 + 评分 + 命中规则 + 状态」的多条事件"
+            "同一「IP + 端口 + 路径 + 等级 + 评分 + 命中规则 + 处理状态」的多条事件"
             "折叠成一行，时间列标 ×N。\n"
             "对方每次新建连接都会各记一条（远端端口不同），不是重复显示；\n"
             "批量确认 / 忽略 / 删除会作用于组内全部事件，导出仍逐条展开。"
@@ -672,26 +703,11 @@ class EventsPage(QWidget):
                     ),
                 )
                 self.table.setItem(i, COL_RULE, make_item(matched, tip=matched))
-                disp = disposition_of(r)
+                disp_text, disp_color, disp_tip = _disposition_cell(r, handled)
                 self.table.setItem(
                     i,
                     COL_DISPOSITION,
-                    make_item(
-                        disposition_label(disp),
-                        _DISPOSITION_COLOR.get(disp, C.text_secondary),
-                        Qt.AlignmentFlag.AlignCenter,
-                        tip=DISPOSITION_HINT.get(disp, ""),
-                    ),
-                )
-                hcolor = {0: C.text_secondary, 1: C.success, 2: C.text_muted}.get(
-                    handled, C.text_secondary
-                )
-                self.table.setItem(
-                    i,
-                    COL_STATUS,
-                    make_item(
-                        HANDLED_LABEL.get(handled, "-"), hcolor, Qt.AlignmentFlag.AlignCenter
-                    ),
+                    make_item(disp_text, disp_color, Qt.AlignmentFlag.AlignCenter, tip=disp_tip),
                 )
                 self.table.setCellWidget(i, COL_ACTION, self._row_actions(r))
         finally:

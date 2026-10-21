@@ -440,6 +440,15 @@ def test_events_table_renders_disposition_column(fresh_db):
             "handled": 0,
             "event_ts": 1_700_000_002_000,
         },
+        {
+            "id": 4,
+            "ip": "4.4.4.4",
+            "risk_level": "low",
+            "risk_score": 30,
+            "disposition": DISPOSITION_ALERT,
+            "handled": 2,
+            "event_ts": 1_700_000_003_000,
+        },
     ]
     page._rows = rows
     page._render(rows)
@@ -447,6 +456,8 @@ def test_events_table_renders_disposition_column(fresh_db):
     assert _cell(page, 0) == "已拦截"
     assert _cell(page, 1) == "仅提醒"
     assert _cell(page, 2) == "待确认"
+    # 人工忽略过的事件必须一眼可见 —— 状态列去掉后，这由处置列承担
+    assert _cell(page, 3) == "已忽略"
 
 
 def test_events_header_and_widths_stay_aligned():
@@ -456,6 +467,41 @@ def test_events_header_and_widths_stay_aligned():
     assert len(page_events.HEADERS) == len(page_events.COL_WIDTHS)
     assert len(page_events.HEADERS) - 1 == page_events.COL_ACTION
     assert page_events.HEADERS[page_events.COL_DISPOSITION] == "处置"
+
+
+def test_events_has_no_status_column():
+    """「状态」列已去掉：操作列已经写明封没封，同一件事不说两遍"""
+    from gui import page_events
+
+    assert "状态" not in page_events.HEADERS
+    assert not hasattr(page_events, "COL_STATUS"), "列常量还在，说明状态列被加回来了"
+
+
+def test_disposition_cell_folds_handled_state():
+    """状态列去掉后，人工处理状态必须由处置列兜住（否则整表看不出人动过手）"""
+    from gui import page_events
+
+    # 人工忽略：盖掉系统判定，原结论留在 tooltip 里供复盘
+    text, color, tip = page_events._disposition_cell(
+        {"risk_level": "low", "disposition": DISPOSITION_ALERT}, 2
+    )
+    assert text == "已忽略"
+    assert "仅提醒" in tip, "忽略后必须还能查到系统原来怎么判的"
+    assert color == page_events.C.text_muted
+
+    # 已确认 + 系统判定仍是「待确认」：文案跟着人走，不能自相矛盾
+    row = {"risk_level": "high", "disposition": DISPOSITION_CONFIRM}
+    assert page_events._disposition_cell(row, 1)[0] == "已确认"
+
+    # 已确认 + 已拦截：结论本身比「人看过」重要，文案不动，tooltip 补一句
+    row = {"risk_level": "critical", "disposition": DISPOSITION_BLOCK}
+    text, _, tip = page_events._disposition_cell(row, 1)
+    assert text == "已拦截"
+    assert "已人工确认" in tip
+
+    # 未处理：原样
+    row = {"risk_level": "high", "disposition": DISPOSITION_CONFIRM}
+    assert page_events._disposition_cell(row, 0)[0] == "待确认"
 
 
 def test_monitor_shows_disposition_text():
