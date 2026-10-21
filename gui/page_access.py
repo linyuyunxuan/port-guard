@@ -112,7 +112,7 @@ COL_UA = 7
 COL_SCORE = 8
 COL_ACTION = 9
 
-COL_WIDTHS = [125, 56, 130, 116, 76, 180, 62, 104, 62, 46]
+COL_WIDTHS = [144, 64, 150, 133, 87, 207, 71, 120, 71, 53]
 
 #: 内容无界的列：允许省略号，但必须有 tooltip 兜底
 ELIDE_OK_COLS = (COL_PATH, COL_UA)
@@ -291,7 +291,7 @@ class AccessPage(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索 IP / 路径 / UA…")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(220)
+        self.search.setFixedWidth(260)
         self.search.setToolTip(
             "模糊匹配 IP / 路径 / 用户代理（%kw% 前缀通配，不走索引）。\n"
             "数据量大时建议先用时间范围收窄再搜。"
@@ -300,35 +300,35 @@ class AccessPage(QWidget):
 
         self.level = QComboBox()
         self.level.addItems(["全部等级", "严重", "高", "中", "低", "正常"])
-        self.level.setFixedWidth(96)
+        self.level.setFixedWidth(118)
         self.level.currentIndexChanged.connect(self._on_filter_changed)
 
         self.port = QLineEdit()
         self.port.setPlaceholderText("端口")
         self.port.setClearButtonEnabled(True)
-        self.port.setFixedWidth(76)
+        self.port.setFixedWidth(92)
         self.port.setToolTip("按目标端口精确筛选（留空为全部）")
         self.port.textChanged.connect(self._on_filter_changed)
 
         self.range = QComboBox()
         self.range.addItems(RANGE_CHOICES)
-        self.range.setFixedWidth(104)
+        self.range.setFixedWidth(122)
         self.range.currentIndexChanged.connect(self._on_range_changed)
 
         self.dt_from = QDateEdit()
         self.dt_from.setCalendarPopup(True)
         self.dt_from.setDisplayFormat("yyyy-MM-dd")
-        self.dt_from.setFixedWidth(112)
+        self.dt_from.setFixedWidth(128)
         self.dt_from.setDate(QDate.currentDate().addDays(-6))
         self.dt_from.dateChanged.connect(self._on_filter_changed)
 
         self.lbl_to = QLabel("至")
-        self.lbl_to.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_to.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
 
         self.dt_to = QDateEdit()
         self.dt_to.setCalendarPopup(True)
         self.dt_to.setDisplayFormat("yyyy-MM-dd")
-        self.dt_to.setFixedWidth(112)
+        self.dt_to.setFixedWidth(128)
         self.dt_to.setDate(QDate.currentDate())
         self.dt_to.dateChanged.connect(self._on_filter_changed)
 
@@ -337,12 +337,12 @@ class AccessPage(QWidget):
 
         self.limit = QComboBox()
         self.limit.addItems([f"每页 {n} 条" for n in PAGE_SIZES])
-        self.limit.setFixedWidth(112)
+        self.limit.setFixedWidth(128)
         self.limit.currentIndexChanged.connect(self._on_filter_changed)
 
         self.btn_export = QPushButton("导出 CSV")
         self.btn_export.setObjectName("btn_outline")
-        self.btn_export.setFixedHeight(26)
+        self.btn_export.setFixedHeight(30)
         self.btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_export.clicked.connect(self._export_csv)
         self.btn_export.setToolTip("导出当前筛选结果，不受分页影响")
@@ -350,7 +350,7 @@ class AccessPage(QWidget):
         # 筛选栏的宽度在 1200 窗口下只够放一句短提示（实测放长句会被裁掉），
         # 完整解释放在 tooltip 与搜索框 tooltip 里。
         self.lbl_hint = QLabel("关键词为模糊匹配")
-        self.lbl_hint.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_hint.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
         self.lbl_hint.setToolTip(
             "关键词按「包含」匹配 IP / 路径 / 用户代理三列（%kw% 前缀通配，走不了索引），\n"
             "数据量大时建议先用时间范围收窄再搜，单页条数上限也因此在 "
@@ -384,7 +384,7 @@ class AccessPage(QWidget):
         # 常显竖滚动条：滚动条出现/消失会让表格可视宽在 15↔25px 之间跳，
         # 结果列宽度每次翻页都变（与风险事件页同一条理由）
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.table.verticalHeader().setDefaultSectionSize(30)
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.setItemDelegateForColumn(COL_LEVEL, RiskBadgeDelegate(self.table))
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -408,7 +408,7 @@ class AccessPage(QWidget):
         self.btn_next.clicked.connect(lambda: self._goto_page(self._page + 1))
 
         self.lbl_page = QLabel("共 0 条，第 1/1 页")
-        self.lbl_page.setStyleSheet(f"color:{C.text_secondary};font-size:12px;")
+        self.lbl_page.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
 
         bar.addWidget(self.btn_prev)
         bar.addWidget(self.btn_next)
@@ -420,7 +420,7 @@ class AccessPage(QWidget):
     @staticmethod
     def _pager_button(text: str) -> QPushButton:
         b = QPushButton(text)
-        b.setFixedHeight(26)
+        b.setFixedHeight(30)
         b.setFixedWidth(80)
         b.setObjectName("btn_outline")
         b.setCursor(Qt.CursorShape.PointingHandCursor)

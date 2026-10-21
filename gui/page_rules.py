@@ -77,7 +77,7 @@ class RuleCard(QFrame):
         top.setSpacing(10)
         self.toggle = ToggleSwitch(bool(self.cfg.get("enabled", True)))
         self.name = QLabel(RULE_LABELS.get(self.rule_id, self.rule_id))
-        self.name.setStyleSheet(f"color:{C.text_on_dark};font-size:14px;font-weight:600;")
+        self.name.setStyleSheet(f"color:{C.text_on_dark};font-size:16px;font-weight:600;")
         self.tag_off = QLabel("已停用")
         self.tag_off.setStyleSheet(f"color:{C.text_muted};font-size:11.5px;")
 
@@ -204,7 +204,7 @@ class RuleCard(QFrame):
     @staticmethod
     def _lbl(text: str) -> QLabel:
         lb = QLabel(text)
-        lb.setStyleSheet(f"color:{C.text_secondary};font-size:12px;")
+        lb.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
         return lb
 
     def _on_toggle(self, on: bool) -> None:
@@ -215,7 +215,7 @@ class RuleCard(QFrame):
         self.cb_action.setEnabled(on)
         # 停用态：降明度 + 明说「已停用」，而不是让控件看起来像坏了
         self.name.setStyleSheet(
-            f"color:{C.text_on_dark if on else C.text_muted};font-size:14px;font-weight:600;"
+            f"color:{C.text_on_dark if on else C.text_muted};font-size:16px;font-weight:600;"
         )
         self.tag_off.setVisible(not on)
 
@@ -267,7 +267,7 @@ class RulesPage(QWidget):
 
         head = PageHeader("规则配置", "修改后保存，规则引擎即时生效，无需重启")
         self.lbl_dirty = QLabel("")
-        self.lbl_dirty.setStyleSheet(f"color:{C.warning};font-size:12px;")
+        self.lbl_dirty.setStyleSheet(f"color:{C.warning};font-size:13.5px;")
         self.lbl_dirty.setVisible(False)
         head.add_action(self.lbl_dirty)
 
@@ -391,7 +391,7 @@ class RulesPage(QWidget):
         ed.setStyleSheet(
             f"QPlainTextEdit{{background:{C.bg_input};color:{C.text_primary};"
             f"border:1px solid {C.border};border-radius:6px;padding:8px;"
-            f'font-family:"Consolas","Microsoft YaHei UI",monospace;font-size:12px;}}'
+            f'font-family:"Consolas","Microsoft YaHei UI",monospace;font-size:13.5px;}}'
             f"QPlainTextEdit:focus{{border-color:{C.primary};}}"
         )
         lay.addWidget(ed, 1)

@@ -95,8 +95,8 @@ SUG_HEADERS = ["", "时间", "等级", "IP", "归属地", "端口", "评分", "�
 # 到期 / 创建列 136：模型输出的是 `YYYY-MM-DD HH:MM`（112px），不能省年份，
 # 封禁最长 365 天会跨年。
 # 原因列是唯一的拉伸列。
-BAN_WIDTHS = [32, 48, 130, 180, 50, 46, 64, 66, 128, 128, 88]
-SUG_WIDTHS = [32, 120, 60, 130, 106, 56, 46, 160, 112]
+BAN_WIDTHS = [37, 55, 150, 207, 58, 53, 74, 76, 147, 147, 101]
+SUG_WIDTHS = [37, 138, 69, 150, 122, 64, 53, 184, 129]
 COL_SUG_CHECK = 0
 COL_SUG_LEVEL = 2
 COL_SUG_REASON = 7
@@ -169,7 +169,7 @@ class ManualBanDialog(QDialog):
         form.addRow("封禁时长", self.duration)
 
         tip = QLabel("提示：内网、回环与保留地址会被自动拒绝封禁。")
-        tip.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        tip.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         form.addRow(tip)
 
         btns = QDialogButtonBox(
@@ -402,7 +402,7 @@ class BansPage(QWidget):
         table.setWordWrap(False)
         table.setTabKeyNavigation(False)
         table.verticalHeader().setVisible(False)
-        table.verticalHeader().setDefaultSectionSize(30)
+        table.verticalHeader().setDefaultSectionSize(34)
         # 常显竖滚动条：滚动条出现/消失会让可视宽在 15↔25px 之间跳，列宽跟着抖
         table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
@@ -420,14 +420,14 @@ class BansPage(QWidget):
         self.sug_title = QLabel("待确认的封禁建议")
         self.sug_title.setObjectName("panel_title")
         self.sug_hint = QLabel("规则引擎建议，需人工确认")
-        self.sug_hint.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.sug_hint.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
         head.addWidget(self.sug_title)
         head.addWidget(self.sug_hint)
         head.addStretch(1)
 
         # 批量操作放在面板标题行里：不额外占高度，上下面板的高度预算不用重算
         self.lbl_sug_sel = QLabel("已选 0 条")
-        self.lbl_sug_sel.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_sug_sel.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
         self.btn_sug_all = self._mini_button("全选", enabled=True)
         self.btn_sug_ban = self._mini_button("批量封禁", "danger")
         self.btn_sug_ignore = self._mini_button("批量忽略")
@@ -452,7 +452,7 @@ class BansPage(QWidget):
 
         self.sug_empty = QLabel("没有待确认建议 · 规则引擎未发现需要封禁的高危 IP")
         self.sug_empty.setStyleSheet(
-            f"color:{C.text_muted};font-size:12px;padding:0 16px 14px 16px;"
+            f"color:{C.text_muted};font-size:13.5px;padding:0 16px 14px 16px;"
         )
         self.sug_empty.setVisible(False)
         lay.addWidget(self.sug_empty)
@@ -481,7 +481,7 @@ class BansPage(QWidget):
         按钮。「全选」这类不依赖勾选的按钮要显式传 enabled=True。
         """
         b = QPushButton(text)
-        b.setFixedHeight(24)
+        b.setFixedHeight(30)
         b.setStyleSheet(small_button_style(kind or "outline"))
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setEnabled(enabled)
@@ -498,12 +498,12 @@ class BansPage(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索 IP / 原因…")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(280)
+        self.search.setFixedWidth(330)
         self.search.textChanged.connect(self.refresh)
 
         self.status_filter = QComboBox()
         self.status_filter.addItems(["全部状态", "已封禁", "已解封", "失败", "处理中"])
-        self.status_filter.setFixedWidth(110)
+        self.status_filter.setFixedWidth(132)
         self.status_filter.currentIndexChanged.connect(self.refresh)
 
         btn_manual = QPushButton("手动封禁")
@@ -520,7 +520,7 @@ class BansPage(QWidget):
         self.btn_more.setToolTip("更多操作：与防火墙对账 / 一键全部解封")
 
         self.lbl_info = QLabel("")
-        self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
 
         bar.addWidget(self.search)
         bar.addWidget(self.status_filter)
@@ -535,8 +535,8 @@ class BansPage(QWidget):
         bb = QHBoxLayout()
         bb.setSpacing(8)
         self.lbl_ban_sel = QLabel("已选 0 条")
-        self.lbl_ban_sel.setStyleSheet(f"color:{C.text_secondary};font-size:12px;")
-        self.lbl_ban_sel.setFixedWidth(84)
+        self.lbl_ban_sel.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
+        self.lbl_ban_sel.setFixedWidth(92)
         self.btn_ban_all = self._mini_button("全选本页", enabled=True)
         self.btn_ban_unban = self._mini_button("批量解封")
         self.btn_ban_del = self._mini_button("删除记录")
@@ -720,7 +720,9 @@ class BansPage(QWidget):
     # ── 勾选与批量处理 ──
     def _on_sug_sel_changed(self, n: int) -> None:
         self.lbl_sug_sel.setText(f"已选 {n} 条")
-        self.lbl_sug_sel.setStyleSheet(f"color:{C.primary if n else C.text_muted};font-size:11px;")
+        self.lbl_sug_sel.setStyleSheet(
+            f"color:{C.primary if n else C.text_muted};font-size:12.5px;"
+        )
         for b in (self.btn_sug_ban, self.btn_sug_ignore):
             b.setEnabled(n > 0)
         self.btn_sug_all.setText("取消全选" if n and n == len(self._sug_rows) else "全选")
@@ -728,7 +730,7 @@ class BansPage(QWidget):
     def _on_ban_sel_changed(self, n: int) -> None:
         self.lbl_ban_sel.setText(f"已选 {n} 条")
         self.lbl_ban_sel.setStyleSheet(
-            f"color:{C.primary if n else C.text_secondary};font-size:12px;"
+            f"color:{C.primary if n else C.text_secondary};font-size:13.5px;"
             f"font-weight:{'600' if n else '400'};"
         )
         for b in (self.btn_ban_unban, self.btn_ban_del):
@@ -987,7 +989,7 @@ class BansPage(QWidget):
         lay.setSpacing(4)
 
         b_unban = QPushButton("解封")
-        b_unban.setFixedHeight(22)
+        b_unban.setFixedHeight(30)
         b_unban.setStyleSheet(small_button_style("success"))
         b_unban.setCursor(Qt.CursorShape.PointingHandCursor)
         b_unban.setEnabled(b.status == STATUS_ACTIVE)

@@ -124,7 +124,7 @@ class RegionRuleDialog(QDialog):
             "匹配条件可以只填一项，也可以多项组合（多项之间是「并且」的关系）。"
             "省份支持写「河南」或「河南省」。生效端口留空表示对所有端口生效。"
         )
-        tip.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        tip.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         tip.setWordWrap(True)
         root.addWidget(tip)
 
@@ -199,7 +199,7 @@ class RegionRuleDialog(QDialog):
         root.addLayout(f)
 
         self.lbl_hint = QLabel("")
-        self.lbl_hint.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_hint.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         self.lbl_hint.setWordWrap(True)
         root.addWidget(self.lbl_hint)
         self.cb_action.currentIndexChanged.connect(self._update_hint)
@@ -309,7 +309,7 @@ class RegionRulesTab(QWidget):
             "区域访问白名单：按 IP 归属地（省 / 市 / 国家 / 运营商）或地址段来放行、观察、"
             "降级或判定风险。规则在这里手工增删改，保存后立即对上报与本机采集的流量生效。"
         )
-        tip.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        tip.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         tip.setWordWrap(True)
         lay.addWidget(tip)
 
@@ -356,7 +356,7 @@ class RegionRulesTab(QWidget):
         lay.addLayout(row)
 
         self.lbl_state = QLabel("")
-        self.lbl_state.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_state.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         lay.addWidget(self.lbl_state)
 
     # ── 数据 ──

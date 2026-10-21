@@ -72,11 +72,15 @@ class Dot(QWidget):
 
 
 class ToggleSwitch(QWidget):
-    """开关控件（36×20）：轨道 primary / 关闭态 border_strong"""
+    """开关控件（44×24）：轨道 primary / 关闭态 border_strong
+
+    尺寸随全局字号放大过一次（原 36×20）：旁边 14.5px 的文字配 20px 高的
+    轨道会显得控件「没长开」，点起来也不够好点。
+    """
 
     toggled = Signal(bool)
 
-    def __init__(self, checked: bool = False, parent=None, width: int = 36, height: int = 20):
+    def __init__(self, checked: bool = False, parent=None, width: int = 44, height: int = 24):
         super().__init__(parent)
         self._checked = checked
         self._w, self._h = width, height
@@ -135,7 +139,7 @@ class ToggleSwitch(QWidget):
         pad = 2
         d = self._h - pad * 2
         x = pad + (self._w - pad * 2 - d) * self._pos
-        p.setBrush(QBrush(QColor("#F4F7FA")))
+        p.setBrush(QBrush(QColor(C.bg_card)))
         p.drawEllipse(QRect(int(x), pad, d, d))
         p.end()
 
@@ -147,8 +151,8 @@ class StatCard(QFrame):
         super().__init__(parent)
         self.setObjectName("stat_card")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumHeight(76)
-        self.setMaximumHeight(76)
+        self.setMinimumHeight(84)
+        self.setMaximumHeight(84)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 12, 16, 12)
@@ -158,7 +162,7 @@ class StatCard(QFrame):
         self.value_lbl.setObjectName("stat_value")
         self.value_lbl.setFont(number_font(22, bold=True))
         self.value_lbl.setStyleSheet(
-            f"font-family:Consolas,'Microsoft YaHei UI';font-size:26px;font-weight:700;"
+            f"font-family:Consolas,'Microsoft YaHei UI';font-size:30px;font-weight:700;"
             f"color:{color or C.text_on_dark};background:transparent;"
         )
 
@@ -169,7 +173,7 @@ class StatCard(QFrame):
         self.label_lbl = QLabel(label)
         self.label_lbl.setObjectName("stat_label")
         self.label_lbl.setStyleSheet(
-            f"font-size:11px;color:{C.text_secondary};background:transparent;"
+            f"font-size:12.5px;color:{C.text_secondary};background:transparent;"
         )
         row.addWidget(self.dot)
         row.addWidget(self.label_lbl)
@@ -183,7 +187,7 @@ class StatCard(QFrame):
 
     def set_color(self, color: str) -> None:
         self.value_lbl.setStyleSheet(
-            f"font-family:Consolas,'Microsoft YaHei UI';font-size:26px;font-weight:700;"
+            f"font-family:Consolas,'Microsoft YaHei UI';font-size:30px;font-weight:700;"
             f"color:{color};background:transparent;"
         )
         self.dot.set_color(color)
@@ -202,14 +206,14 @@ class RiskBadge(QLabel):
 
         label = text if text is not None else LEVEL_LABEL.get(level, level)
         fg = LEVEL_COLORS.get(level, C.text_secondary)
-        bg = LEVEL_BADGE_BG.get(level, "#242A33")
+        bg = LEVEL_BADGE_BG.get(level, C.bg_hover)
         if level == "critical":
             fg = "#FFFFFF"
         self.setText(label)
-        self.setFixedHeight(20)
+        self.setFixedHeight(24)
         self.setStyleSheet(
             f"QLabel{{color:{fg};background:{bg};border:none;border-radius:4px;"
-            f"padding:0 6px;font-size:11px;font-weight:600;}}"
+            f"padding:0 6px;font-size:12.5px;font-weight:600;}}"
         )
 
 
@@ -236,9 +240,9 @@ def badge_item(level: str, text: Optional[str] = None) -> QTableWidgetItem:
 
 
 class RiskBadgeDelegate(QStyledItemDelegate):
-    """在单元格中央绘制 18px 风险徽章；选中/斑马底仍由基类绘制"""
+    """在单元格中央绘制 22px 风险徽章；选中/斑马底仍由基类绘制"""
 
-    HEIGHT = 18
+    HEIGHT = 22
 
     def paint(self, painter, option, index) -> None:
         level = index.data(BADGE_ROLE)
@@ -257,10 +261,10 @@ class RiskBadgeDelegate(QStyledItemDelegate):
 
         text = LEVEL_LABEL.get(str(level), str(level))
         fg = "#FFFFFF" if level == "critical" else LEVEL_COLORS.get(str(level), C.text_secondary)
-        bg = LEVEL_BADGE_BG.get(str(level), "#242A33")
+        bg = LEVEL_BADGE_BG.get(str(level), C.bg_hover)
 
         f = QFont(widget.font() if widget is not None else QFont())
-        f.setPixelSize(11)
+        f.setPixelSize(12)
         f.setBold(True)
         painter.setFont(f)
         fm = painter.fontMetrics()
@@ -282,7 +286,7 @@ class RiskBadgeDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         s = super().sizeHint(option, index)
-        s.setHeight(max(s.height(), 30))
+        s.setHeight(max(s.height(), 34))
         return s
 
 
@@ -295,10 +299,10 @@ class Badge(QLabel):
         self.set_color(color or C.text_secondary)
 
     def set_color(self, color: str) -> None:
-        self.setFixedHeight(20)
+        self.setFixedHeight(24)
         self.setStyleSheet(
             f"QLabel{{color:{color};background:{_rgba(color, 0.14)};border:none;"
-            f"border-radius:4px;padding:0 6px;font-size:11px;font-weight:600;}}"
+            f"border-radius:4px;padding:0 6px;font-size:12.5px;font-weight:600;}}"
         )
 
 
@@ -337,7 +341,7 @@ def labeled_toggle(toggle: QWidget, text: str) -> QWidget:
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(8)
     lb = QLabel(text)
-    lb.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
+    lb.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
     lay.addWidget(lb)
     lay.addWidget(toggle)
     return w
@@ -391,7 +395,7 @@ class WarnBanner(QFrame):
 
         self.icon = _AlertIcon(fg)
         self.text = QLabel(text)
-        self.text.setStyleSheet(f"color:{C.text_primary};font-size:12.5px;background:transparent;")
+        self.text.setStyleSheet(f"color:{C.text_primary};font-size:13.5px;background:transparent;")
         self.text.setWordWrap(True)
 
         inner.addWidget(self.icon)
@@ -401,7 +405,7 @@ class WarnBanner(QFrame):
         if action_text:
             self.btn = QPushButton(action_text)
             self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.btn.setFixedHeight(26)
+            self.btn.setFixedHeight(30)
             self.btn.setStyleSheet(
                 f"QPushButton{{background:transparent;color:{fg};border:1px solid {fg};"
                 f"border-radius:4px;padding:0 10px;font-size:11.5px;font-weight:600;}}"
@@ -435,14 +439,14 @@ class EmptyState(QWidget):
         self.title = QLabel(title)
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title.setStyleSheet(
-            f"color:{C.text_secondary};font-size:13px;font-weight:600;background:transparent;"
+            f"color:{C.text_secondary};font-size:14.5px;font-weight:600;background:transparent;"
         )
         lay.addWidget(self.title)
 
         self.desc = QLabel(desc)
         self.desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.desc.setWordWrap(True)
-        self.desc.setStyleSheet(f"color:{C.text_muted};font-size:12px;background:transparent;")
+        self.desc.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;background:transparent;")
         self.desc.setVisible(bool(desc))
         lay.addWidget(self.desc)
 

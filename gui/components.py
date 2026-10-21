@@ -77,7 +77,7 @@ class ShieldMark(QWidget):
             )
         )
 
-        # 对勾是「挖空」效果：用 bg_sidebar(#0A0C10) 压 primary 得 5.44:1，
+        # 对勾是「挖空」效果：用 bg_sidebar(白) 压 primary 得 5.2:1，
         # 比 accent_on 更实；笔画 2.4（20px 下 1px 会糊成灰线），RoundCap 保圆头。
         pen = QPen(QColor(C.bg_sidebar))
         pen.setWidthF(max(2.4, w * 0.12))
@@ -99,16 +99,16 @@ class ShieldMark(QWidget):
 
 
 class PageHeader(QWidget):
-    """页面标题区（高 56）
+    """页面标题区（高 62）
 
-    结构：标题 20/600 `text_on_dark` + 说明 12 `text_muted`（同行、间距 10、
+    结构：标题 23/600 `text_on_dark` + 说明 13.5 `text_muted`（同行、间距 10、
     与标题下缘对齐）+ 右侧动作区（间距 8、右对齐、垂直居中）。
 
     说明与标题在同一行而不是换行：`02_ux_spec.md` P1-1 要求 7 页标题基线一致，
     说明一旦换行，各页标题区的实际高度就会随文案长短浮动。
     """
 
-    HEIGHT = 56
+    HEIGHT = 62
 
     def __init__(self, title: str, desc: str = "", parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -125,12 +125,12 @@ class PageHeader(QWidget):
 
         self.title_lbl = QLabel(title)
         self.title_lbl.setObjectName("page_title")
-        self.title_lbl.setFixedHeight(26)
+        self.title_lbl.setFixedHeight(30)
         row.addWidget(self.title_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.desc_lbl = QLabel(desc)
         self.desc_lbl.setObjectName("page_desc")
-        self.desc_lbl.setFixedHeight(26)
+        self.desc_lbl.setFixedHeight(30)
         # 固定同高 + 底对齐 ≈ 同基线（20px 与 12px 的 descent 差约 2px）
         self.desc_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
         self.desc_lbl.setVisible(bool(desc))
@@ -175,14 +175,14 @@ class ClickableStatusItem(StatusItem):
 
 
 class TopStatusBar(QFrame):
-    """顶部持久健康态条（高 44）
+    """顶部持久健康态条（高 48）
 
     接收服务 / 本机观察 / 权限 三项 —— 这三个「是否真在防护」的状态原先被压在
     26px 状态栏最右端，等于没有（`02_ux_spec.md` P0-8）。项间的 1px 竖线由本控件
     负责插入，调用方只 `add_item()`，不用关心分隔线位置。
     """
 
-    HEIGHT = 44
+    HEIGHT = 48
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -345,7 +345,7 @@ def ban_button(
     原因的地方，所以文案必须自带结论。
     """
     btn = QPushButton("已封禁" if banned else text)
-    btn.setFixedHeight(22)
+    btn.setFixedHeight(30)
     btn.setStyleSheet(small_button_style("danger"))
     btn.setToolTip(tip or ("该 IP 已在封禁中，解封请到「封禁管理」页" if banned else ""))
     if banned:

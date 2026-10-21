@@ -87,7 +87,7 @@ class IpLookupPage(QWidget):
 
         head = PageHeader("IP 查询工具", "离线 ip2region 库（IPv4 + IPv6），10 微秒级查询")
         self.lbl_lib = QLabel("")
-        self.lbl_lib.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_lib.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
         self.lbl_lib.setToolTip("离线库版本与缓存命中情况")
         head.add_action(self.lbl_lib)
 
@@ -118,7 +118,7 @@ class IpLookupPage(QWidget):
         self.single_result = QLabel("—")
         self.single_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.single_result.setStyleSheet(
-            f"color:{C.text_secondary};font-size:12.5px;padding:2px 0;"
+            f"color:{C.text_secondary};font-size:13.5px;padding:2px 0;"
         )
         l1.addWidget(self.single_result)
         root.addWidget(grp1)
@@ -166,9 +166,11 @@ class IpLookupPage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.verticalHeader().setDefaultSectionSize(32)
         h = self.table.horizontalHeader()
-        for i, w in enumerate([140, 62, 104, 100, 92, 118, 60, 66]):
+        # 右栏只分到约 590px（split 2:5），15px 字号下按内容重排过：
+        # 四个汉字的表头（是否命中 / 是否中国）至少要 72px，否则表头会竖排折断。
+        for i, w in enumerate([92, 72, 78, 72, 64, 58, 56, 72]):
             h.resizeSection(i, w)
         h.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         # 点表头排序（数据层重排 + 重渲染，见 gui/table_sort.py）
@@ -228,7 +230,7 @@ class IpLookupPage(QWidget):
             geo = get_locator().lookup(ip)
         except Exception as e:
             self.single_result.setText(f"查询失败：{e}")
-            self.single_result.setStyleSheet(f"color:{C.danger};font-size:12.5px;padding:2px 0;")
+            self.single_result.setStyleSheet(f"color:{C.danger};font-size:13.5px;padding:2px 0;")
             return
         if geo.found:
             scope = "境内" if geo.is_china else "境外"
@@ -237,12 +239,12 @@ class IpLookupPage(QWidget):
                 f"ISP {geo.isp if geo.isp and geo.isp != '0' else '-'}　·　{scope}"
             )
             self.single_result.setStyleSheet(
-                f"color:{C.text_secondary};font-size:12.5px;padding:2px 0;"
+                f"color:{C.text_secondary};font-size:13.5px;padding:2px 0;"
             )
         else:
             self.single_result.setText("未命中任何数据段（可能是内网 / 保留 / 未收录地址）")
             self.single_result.setStyleSheet(
-                f"color:{C.text_muted};font-size:12.5px;padding:2px 0;"
+                f"color:{C.text_muted};font-size:13.5px;padding:2px 0;"
             )
 
     def _query_batch(self) -> None:

@@ -61,7 +61,7 @@ HELP_SHORTCUT_KEY = "F1"
 _LABEL_W = 96
 
 #: 快捷键表格行高（两栈一致，避免 Qt5/Qt6 度量差异导致高度飘）
-_ROW_H = 26
+_ROW_H = 30
 
 #: 表头高度下限。`horizontalHeader().sizeHint()` 在「还没上屏 / 样式表还没 polish」
 #: 时只有 16px，套上 GLOBAL_STYLE 后才是 36px —— 用 16 算出来的表格高度
@@ -77,7 +77,7 @@ _HEADER_H = 36
 class ClickableLabel(QLabel):
     """可点击的 `QLabel`（侧栏底部版本号用）。
 
-    QLabel 没有 `clicked` 信号，而侧栏底部那行「v1.1.0 · ip2region」是
+    QLabel 没有 `clicked` 信号，而侧栏底部那行「v1.2.0 · ip2region」是
     全程序唯一还留着版本信息的地方 —— 让它可点，用户不必再去托盘里找入口。
 
     ⚠️ 必须靠子类重写虚拟函数，不能实例级打补丁（`w.mouseReleaseEvent = ...`）：
@@ -320,7 +320,7 @@ class AboutDialog(QDialog):
         names.setContentsMargins(0, 0, 0, 0)
         names.setSpacing(2)
         title = QLabel(APP_NAME)
-        title.setStyleSheet(f"color:{C.text_on_dark};font-size:17px;font-weight:700;")
+        title.setStyleSheet(f"color:{C.text_on_dark};font-size:19px;font-weight:700;")
         desc = QLabel("端口访问防御工具 · 离线归属 · 规则打分 · 防火墙封禁")
         desc.setObjectName("hint")
         names.addWidget(title)
@@ -330,7 +330,7 @@ class AboutDialog(QDialog):
 
         ver = QLabel(f"v{APP_VERSION}")
         ver.setStyleSheet(
-            f"color:{C.primary};font-size:12px;font-weight:600;"
+            f"color:{C.primary};font-size:13.5px;font-weight:600;"
             f"border:1px solid {C.primary_light};border-radius:4px;padding:2px 8px;"
         )
         row.addWidget(ver, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -447,7 +447,7 @@ class AboutDialog(QDialog):
 
         self.lbl_hint = QLabel("")
         self.lbl_hint.setObjectName("form_hint")
-        self.lbl_hint.setFixedHeight(24)
+        self.lbl_hint.setFixedHeight(30)
 
         row.addWidget(b_info)
         row.addWidget(b_diag)
@@ -458,7 +458,7 @@ class AboutDialog(QDialog):
 
     def _hint(self, text: str, color: str) -> None:
         self.lbl_hint.setText(text)
-        self.lbl_hint.setStyleSheet(f"color:{color};font-size:12px;")
+        self.lbl_hint.setStyleSheet(f"color:{color};font-size:13.5px;")
 
     def _copy_info(self) -> None:
         QApplication.clipboard().setText(about_summary_text())

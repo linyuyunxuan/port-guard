@@ -124,7 +124,7 @@ COL_RULE = 8
 COL_DISPOSITION = 9
 COL_ACTION = 10
 
-COL_WIDTHS = [32, 160, 56, 130, 108, 52, 109, 46, 141, 72, 88]
+COL_WIDTHS = [37, 170, 62, 142, 124, 58, 125, 52, 162, 80, 96]
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 勾选列（点了是全选）与操作列（无值）不给规则 —— 点这两列表头不排序。
@@ -370,38 +370,38 @@ class EventsPage(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索 IP / 摘要…")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(220)
+        self.search.setFixedWidth(260)
         self.search.textChanged.connect(self.refresh)
 
         self.level = QComboBox()
         self.level.addItems(["全部等级", "严重", "高", "中", "低"])
-        self.level.setFixedWidth(96)
+        self.level.setFixedWidth(118)
         self.level.currentIndexChanged.connect(self.refresh)
 
         self.handled = QComboBox()
         self.handled.addItems(["全部状态", "未处理", "已确认", "已忽略"])
-        self.handled.setFixedWidth(104)
+        self.handled.setFixedWidth(122)
         self.handled.currentIndexChanged.connect(self.refresh)
 
         self.range = QComboBox()
         self.range.addItems(RANGE_CHOICES)
-        self.range.setFixedWidth(104)
+        self.range.setFixedWidth(122)
         self.range.currentIndexChanged.connect(self._on_range_changed)
 
         self.dt_from = QDateEdit()
         self.dt_from.setCalendarPopup(True)
         self.dt_from.setDisplayFormat("yyyy-MM-dd")
-        self.dt_from.setFixedWidth(112)
+        self.dt_from.setFixedWidth(128)
         self.dt_from.setDate(QDate.currentDate().addDays(-6))
         self.dt_from.dateChanged.connect(self.refresh)
 
         self.lbl_to = QLabel("至")
-        self.lbl_to.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_to.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
 
         self.dt_to = QDateEdit()
         self.dt_to.setCalendarPopup(True)
         self.dt_to.setDisplayFormat("yyyy-MM-dd")
-        self.dt_to.setFixedWidth(112)
+        self.dt_to.setFixedWidth(128)
         self.dt_to.setDate(QDate.currentDate())
         self.dt_to.dateChanged.connect(self.refresh)
 
@@ -410,7 +410,7 @@ class EventsPage(QWidget):
 
         self.limit = QComboBox()
         self.limit.addItems(["最近 200 条", "最近 500 条", "最近 2000 条"])
-        self.limit.setFixedWidth(124)
+        self.limit.setFixedWidth(140)
         self.limit.currentIndexChanged.connect(self.refresh)
 
         self.merge = QCheckBox("同类合并")
@@ -424,7 +424,7 @@ class EventsPage(QWidget):
         self.merge.stateChanged.connect(self.refresh)
 
         self.lbl_info = QLabel("")
-        self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
 
         for combo in (self.search, self.level, self.handled, self.range):
             bar.addWidget(combo)
@@ -444,8 +444,8 @@ class EventsPage(QWidget):
         lay.setSpacing(8)
 
         self.lbl_sel = QLabel("已选 0 条")
-        self.lbl_sel.setStyleSheet(f"color:{C.text_secondary};font-size:12px;")
-        self.lbl_sel.setFixedWidth(84)
+        self.lbl_sel.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
+        self.lbl_sel.setFixedWidth(92)
 
         self.btn_sel_all = self._batch_button("全选本页", "")
         # 勾选列在表格建好后才有，这里延迟到点击时再取
@@ -490,7 +490,7 @@ class EventsPage(QWidget):
     @staticmethod
     def _batch_button(text: str, kind: str) -> QPushButton:
         b = QPushButton(text)
-        b.setFixedHeight(26)
+        b.setFixedHeight(30)
         b.setStyleSheet(small_button_style(kind or "outline"))
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         return b
@@ -511,7 +511,7 @@ class EventsPage(QWidget):
         # 常显竖滚动条：滚动条出现/消失会让表格可视宽在 15↔25px 之间跳，
         # 结果列宽度每次翻页都变，读数时眼睛要重新找位置
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.table.verticalHeader().setDefaultSectionSize(30)
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.setItemDelegateForColumn(COL_LEVEL, RiskBadgeDelegate(self.table))
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -717,7 +717,7 @@ class EventsPage(QWidget):
     def _on_sel_changed(self, n: int) -> None:
         self.lbl_sel.setText(f"已选 {n} 条")
         self.lbl_sel.setStyleSheet(
-            f"color:{C.primary if n else C.text_secondary};font-size:12px;"
+            f"color:{C.primary if n else C.text_secondary};font-size:13.5px;"
             f"font-weight:{'600' if n else '400'};"
         )
         for b in self._batch_buttons:
