@@ -10,7 +10,7 @@ PortGuard — 封禁编排（不依赖 Qt，可脱离界面单测）
 
 import contextlib
 import time
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from app import audit
 from core import firewall
@@ -30,8 +30,10 @@ from core.database import (
     count_bans_by_ip,
     find_active_ban_by_ip,
     insert_ban,
+    list_all_active_bans,
     list_expired_bans,
     mark_ban_unbanned,
+    query_bans,
     update_ban,
 )
 from core.event_bus import bus
@@ -697,3 +699,115 @@ def reconcile(rule_names: List[str]) -> int:
             after={"fixed": fixed, "unblocked_by": audit.ACTOR_SYSTEM},
         )
     return len(fixed)
+
+
+def reenforce_all(cleanup_legacy: bool = True, retry_failed: bool = True) -> Dict[str, Any]:
+    """
+    把「库里的封禁」与「系统里的防火墙规则」对齐一次。返回摘要字典。
+
+    触发点：程序启动（管理员）、刚启用防火墙之后、以及封禁页的「重新校验」。
+
+    做三件事，顺序有讲究：
+    1. **先补建** active 但系统里没有规则的封禁（新名字 `PortGuard_Block_<ip>`）
+    2. **再清历史遗留规则**（`<ip>_<毫秒>_<随机>`，真机上同一个 IP 堆过十几条）。
+       放在补建之后是为了不留解封窗口：新规则已经挡住了，再删旧的才安全
+    3. 重试 `failed` 记录 —— 失败原因多数是「封禁那会儿防火墙没开」，现在开了就该补上
+
+    防火墙未启用时直接返回、不做任何写操作：这时补封一万条也不会拦下一个包。
+    """
+    res: Dict[str, Any] = {
+        "ok": False,
+        "legacy_removed": 0,
+        "restored": [],
+        "failed": [],
+        "error": "",
+    }
+    if not firewall.is_admin():
+        res["error"] = "需要管理员权限才能修改 Windows 防火墙"
+        return res
+    if firewall.firewall_enabled(force=True) is False:
+        res["error"] = (
+            "Windows 防火墙当前未启用（"
+            + firewall.format_profiles(firewall.profiles_state())
+            + "），补封不会有任何效果"
+        )
+        return res
+
+    # 1) 补建 active 封禁
+    targets: List[BanRecord] = []
+    try:
+        targets = list(list_all_active_bans())
+    except Exception as e:
+        log.exception("读取活动封禁失败")
+        res["error"] = f"读取活动封禁失败：{e}"
+        return res
+
+    if retry_failed:
+        try:
+            targets += list(query_bans(status=STATUS_FAILED, limit=500))
+        except Exception:
+            log.exception("读取失败封禁记录失败（忽略，只补 active）")
+
+    seen: set = set()
+    for ban in targets:
+        if ban.ip in seen:
+            continue
+        seen.add(ban.ip)
+        name = firewall.rule_name(ban.ip)
+        if ban.status == STATUS_ACTIVE and firewall.rule_exists(name):
+            if ban.rule_name != name:
+                with contextlib.suppress(Exception):
+                    update_ban(ban.id, rule_name=name)
+            continue
+        ok, rule, err = firewall.block_ip(ban.ip, ban.duration_sec, note=ban.reason)
+        if ok:
+            with contextlib.suppress(Exception):
+                update_ban(ban.id, rule_name=rule, status=STATUS_ACTIVE, error_msg="")
+            res["restored"].append(ban.ip)
+        else:
+            res["failed"].append(f"{ban.ip}: {err}")
+
+    # 2) 清历史遗留规则
+    if cleanup_legacy:
+        legacy = firewall.legacy_rule_names()
+        if legacy:
+            n, errs = firewall.remove_rules(legacy)
+            res["legacy_removed"] = n
+            if errs:
+                res["failed"].extend(errs[:10])
+
+    res["ok"] = True
+    if res["restored"] or res["legacy_removed"]:
+        audit.record(
+            audit.ACTION_BAN_RECONCILE,
+            actor=audit.ACTOR_SYSTEM,
+            target_type="ban",
+            summary=(
+                f"补齐封禁 {len(res['restored'])} 条，清理历史规则 {res['legacy_removed']} 条"
+            ),
+            after={
+                "restored": res["restored"][:50],
+                "legacy_removed": res["legacy_removed"],
+            },
+        )
+    log.info(
+        "封禁对齐完成：补建 %d 条，清理历史规则 %d 条，失败 %d 条",
+        len(res["restored"]),
+        res["legacy_removed"],
+        len(res["failed"]),
+    )
+    return res
+
+
+def format_reenforce(res: Dict[str, Any]) -> str:
+    """把 reenforce_all 的结果整理成一句人能读的话（状态栏 / 弹窗共用）"""
+    if not res.get("ok"):
+        return res.get("error") or "对齐失败"
+    parts: List[str] = []
+    if res.get("restored"):
+        parts.append(f"补建规则 {len(res['restored'])} 条")
+    if res.get("legacy_removed"):
+        parts.append(f"清理历史规则 {res['legacy_removed']} 条")
+    if res.get("failed"):
+        parts.append(f"失败 {len(res['failed'])} 条")
+    return "，".join(parts) or "无变化（库与防火墙已一致）"

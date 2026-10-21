@@ -123,3 +123,20 @@ def no_sleep(monkeypatch):
     from core import db_writer
 
     monkeypatch.setattr(db_writer.BatchWriter, "_flush_interval", 0.01)
+
+
+@pytest.fixture(autouse=True)
+def stub_firewall_enabled(monkeypatch):
+    """
+    `firewall.block_ip` 现在会检查「Windows 防火墙是否真的开着」。
+
+    这是**真实系统状态**，而本机（开发机 / CI）防火墙经常是关的 —— 不隔离的话，
+    同一份用例在不同机器上一会儿绿一会儿红。这里统一打桩成「开着」，
+    让单测只验证封禁逻辑本身。
+
+    要测「防火墙关着时封禁必须失败」的用例，自己再 monkeypatch 成 False 即可
+    （后打的桩覆盖这里）。
+    """
+    from core import firewall
+
+    monkeypatch.setattr(firewall, "firewall_enabled", lambda force=False: True)

@@ -100,9 +100,11 @@ def test_build_description_is_netsh_safe_and_bounded():
 def _fail_all(monkeypatch, ps_out: str, netsh_desc_fails: bool = True):
     """PS 全失败；netsh 只在「带 description」时失败（真机上的行为）"""
     calls = []
+    exists: set = set()
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
-    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
-    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
+    # block_ip 会先查规则是否存在：存在就复用（续封刷新描述），不存在才新建。
+    # 这里用一张假规则表，让「新建 → 回读复核」这条链能被真正走到。
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: name in exists)
     monkeypatch.setattr(firewall, "_ps_cmdlet_missing", None)
     monkeypatch.setattr(firewall, "_powershell", lambda script, timeout=30: (1, ps_out))
 
@@ -110,6 +112,9 @@ def _fail_all(monkeypatch, ps_out: str, netsh_desc_fails: bool = True):
         calls.append(list(cmd))
         if netsh_desc_fails and any(str(a).startswith("description=") for a in cmd):
             return 1, "描述包含无效的字符，或具有无效的长度。"
+        for a in cmd:
+            if str(a).startswith("name="):
+                exists.add(str(a)[len("name=") :])
         return 0, ""
 
     monkeypatch.setattr(firewall, "_run", fake_run)
@@ -135,13 +140,19 @@ def test_block_ip_degrades_to_no_description(monkeypatch):
 def test_block_ip_passes_sanitized_description(monkeypatch):
     """真机上 netsh 收到的描述里不能再出现危险字符（净化发生在发命令之前）"""
     calls = []
+    exists: set = set()
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
-    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
-    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
+    # 规则一开始不存在 → 走「新建」；建完回读才为真。
+    # （固定返回 True 会走「续封复用」分支，那段在 2008 R2 上要先删再建，
+    #   真正被断言的那条带描述命令就不是 calls[0] 了）
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: name in exists)
     monkeypatch.setattr(firewall, "_ps_cmdlet_missing", True)  # 模拟 2008 R2：只有 netsh
 
     def fake_run(cmd, timeout=30):
         calls.append(list(cmd))
+        for a in cmd:
+            if str(a).startswith("name="):
+                exists.add(str(a)[len("name=") :])
         return 0, ""
 
     monkeypatch.setattr(firewall, "_run", fake_run)
@@ -171,17 +182,23 @@ def test_missing_ps_cmdlet_is_cached(monkeypatch):
     否则每次封禁都白等 0.3~0.5 秒。
     """
     ps_calls = []
+    exists: set = set()
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
-    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
-    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: name in exists)
     monkeypatch.setattr(firewall, "_ps_cmdlet_missing", None)
 
     def fake_ps(script, timeout=30):
         ps_calls.append(script)
         return 1, "New-NetFirewallRule : 无法将“New-NetFirewallRule”项识别为 cmdlet、函数…"
 
+    def fake_run(cmd, timeout=30):
+        for a in cmd:
+            if str(a).startswith("name="):
+                exists.add(str(a)[len("name=") :])
+        return 0, ""
+
     monkeypatch.setattr(firewall, "_powershell", fake_ps)
-    monkeypatch.setattr(firewall, "_run", lambda cmd, timeout=30: (0, ""))
+    monkeypatch.setattr(firewall, "_run", fake_run)
 
     ok1, _n1, _e1 = firewall.block_ip("198.51.100.78")
     ok2, _n2, _e2 = firewall.block_ip("198.51.100.79")

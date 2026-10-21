@@ -218,6 +218,8 @@ class BansPage(QWidget):
     request_refresh_stats = Signal()
     # 批量解封在后台线程跑，结束后把结果送回 GUI 线程
     batch_unban_done = Signal(int, int)  # (成功数, 失败数)
+    # 「安全启用防火墙 + 对齐封禁」在后台线程跑，结束后把摘要送回 GUI 线程
+    firewall_ready = Signal(object)
 
     # 显式声明：勾选列在两个面板里各建一次，且建在按钮之后
     sug_sel: CheckColumn
@@ -237,6 +239,7 @@ class BansPage(QWidget):
         self._expired_backlog = 0
         self._build()
         self.batch_unban_done.connect(self._on_batch_unban_done)
+        self.firewall_ready.connect(self._on_firewall_ready)
         self.refresh()
 
     def _build(self) -> None:
@@ -252,6 +255,12 @@ class BansPage(QWidget):
         self.banner.action_clicked.connect(self._restart_as_admin)
         root.addWidget(self.banner)
         self._refresh_perm_banner()
+
+        # 防火墙开关警示条（防火墙关闭时出现 —— 关闭时所有封禁规则都不生效）
+        self.fw_banner = WarnBanner("", "安全启用防火墙", C.danger)
+        self.fw_banner.action_clicked.connect(self._enable_firewall)
+        root.addWidget(self.fw_banner)
+        self._refresh_fw_banner()
 
         # 结果区：上「待确认建议」/ 下「封禁记录」，可拖拽分配高度
         self.split = QSplitter(Qt.Orientation.Vertical)
@@ -292,6 +301,93 @@ class BansPage(QWidget):
             return
         self._expired_backlog = n
         self._refresh_perm_banner()
+
+    def _refresh_fw_banner(self) -> None:
+        """
+        Windows 防火墙关闭时的常驻红条。
+
+        为什么单独一条、而且用 danger：防火墙关闭时**所有封禁规则都不参与过滤**，
+        界面却照样显示「已封禁」—— 用户以为封住了，实际一个包都没挡住。真机复现过：
+        规则 Enabled / Inbound / Block / RemoteAddress 全对，创建 24 分钟后攻击者
+        仍然能建连。所以这条提示是「已封禁」三个字成立的前提，不能藏起来。
+        """
+        if not firewall.is_admin():
+            self.fw_banner.setVisible(False)
+            return
+        enabled = firewall.firewall_enabled()
+        if enabled is not False:
+            # True = 开着；None = 读不出来。读不出来不能当成关闭去吓人。
+            self.fw_banner.setVisible(False)
+            return
+        state = firewall.profiles_state()
+        self.fw_banner.set_text(
+            "Windows 防火墙处于关闭状态（"
+            + firewall.format_profiles(state)
+            + "）：规则写得再对也不会拦截任何流量，当前所有封禁都未生效。"
+            "点右侧按钮会先为「此刻正在监听」的端口建放行规则、再开启防火墙，"
+            "避免把正在用的服务挡在外面。"
+        )
+        self.fw_banner.setVisible(True)
+
+    def _enable_firewall(self) -> None:
+        """安全启用防火墙：先放行现有监听端口，再开总开关，最后对齐封禁（后台线程）"""
+        if not firewall.is_admin():
+            QMessageBox.warning(
+                self, "权限不足", "修改防火墙需要管理员权限，请以管理员身份重启程序。"
+            )
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "安全启用 Windows 防火墙",
+                "将执行以下操作：\n\n"
+                "1. 读取本机当前正在监听的 TCP / UDP 端口\n"
+                "2. 为这些端口建立放行规则（PortGuard_Allow_*）\n"
+                "3. 打开 Windows 防火墙（域 / 专用 / 公用）\n"
+                "4. 重新对齐封禁记录（补建缺失规则、清理历史重复规则）\n\n"
+                "放行范围是「此刻正在监听」的快照，之后新起的服务需要再点一次本按钮。\n"
+                "确认继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        if self.fw_banner.btn is not None:
+            self.fw_banner.btn.setEnabled(False)
+        self.fw_banner.set_text("正在启用防火墙并放行现有监听端口，请稍候…")
+
+        def work():
+            ok, err, detail = firewall.enable_firewall()
+            res: Dict[str, Any] = {"ok": ok, "error": err, "detail": detail}
+            if ok:
+                # 开关打开后立刻对齐：库里 failed 的记录多半就是「当时防火墙没开」
+                res["reenforce"] = ban_service.reenforce_all()
+            self.firewall_ready.emit(res)
+
+        threading.Thread(target=work, daemon=True, name="enable-firewall").start()
+
+    def _on_firewall_ready(self, res: Dict[str, Any]) -> None:
+        if self.fw_banner.btn is not None:
+            self.fw_banner.btn.setEnabled(True)
+        self._refresh_fw_banner()
+        if not res.get("ok"):
+            QMessageBox.warning(self, "启用防火墙失败", str(res.get("error") or "未知错误"))
+            return
+        detail = res.get("detail") or {}
+        allowed = len(detail.get("created") or [])
+        lines = [f"防火墙已启用，本次新放行 {allowed} 个监听端口。"]
+        tcp = [str(p) for p in (detail.get("tcp") or [])]
+        udp = [str(p) for p in (detail.get("udp") or [])]
+        if tcp:
+            lines.append("放行 TCP: " + ", ".join(tcp[:20]) + (" …" if len(tcp) > 20 else ""))
+        if udp:
+            lines.append("放行 UDP: " + ", ".join(udp[:20]) + (" …" if len(udp) > 20 else ""))
+        lines.append("封禁对齐：" + ban_service.format_reenforce(res.get("reenforce") or {}))
+        self.refresh()
+        self.request_refresh_stats.emit()
+        QMessageBox.information(self, "防火墙已启用", "\n".join(lines))
 
     @staticmethod
     def _setup_table(table: QTableWidget) -> None:
@@ -487,6 +583,8 @@ class BansPage(QWidget):
         return m.get(self.status_filter.currentText(), "")
 
     def refresh(self) -> None:
+        self._refresh_perm_banner()
+        self._refresh_fw_banner()
         self._load_suggestions()
         self._load_bans()
 

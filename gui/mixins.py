@@ -132,6 +132,10 @@ class EventPumpMixin(_HostBase):
         # 之后以管理员身份启动必须补上，否则「名单里有、实际没拦」会一直存在。
         QTimer.singleShot(3000, self._enforce_blacklist)
 
+        # 封禁对齐：补建缺失规则 + 清理历史重复规则（一个 IP 堆十几条的老问题）。
+        # 放在黑名单补封之后：那时活动封禁已经齐全，清理旧规则不会留漏洞。
+        QTimer.singleShot(5000, self._reenforce_bans)
+
         # 日志/备份清理：每 10 分钟看一眼，每天到点才真跑（见 _maintenance_due）
         self.clean_timer = QTimer(self)
         self.clean_timer.setInterval(CLEANUP_TICK_MS)
@@ -311,13 +315,36 @@ class EventPumpMixin(_HostBase):
 
         threading.Thread(target=work, daemon=True, name="blacklist-enforce").start()
 
+    def _reenforce_bans(self) -> None:
+        """启动时对齐一次封禁（后台线程）：补建缺失规则 + 清理历史重复规则。
+
+        为什么启动要做：2026-10-21 之前规则名带时间戳，同 IP 会堆出十几条；
+        解封只删一条 → 「点了封禁还在拦 / 解封了还封着」。这里把历史规则清掉、
+        按新名字（`PortGuard_Block_<ip>`）重建，库与系统才对得上。
+        防火墙没开时 `reenforce_all` 会自己返回，不产生任何写操作。
+        """
+        if not self._is_admin():
+            return
+
+        def work():
+            try:
+                res = ban_service.reenforce_all()
+                if not res.get("ok"):
+                    log.info("启动封禁对齐跳过：%s", res.get("error"))
+                    return
+                if res.get("restored") or res.get("legacy_removed") or res.get("failed"):
+                    log.info("启动封禁对齐：%s", ban_service.format_reenforce(res))
+            except Exception:
+                log.exception("启动封禁对齐失败")
+
+        threading.Thread(target=work, daemon=True, name="ban-reenforce").start()
+
     def _report_expired_backlog(self) -> None:
         """
         普通权限下的到期巡检：做不了事，但**必须说清楚**。
-
-        原来这里直接 return，于是「以管理员封过的 IP，之后以普通权限运行就永不
-        解封」这件事在界面上完全没有痕迹。现在把积压条数报给封禁页的权限条，
-        并在状态栏提一句（状态栏会被后续事件覆盖，所以真正的常驻提示在权限条上）。
+        「以管理员封过的 IP，之后以普通权限运行就永不解封」这件事，原来在界面上
+        完全没有痕迹。现在把积压条数报给封禁页的权限条，并在状态栏提一句
+        （状态栏会被后续事件覆盖，所以真正的常驻提示在权限条上）。
         """
         try:
             n = ban_service.expired_backlog()

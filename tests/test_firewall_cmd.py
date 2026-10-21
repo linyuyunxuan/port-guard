@@ -7,6 +7,7 @@
 """
 
 import re
+from typing import List
 
 import pytest
 
@@ -27,20 +28,38 @@ EVIL_IPS = [
 
 @pytest.fixture
 def spy(monkeypatch):
-    """记录所有被拼接出来的命令，并假装执行成功"""
-    calls = []
+    """记录所有被拼接出来的命令，并假装执行成功。
+
+    注意这里维护了一张「假规则表」：block_ip 现在会**先查规则是否已存在**，
+    存在就复用（续封只刷新描述），不存在才新建。固定返回 True/False 都会让
+    另一条分支永远走不到 —— 那等于用例只测了一半。
+    """
+    calls: List[tuple] = []
+    exists: set = set()
+
+    def _track_ps(script: str) -> None:
+        for m in re.finditer(r"New-NetFirewallRule -DisplayName '([^']+)'", script):
+            exists.add(m.group(1))
+        for m in re.finditer(r"Remove-NetFirewallRule -DisplayName '([^']+)'", script):
+            exists.discard(m.group(1))
 
     def fake_ps(script, timeout=30):
         calls.append(("ps", script))
+        _track_ps(script)
         return 0, ""
 
     def fake_run(cmd, timeout=30):
         calls.append(("run", cmd))
+        joined = " ".join(str(c) for c in cmd)
+        m = re.search(r"name=(\S+)", joined)
+        if m and " add " in joined + " " and "rule" in cmd:
+            exists.add(m.group(1))
+        if m and "delete" in cmd and "rule" in cmd:
+            exists.discard(m.group(1))
         return 0, ""
 
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
-    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
-    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: name in exists)
     monkeypatch.setattr(firewall, "_powershell", fake_ps)
     monkeypatch.setattr(firewall, "_run", fake_run)
     # 「本机有没有 New-NetFirewallRule」是模块级缓存，用例之间必须重置，
@@ -160,10 +179,28 @@ def test_note_is_sanitized_not_interpolated(spy, note):
     assert any(k in desc for k in ("Start-Process", "Get-Content", "win.ini", "Korea"))
 
 
-def test_rule_name_is_unique_within_same_millisecond():
-    """原实现用秒级时间戳，同秒重复封禁会重名；现在必须唯一"""
-    names = {firewall.rule_name("203.0.113.10", ts=1700000000000) for _ in range(50)}
-    assert len(names) == 50
+def test_rule_name_is_stable_per_ip():
+    """一个 IP 恒定一个规则名（2026-10-21 改）。
+
+    原来带毫秒时间戳 + 随机后缀，每次封禁都新建一条：真机上同一个 IP 堆了十几条，
+    而解封只删库里记的那条 → 「解封了还封着」。现在同名复用，续封只刷新描述。
+    """
+    names = {firewall.rule_name("203.0.113.10") for _ in range(50)}
+    assert names == {"PortGuard_Block_203.0.113.10"}
+
+
+def test_rule_name_handles_ipv6_and_cidr():
+    assert firewall.rule_name("2001:db8::1") == "PortGuard_Block_2001-db8--1"
+    assert firewall.rule_name("203.0.113.0/24") == "PortGuard_Block_203.0.113.0-24"
+
+
+def test_legacy_rule_name_is_recognized():
+    """旧的 `<ip>_<毫秒>_<4位随机>` 必须能被识别出来（启动时据此清理）"""
+    old = "PortGuard_Block_203.0.113.10_1792455311422_7b18"
+    assert firewall.is_legacy_rule_name(old)
+    assert not firewall.is_legacy_rule_name(firewall.rule_name("203.0.113.10"))
+    # IPv4 的旧名能反解回 IP，解封时靠它把同 IP 的历史规则一起删掉
+    assert firewall.parse_ip_from_rule_name(old) == "203.0.113.10"
 
 
 def test_parse_ip_from_rule_name_roundtrip():

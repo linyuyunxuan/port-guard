@@ -189,14 +189,19 @@ def test_block_ip_succeeds_when_verified(monkeypatch):
 def test_block_ip_accepts_cidr(monkeypatch):
     """黑名单允许写网段，封禁路径必须能处理 —— 否则网段条目等于没拦。"""
     scripts: List[str] = []
+    created = {"ok": False}
 
     def fake_ps(script, timeout=30):
         scripts.append(script)
+        if "New-NetFirewallRule" in script:
+            created["ok"] = True
         return 0, ""
 
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
     monkeypatch.setattr(firewall, "_powershell", fake_ps)
-    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
+    monkeypatch.setattr(firewall, "_ps_cmdlet_missing", None)
+    # 规则一开始不存在 → 走「新建」分支；建完回读才为真
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: created["ok"])
     ok, _name, err = firewall.block_ip("203.0.113.0/24")
     assert ok, err
     assert any("-RemoteAddress '203.0.113.0/24'" in s for s in scripts), scripts
