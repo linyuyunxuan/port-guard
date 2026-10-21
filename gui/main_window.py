@@ -282,6 +282,8 @@ class MainWindow(EventPumpMixin, QMainWindow):
     batch_ban_done = Signal(int, int)  # (成功数, 失败数)
     # 黑名单 → 防火墙联动的结果（写规则慢，必须后台跑完再回主线程提示）
     blacklist_sync_done = Signal(object)
+    # 防火墙开关状态：netsh 要起进程（100~300ms），只能在后台线程读
+    fw_state_ready = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -294,6 +296,9 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.setWindowIcon(self._app_icon)
 
         self._last_stats = 0.0
+        # 防火墙开关的轮询节流（0 = 启动后第一次统计刷新就去读）
+        self._last_fw_poll = 0.0
+        self._fw_polling = False
         self._geo_info = None
         self.lbl_xdb = None
 
@@ -347,12 +352,19 @@ class MainWindow(EventPumpMixin, QMainWindow):
         col.setSpacing(0)
 
         self.topbar = TopStatusBar()
+        # 顺序 = 「是否真在防护 → 在保护谁 → 能不能动手」。防火墙排第一，
+        # 因为它是「已封禁」三个字成立的前提（关闭时规则一条都不参与过滤）。
+        self.si_fw = self.topbar.add_item("防火墙")
         self.si_watch = self.topbar.add_item("本机观察")
         self.si_admin = self.topbar.add_item("权限")
+        self.si_fw.set_state("防火墙 检测中…", C.text_muted)
         self.si_watch.set_state("本机观察 未启动", C.text_muted)
         self.si_admin.set_state("权限 检测中…", C.text_muted)
-        # 只有「观察」可点（跳设置页），「权限」点不动 —— 权限无法在程序内提升，
-        # 可点却不办事比不可点更糟，所以不给它手型光标与 tooltip。
+        # 三个项里只有「防火墙」和「观察」可点：前者跳到封禁管理（安全的开启入口在
+        # 那里），后者跳设置页。权限无法在程序内提升，点不动就不给手型光标。
+        self.si_fw.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.si_fw.setToolTip("防火墙开关状态 · 点击打开封禁管理")
+        self.si_fw.clicked.connect(self._goto_bans)
         self.si_watch.setCursor(Qt.CursorShape.PointingHandCursor)
         self.si_watch.setToolTip("打开设置页")
         self.si_watch.clicked.connect(self._goto_settings)
@@ -534,12 +546,73 @@ class MainWindow(EventPumpMixin, QMainWindow):
     def _goto_settings(self) -> None:
         self._switch_page(PAGE_SETTINGS)
 
+    def _goto_bans(self) -> None:
+        self._switch_page(PAGE_BANS)
+
     # ═══════════════════════════════════════════════
     #  顶部状态条（由 mixins 驱动）
     # ═══════════════════════════════════════════════
 
+    def _set_fw_state(self, text: str, color: str, tip: str = "") -> None:
+        self.si_fw.set_state(text, color)
+        if tip:
+            self.si_fw.setToolTip(tip)
+
+    def _on_fw_state(self, state) -> None:
+        """防火墙三档状态：全开 / 部分开 / 全关，另加「读不出来」
+
+        为什么值得占顶栏一格：封禁规则写在防火墙里，三个配置文件全关时
+        **没有任何规则参与过滤**，界面却照样显示「已封禁」。这个开关是
+        「已封禁」三个字成立的前提，不能只在封禁页里出现一次。
+        读不出来（None）时说「未知」而不是「未开启」—— 未知不等于关闭。
+        """
+        self._fw_polling = False
+        if not state:
+            self._set_fw_state("防火墙 未知", C.text_muted, "读不出防火墙开关状态（netsh 无输出）")
+            return
+        detail = firewall.format_profiles(state)
+        verdict = firewall.state_verdict(state)
+        if verdict == firewall.STATE_OK:
+            self._set_fw_state("防火墙 过滤中", C.success, f"{detail} · 封禁规则正常生效")
+        elif verdict == firewall.STATE_PARTIAL:
+            self._set_fw_state(
+                "防火墙 部分开启", C.warning, f"{detail} · 未开启的网络位置上封禁不生效"
+            )
+        else:
+            self._set_fw_state(
+                "防火墙 未开启",
+                C.danger,
+                f"{detail} · 所有封禁规则都不参与过滤，点击打开封禁管理",
+            )
+
     def _set_watch_state(self, text: str, color: str) -> None:
         self.si_watch.set_state(text, color)
+
+    # 防火墙开关状态轮询间隔（秒）。netsh 每次要起一个进程，2 秒一次的统计
+    # 节拍里最多每 30 秒真读一次；用户刚在控制台改过开关，最多晚 30 秒看到。
+    FW_POLL_SEC = 30.0
+
+    def _maybe_poll_firewall(self) -> None:
+        """由统计节拍调用：节流 + 后台线程读 netsh，结果走信号回主线程"""
+        import time as _time
+
+        if self._fw_polling:
+            return
+        now = _time.time()
+        if now - self._last_fw_poll < self.FW_POLL_SEC:
+            return
+        self._last_fw_poll = now
+        self._fw_polling = True
+
+        def work():
+            try:
+                state = firewall.profiles_state()
+            except Exception:
+                log.debug("读取防火墙开关状态失败", exc_info=True)
+                state = None
+            self.fw_state_ready.emit(state)
+
+        threading.Thread(target=work, daemon=True, name="fw-state").start()
 
     def _set_admin_state(self) -> None:
         if self._is_admin():
@@ -648,6 +721,7 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.page_settings.watch_changed.connect(self._on_watch_changed)
         self.batch_ban_done.connect(self._on_batch_ban_done)
         self.blacklist_sync_done.connect(self._on_blacklist_sync_done)
+        self.fw_state_ready.connect(self._on_fw_state)
         self.page_logs.logs_open_requested.connect(self._open_logs_dir)
         self.page_iplookup.xdb_sync_requested.connect(self._sync_xdb_now)
 

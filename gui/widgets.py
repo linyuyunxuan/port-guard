@@ -9,7 +9,7 @@
 from typing import Callable, ClassVar, Optional, Union
 
 from gui.table_sort import SortSpec, TableSort
-from gui.theme import LEVEL_BADGE_BG, LEVEL_COLORS, C
+from gui.theme import LEVEL_BADGE_BG, LEVEL_COLORS, C, asset_path
 from qtcompat import (
     Property,
     QApplication,
@@ -22,6 +22,7 @@ from qtcompat import (
     QLabel,
     QPainter,
     QPen,
+    QPixmap,
     QPropertyAnimation,
     QPushButton,
     QRect,
@@ -145,49 +146,73 @@ class ToggleSwitch(QWidget):
 
 
 class StatCard(QFrame):
-    """统计卡：大数字 + 语义圆点 + 标签（无边框，靠明度分层）"""
+    """统计卡：标签在上、数字在下、单位缀在数字右侧。
 
-    def __init__(self, label: str, value: str = "0", color: Optional[str] = None, parent=None):
+    旧版是「大数字在上、圆点+标签在下」，读起来是「56 → 今日访问」—— 顺序反了，
+    而且卡片右半部分是整片空白，三张卡横排时像没画完。现在改成仪表盘惯例：
+    先说这是什么（12.5px 弱化标签 + 语义圆点），再说有多少（32px 等宽数字），
+    量纲（次 / 条 / 个）跟在数字基线右下方，用弱化色，不与数据争视觉权重。
+    数字统一 Consolas，避免每次刷新数字宽度跳动。
+    """
+
+    HEIGHT = 90
+
+    def __init__(
+        self,
+        label: str,
+        value: str = "0",
+        color: Optional[str] = None,
+        unit: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self.setObjectName("stat_card")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumHeight(84)
-        self.setMaximumHeight(84)
+        self.setFixedHeight(self.HEIGHT)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
-        lay.setSpacing(4)
+        lay.setContentsMargins(18, 14, 18, 14)
+        lay.setSpacing(2)
 
-        self.value_lbl = QLabel(value)
-        self.value_lbl.setObjectName("stat_value")
-        self.value_lbl.setFont(number_font(22, bold=True))
-        self.value_lbl.setStyleSheet(
-            f"font-family:Consolas,'Microsoft YaHei UI';font-size:30px;font-weight:700;"
-            f"color:{color or C.text_on_dark};background:transparent;"
-        )
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        # ── 标签行：语义圆点 + 名称 ──
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
         self.dot = Dot(color or C.text_muted)
         self.label_lbl = QLabel(label)
         self.label_lbl.setObjectName("stat_label")
-        self.label_lbl.setStyleSheet(
-            f"font-size:12.5px;color:{C.text_secondary};background:transparent;"
-        )
-        row.addWidget(self.dot)
-        row.addWidget(self.label_lbl)
-        row.addStretch(1)
+        top.addWidget(self.dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self.label_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addStretch(1)
+        lay.addLayout(top)
 
-        lay.addWidget(self.value_lbl)
-        lay.addLayout(row)
+        # ── 数值行：数字 + 单位（单位按底对齐，跟数字基线贴近）──
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(6)
+        self.value_lbl = QLabel(value)
+        self.value_lbl.setObjectName("stat_value")
+        self.value_lbl.setFont(number_font(24, bold=True))
+        self.unit_lbl = QLabel(unit)
+        self.unit_lbl.setObjectName("stat_unit")
+        self.unit_lbl.setVisible(bool(unit))
+        # 13px 与 32px 的字形下降量不同，光靠 AlignBottom 对齐会让「次」比数字低 3~4px；
+        # 给单位补一点下边距，两段文字才落在同一条基线上。
+        self.unit_lbl.setContentsMargins(0, 0, 0, 4)
+        bottom.addWidget(self.value_lbl, 0, Qt.AlignmentFlag.AlignBottom)
+        bottom.addWidget(self.unit_lbl, 0, Qt.AlignmentFlag.AlignBottom)
+        bottom.addStretch(1)
+        lay.addLayout(bottom)
+
+        self.set_color(color or C.text_on_dark)
 
     def set_value(self, v) -> None:
         self.value_lbl.setText(str(v))
 
     def set_color(self, color: str) -> None:
+        """数值与圆点同时改色：数字是「有多少」，圆点是「什么性质」，必须同源"""
         self.value_lbl.setStyleSheet(
-            f"font-family:Consolas,'Microsoft YaHei UI';font-size:30px;font-weight:700;"
+            f"font-family:Consolas,'Microsoft YaHei UI';font-size:32px;font-weight:700;"
             f"color:{color};background:transparent;"
         )
         self.dot.set_color(color)
@@ -556,6 +581,54 @@ def check_item(checked: bool = False) -> QTableWidgetItem:
     it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
     return it
+
+
+class CheckMarkDelegate(QStyledItemDelegate):
+    """勾选列的方形勾选标记 —— 让表格里的勾和工具条里的勾长得一样。
+
+    为什么必须自绘：item view 的勾选指示器由 delegate 用**基础样式**（本机是
+    Fusion）画，QSS 里没有对应子控件（`QTableView::indicator` 不生效）。Fusion
+    画出来是「灰框 + 深色像素对勾」，和工具条上的靛蓝圆角勾选框完全是两套视觉；
+    而这三张表的勾选列恰恰是用户点得最多的控件。
+
+    盒子按单元格正中 16×16 画，位置与原生指示器重合 —— 命中判定仍交给基类的
+    editorEvent（点勾选框切换、点其他位置只选中行），不自己接管鼠标。
+    """
+
+    BOX = 16
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        path = asset_path("assets/check.png")
+        self._check = QPixmap(path) if path else QPixmap()
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        checked = opt.checkState == Qt.CheckState.Checked
+        # 只清「画原生指示器」这一个标志：背景 / 斑马纹 / 悬停 / 选中态仍由基类负责，
+        # 自己重画一遍背景迟早和表格样式走偏。
+        opt.features = opt.features & ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        super().paint(painter, opt, index)
+
+        box = QRect(0, 0, self.BOX, self.BOX)
+        box.moveCenter(option.rect.center())
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if checked:
+            painter.setBrush(QBrush(QColor(C.primary)))
+            painter.setPen(QPen(QColor(C.primary), 1))
+        else:
+            painter.setBrush(QBrush(QColor(C.bg_input)))
+            painter.setPen(QPen(QColor(C.border_strong), 1))
+        painter.drawRoundedRect(box.adjusted(0, 0, -1, -1), 3, 3)
+        if checked and not self._check.isNull():
+            painter.drawPixmap(
+                box.center().x() - self._check.width() // 2,
+                box.center().y() - self._check.height() // 2,
+                self._check,
+            )
+        painter.restore()
 
 
 def center() -> Qt.AlignmentFlag:

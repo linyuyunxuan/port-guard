@@ -373,9 +373,9 @@ class MonitorPage(QWidget):
         # 统计卡片（3 张等宽；「接收服务」健康态已上移到顶部状态条）
         cards = QHBoxLayout()
         cards.setSpacing(12)
-        self.card_total = StatCard("今日访问", "0")
-        self.card_risk = StatCard("今日风险", "0", C.warning)
-        self.card_ban = StatCard("当前封禁", "0", C.danger)
+        self.card_total = StatCard("今日访问", "0", unit="次")
+        self.card_risk = StatCard("今日风险", "0", C.warning, unit="条")
+        self.card_ban = StatCard("当前封禁", "0", C.danger, unit="个")
         for c in (self.card_total, self.card_risk, self.card_ban):
             cards.addWidget(c, 1)
         root.addLayout(cards)

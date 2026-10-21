@@ -56,6 +56,7 @@ from gui.table_select import CheckColumn
 from gui.table_sort import KIND_MS, KIND_NUM, KIND_TEXT, ColumnSpec, SortSpec, TableSort
 from gui.theme import C, small_button_style
 from gui.widgets import (
+    CheckMarkDelegate,
     EmptyState,
     RiskBadgeDelegate,
     SortHeader,
@@ -71,6 +72,7 @@ from qtcompat import (
     QDateEdit,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -354,14 +356,33 @@ class EventsPage(QWidget):
         head.add_action(self.btn_refresh)
         root.addWidget(head)
 
-        root.addLayout(self._build_filters())
-        root.addWidget(self._build_batch_bar())
+        # 筛选 + 批量动作合成**一张**工具卡：两行都是「对整张表做点什么」，
+        # 但性质不同（筛选是看哪些、批量是改哪些），中间用一条极淡的横线隔开。
+        # 原来两行都直接铺在灰底上，与下面的表格卡片并列时像三段互不相干的东西。
+        root.addWidget(self._build_toolbar_card())
 
         self.empty = EmptyState("暂无风险事件", "当前规则未命中任何访问，这是正常状态")
         self.empty.setVisible(False)
         root.addWidget(self.empty)
 
         root.addWidget(self._build_table(), 1)
+
+    def _build_toolbar_card(self) -> QFrame:
+        """筛选行 + 批量行装进一张卡片，两行之间一条 1px 分隔线"""
+        card = QFrame()
+        card.setObjectName("panel")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(8)
+        lay.addLayout(self._build_filters())
+
+        div = QFrame()
+        div.setObjectName("panel_divider")
+        div.setFixedHeight(1)
+        lay.addWidget(div)
+
+        lay.addWidget(self._build_batch_bar())
+        return card
 
     def _build_filters(self) -> QHBoxLayout:
         bar = QHBoxLayout()
@@ -520,6 +541,9 @@ class EventsPage(QWidget):
         # 勾选列 + 表头全选（三张表共用一份实现，见 gui/table_select.py）
         self.sel = CheckColumn(self.table, COL_CHECK)
         self.sel.bind(self._on_sel_changed)
+        # 勾选框自绘（与工具条上的 QSS 勾选框同一套视觉，见 CheckMarkDelegate）
+        self._check_delegate = CheckMarkDelegate(self.table)
+        self.table.setItemDelegateForColumn(COL_CHECK, self._check_delegate)
 
         hh = self.table.horizontalHeader()
         for i, w in enumerate(COL_WIDTHS):

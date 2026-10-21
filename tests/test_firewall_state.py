@@ -93,6 +93,36 @@ def test_format_profiles():
     assert firewall.format_profiles(None) == "读不出防火墙状态"
 
 
+def test_state_verdict_covers_the_three_profile_cases():
+    """顶栏「防火墙」那三个字就是按这个结论说的，错一档就是错报安全状态"""
+    assert (
+        firewall.state_verdict({"domain": True, "private": True, "public": True})
+        == firewall.STATE_OK
+    )
+    assert (
+        firewall.state_verdict({"domain": True, "private": False, "public": False})
+        == firewall.STATE_PARTIAL
+    )
+    assert (
+        firewall.state_verdict({"domain": False, "private": False, "public": False})
+        == firewall.STATE_OFF
+    )
+
+
+def test_state_verdict_treats_unreadable_as_unknown_not_off():
+    """「读不出来」不能判成「未开启」
+
+    一次 netsh 解析失败就报「防火墙没开」，用户很快就会学会无视这条提示；
+    等真的三个配置全关时，那条提示也没人看了。
+    """
+    assert firewall.state_verdict(None) == firewall.STATE_UNKNOWN
+    assert firewall.state_verdict({}) == firewall.STATE_UNKNOWN
+    assert (
+        firewall.state_verdict(firewall.parse_profiles_output("完全读不懂的输出"))
+        == firewall.STATE_UNKNOWN
+    )
+
+
 def test_firewall_enabled_reads_any_profile(monkeypatch):
     # conftest 里有一条 autouse 的 `firewall_enabled` 打桩（避免用例依赖本机防火墙
     # 开关），这条用例测的正是它本身 → 先换回真实实现

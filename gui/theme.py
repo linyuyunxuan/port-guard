@@ -12,6 +12,7 @@ PortGuard 全局主题 —— 「素白哨岗 Paper Watchtower」
 letter-spacing。所有取值必须同时在 PySide2(Qt5.15) 与 PySide6(Qt6) 上成立。
 """
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -71,6 +72,33 @@ class Color:
 
 
 C = Color()
+
+
+def asset_path(rel: str) -> str:
+    """`assets/` 下某个文件的绝对路径；不存在返回空串。
+
+    QSS 只认真实文件路径：它既不支持 SVG data URI，也画不了折线，
+    所以勾选框的对勾只能是一张小位图（见 `tools/gen_ui_assets.py`）。
+    打包后路径要指到 PyInstaller 的 _MEIPASS，不能写死相对路径 —— 从
+    快捷方式启动时工作目录不是程序目录，相对路径会静默失效。
+    """
+    try:
+        from core.config import resource_path
+
+        path = os.path.abspath(resource_path(rel))
+    except Exception:  # pragma: no cover —— 只读资源缺失时降级，不挡启动
+        return ""
+    return path if os.path.exists(path) else ""
+
+
+def asset_url(rel: str) -> str:
+    """同 `asset_path`，转成 QSS 的 `url('...')`（Windows 要把反斜杠换掉）"""
+    path = asset_path(rel)
+    return f"url('{path.replace(chr(92), '/')}')" if path else "none"
+
+
+#: 勾选框选中态的白色对勾（13×13，绘制于 tools/gen_ui_assets.py）
+CHECK_IMAGE = asset_url("assets/check.png")
 
 # 风险等级 -> 文字颜色
 LEVEL_COLORS = {
@@ -199,13 +227,18 @@ QStackedWidget {{ background-color: {C.bg_body}; }}
 #stat_card:hover {{ border-color: {C.border}; }}
 #stat_value {{
     font-family: "Consolas", "Microsoft YaHei UI", monospace;
-    font-size: 30px;
+    font-size: 32px;
     font-weight: 700;
     color: {C.text_on_dark};
 }}
 #stat_label {{
     font-size: 12.5px;
     color: {C.text_secondary};
+}}
+/* 单位跟在数字右下角，用弱化色 —— 它是量纲不是数据 */
+#stat_unit {{
+    font-size: 13px;
+    color: {C.text_muted};
 }}
 
 /* ══════════ 面板 / 分组 ══════════ */
@@ -508,18 +541,36 @@ QTableCornerButton::section {{ background-color: {C.bg_card_alt}; border: none; 
 /* ══════════ 复选框 / 单选 ══════════ */
 QCheckBox {{ color: {C.text_primary}; font-size: 14.5px; spacing: 8px; }}
 QCheckBox::indicator {{
-    width: 15px; height: 15px;
+    width: 16px; height: 16px;
     border: 1px solid {C.border_strong};
     border-radius: 3px;
     background-color: {C.bg_input};
 }}
 QCheckBox::indicator:hover {{ border-color: {C.primary}; }}
+/* 选中态必须带对勾：只改底色的话，浅色主题下它和「禁用色块」分不开，
+   用户看不出这张表到底勾了哪些行（对勾是 13×13 位图，见 assets/check.png）。 */
 QCheckBox::indicator:checked {{
+    background-color: {C.primary};
+    border-color: {C.primary};
+    image: {CHECK_IMAGE};
+}}
+QCheckBox::indicator:checked:hover {{
+    background-color: {C.primary_hover};
+    border-color: {C.primary_hover};
+    image: {CHECK_IMAGE};
+}}
+QCheckBox::indicator:indeterminate {{
     background-color: {C.primary};
     border-color: {C.primary};
 }}
 QCheckBox::indicator:disabled {{
     background-color: {C.bg_disabled}; border-color: {C.border_light};
+}}
+/* 勾着却被禁用：保留「已勾」的形状，只把色降下来 —— 变回空框会让人以为勾选丢了 */
+QCheckBox::indicator:checked:disabled {{
+    background-color: {C.border_strong};
+    border-color: {C.border_strong};
+    image: {CHECK_IMAGE};
 }}
 QCheckBox::indicator:focus {{ border-color: {C.info}; }}
 
@@ -659,9 +710,12 @@ QProgressBar {{
 QProgressBar::chunk {{ background-color: {C.primary}; border-radius: 3px; }}
 
 /* ══════════ 分隔条 ══════════ */
-QSplitter::handle {{ background-color: {C.border_light}; }}
-QSplitter::handle:horizontal {{ width: 1px; }}
-QSplitter::handle:vertical {{ height: 1px; }}
+/* 透明 10px 手感区 + 悬停才显线：1px 实线夹在两张白卡片之间时，
+   会被读成「表格的边框」而不是「可以拖的缝」。 */
+QSplitter::handle {{ background-color: transparent; }}
+QSplitter::handle:hover {{ background-color: {C.border}; }}
+QSplitter::handle:horizontal {{ width: 10px; }}
+QSplitter::handle:vertical {{ height: 10px; }}
 
 /* ══════════ 消息框 ══════════ */
 QMessageBox {{ background-color: {C.bg_card}; }}

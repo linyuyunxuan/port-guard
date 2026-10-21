@@ -104,6 +104,9 @@ class EventPumpMixin(_HostBase):
     def _set_ban_count(self, n: int) -> None:
         raise NotImplementedError
 
+    def _maybe_poll_firewall(self) -> None:
+        raise NotImplementedError
+
     def _setup_timers(self) -> None:
         # 主事件泵：批量把后台队列里的记录搬到界面
         self.pump = QTimer(self)
@@ -265,6 +268,9 @@ class EventPumpMixin(_HostBase):
             self._refresh_watch_label()
         with contextlib.suppress(Exception):
             self.page_settings._refresh_watch_state()
+        # 顶部「防火墙」健康项（内部自带 30 秒节流 + 后台线程）
+        with contextlib.suppress(Exception):
+            self._maybe_poll_firewall()
 
     def _set_status(self, text: str, color: Optional[str] = None) -> None:
         self.lbl_status.setText(text)

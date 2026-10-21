@@ -131,3 +131,15 @@ def test_table_small_button_font_matches_denser_table():
     style = small_button_style("danger")
     assert _font_size(style) >= 12
     assert "max-height:26px" in style
+
+
+def test_checkbox_checked_state_ships_a_real_checkmark():
+    """选中态必须带对勾图片，不能退回「只填一个纯色方块」
+
+    QSS 一旦改 `QCheckBox::indicator:checked` 的底色，Qt 就不画原生对勾；
+    浅色主题下纯色方块和「禁用色块」几乎分不开，表格勾了哪些行全靠猜。
+    这条用例同时兜住 `assets/check.png` 被误删（缺图时 asset_url 返回 none）。
+    """
+    block = _block("QCheckBox::indicator:checked {")
+    assert "image: url(" in block, f"选中态没有对勾图片：{block}"
+    assert "none" not in block, "对勾图片没找到（assets/check.png 缺失？）"

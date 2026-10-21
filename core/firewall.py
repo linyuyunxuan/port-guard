@@ -701,6 +701,28 @@ def format_profiles(state: Optional[Dict[str, bool]]) -> str:
     return " ".join(f"{PROFILE_LABELS[k]}={'开' if state.get(k) else '关'}" for k in PROFILE_KEYS)
 
 
+#: 防火墙开关的四种结论。界面文案（顶栏 / 封禁页）只认这四档，避免两处各写一套判断。
+STATE_OK = "ok"
+STATE_PARTIAL = "partial"
+STATE_OFF = "off"
+STATE_UNKNOWN = "unknown"
+
+
+def state_verdict(state: Optional[Dict[str, bool]]) -> str:
+    """把三档开关状态归成一个结论。
+
+    分开成函数而不是在界面里 `sum(...)`：**「读不出来」必须与「全关」区分开** ——
+    一次 netsh 解析失败判成「未开启」会把正常机器误报成不安全，用户很快就会
+    学会无视这条提示，那时真正的「全关」也就没人看了。
+    """
+    if not state:
+        return STATE_UNKNOWN
+    on = sum(1 for v in state.values() if v)
+    if on == len(state):
+        return STATE_OK
+    return STATE_PARTIAL if on else STATE_OFF
+
+
 # ── 安全启用防火墙 ──────────────────────────────────────────────
 #
 #  直接把防火墙打开是有自锁风险的：这台机器上跑着 IIS(80/443)、SQL Server(1433)、

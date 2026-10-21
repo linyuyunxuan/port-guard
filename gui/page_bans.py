@@ -41,6 +41,7 @@ from gui.table_sort import (
 )
 from gui.theme import C, small_button_style
 from gui.widgets import (
+    CheckMarkDelegate,
     EmptyState,
     RiskBadgeDelegate,
     SortHeader,
@@ -464,6 +465,8 @@ class BansPage(QWidget):
         self.sug_table.setItemDelegateForColumn(COL_SUG_LEVEL, RiskBadgeDelegate(self.sug_table))
         self.sug_sel = CheckColumn(self.sug_table, COL_SUG_CHECK)
         self.sug_sel.bind(self._on_sug_sel_changed)
+        self._sug_check_delegate = CheckMarkDelegate(self.sug_table)
+        self.sug_table.setItemDelegateForColumn(COL_SUG_CHECK, self._sug_check_delegate)
         sh = self.sug_table.horizontalHeader()
         for i, width in enumerate(SUG_WIDTHS):
             sh.resizeSection(i, width)
@@ -488,17 +491,56 @@ class BansPage(QWidget):
         return b
 
     def _build_records_area(self) -> QWidget:
-        box = QWidget()
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(12)
+        """封禁记录区：与上面「待确认建议」完全同一套卡片外壳。
 
+        原来这一区是「裸工具栏 + 裸表格」，而上面是白卡片 —— 两块并排时不像同一类
+        东西，用户看到的是「下面那张表不知道属于谁」。现在统一成卡片：标题行
+        （标题 + 一句说明 + 右侧动作）、筛选行、批量行、表格，四段自上而下。
+        """
+        self.ban_panel = QFrame()
+        self.ban_panel.setObjectName("panel")
+        lay = QVBoxLayout(self.ban_panel)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # ── 标题行（与建议面板同为 16/12/16/8，两个卡片标题基线才会对齐）──
+        head = QHBoxLayout()
+        head.setContentsMargins(16, 12, 16, 8)
+        head.setSpacing(8)
+        self.ban_title = QLabel("封禁记录")
+        self.ban_title.setObjectName("panel_title")
+        self.ban_hint = QLabel("写入 Windows 防火墙的历史记录")
+        self.ban_hint.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
+        head.addWidget(self.ban_title)
+        head.addWidget(self.ban_hint)
+        head.addStretch(1)
+
+        btn_manual = QPushButton("手动封禁")
+        btn_manual.setObjectName("btn_primary")
+        btn_manual.setFixedHeight(30)
+        btn_manual.setStyleSheet(small_button_style("primary"))
+        btn_manual.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_manual.clicked.connect(lambda: self.ask_ban.emit("", 0, "手动封禁"))
+
+        btn_refresh = self._mini_button("刷新", enabled=True)
+        btn_refresh.clicked.connect(self.refresh)
+
+        self.btn_more = row_menu_button(
+            [("与防火墙对账", self._sync), ("一键全部解封", self._unban_all)], self, size=30
+        )
+        self.btn_more.setToolTip("更多操作：与防火墙对账 / 一键全部解封")
+        for w in (btn_manual, btn_refresh, self.btn_more):
+            head.addWidget(w)
+        lay.addLayout(head)
+
+        # ── 筛选行 ──
         bar = QHBoxLayout()
+        bar.setContentsMargins(16, 0, 16, 8)
         bar.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索 IP / 原因…")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(330)
+        self.search.setFixedWidth(300)
         self.search.textChanged.connect(self.refresh)
 
         self.status_filter = QComboBox()
@@ -506,33 +548,18 @@ class BansPage(QWidget):
         self.status_filter.setFixedWidth(132)
         self.status_filter.currentIndexChanged.connect(self.refresh)
 
-        btn_manual = QPushButton("手动封禁")
-        btn_manual.setObjectName("btn_primary")
-        btn_manual.clicked.connect(lambda: self.ask_ban.emit("", 0, "手动封禁"))
-
-        btn_refresh = QPushButton("刷新")
-        btn_refresh.setObjectName("btn_outline")
-        btn_refresh.clicked.connect(self.refresh)
-
-        self.btn_more = row_menu_button(
-            [("与防火墙对账", self._sync), ("一键全部解封", self._unban_all)], self, size=32
-        )
-        self.btn_more.setToolTip("更多操作：与防火墙对账 / 一键全部解封")
-
         self.lbl_info = QLabel("")
         self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
 
         bar.addWidget(self.search)
         bar.addWidget(self.status_filter)
-        bar.addWidget(btn_manual)
-        bar.addWidget(btn_refresh)
-        bar.addWidget(self.btn_more)
         bar.addStretch(1)
         bar.addWidget(self.lbl_info)
         lay.addLayout(bar)
 
-        # 记录表的批量条：只对已解封/已封禁的记录生效，与上面建议表互不影响
+        # ── 批量行：只对已解封/已封禁的记录生效，与上面建议表互不影响 ──
         bb = QHBoxLayout()
+        bb.setContentsMargins(16, 0, 16, 8)
         bb.setSpacing(8)
         self.lbl_ban_sel = QLabel("已选 0 条")
         self.lbl_ban_sel.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
@@ -566,6 +593,8 @@ class BansPage(QWidget):
         self._setup_table(self.table)
         self.ban_sel = CheckColumn(self.table, COL_BAN_CHECK)
         self.ban_sel.bind(self._on_ban_sel_changed)
+        self._ban_check_delegate = CheckMarkDelegate(self.table)
+        self.table.setItemDelegateForColumn(COL_BAN_CHECK, self._ban_check_delegate)
         h = self.table.horizontalHeader()
         for i, width in enumerate(BAN_WIDTHS):
             h.resizeSection(i, width)
@@ -573,7 +602,7 @@ class BansPage(QWidget):
         # 点表头排序（数据层重排 + 重渲染，见 gui/table_sort.py）
         self.ban_sort_header = SortHeader(self.table, self.ban_sort, self._apply_ban_sort)
         lay.addWidget(self.table, 1)
-        return box
+        return self.ban_panel
 
     # ── 数据 ──
     def _status_filter(self) -> str:
@@ -934,6 +963,8 @@ class BansPage(QWidget):
         rows = self._ban_rows
         self.empty.setVisible(not rows)
         self.table.setVisible(bool(rows))
+        # 计数写在卡片标题里：两块卡片并排上下时，「这块有几条」是定位的第一步
+        self.ban_title.setText(f"封禁记录（{len(rows)}）")
 
         self.ban_sel.begin_render()
         try:
