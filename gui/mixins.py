@@ -13,6 +13,7 @@ PortGuard — 主窗口的行为 Mixin
 """
 
 import contextlib
+import threading
 from typing import TYPE_CHECKING, Dict, Optional
 
 from app import ban_service, maintenance, server_ctl
@@ -126,6 +127,10 @@ class EventPumpMixin(_HostBase):
         # 启动补检：定时器第一次触发在 60 秒后，而程序关了一整晚再打开时，
         # 这 60 秒里所有本该解封的 IP 仍然被封着。启动后立刻补跑一次。
         QTimer.singleShot(1500, self._check_expired)
+
+        # 黑名单补封：普通权限下加入的黑名单只落了文件（当时已明确提示「未拦截」），
+        # 之后以管理员身份启动必须补上，否则「名单里有、实际没拦」会一直存在。
+        QTimer.singleShot(3000, self._enforce_blacklist)
 
         # 日志/备份清理：每 10 分钟看一眼，每天到点才真跑（见 _maintenance_due）
         self.clean_timer = QTimer(self)
@@ -284,6 +289,27 @@ class EventPumpMixin(_HostBase):
             if self.stack.currentWidget() is self.page_bans:
                 self.page_bans.refresh()
             self._refresh_stats(force=True)
+
+    def _enforce_blacklist(self) -> None:
+        """黑名单补封（后台线程）：只处理「名单里有、但没有活动封禁」的条目。
+
+        这条链路是黑名单承诺「不能继续访问」的兜底：普通权限时加黑只落了文件，
+        以管理员身份重启后必须把拦截补上。批量写规则要几秒，放后台跑。
+        """
+        if not self._is_admin():
+            return
+
+        def work():
+            try:
+                from app import blacklist_service
+
+                res = blacklist_service.ensure_enforced()
+                if res.get("banned"):
+                    log.info("启动补封完成：%d 条黑名单补齐封禁", len(res["banned"]))
+            except Exception:
+                log.exception("启动黑名单补封失败")
+
+        threading.Thread(target=work, daemon=True, name="blacklist-enforce").start()
 
     def _report_expired_backlog(self) -> None:
         """

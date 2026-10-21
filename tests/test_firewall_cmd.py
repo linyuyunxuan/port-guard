@@ -39,6 +39,8 @@ def spy(monkeypatch):
         return 0, ""
 
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
+    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
     monkeypatch.setattr(firewall, "_powershell", fake_ps)
     monkeypatch.setattr(firewall, "_run", fake_run)
     # 「本机有没有 New-NetFirewallRule」是模块级缓存，用例之间必须重置，

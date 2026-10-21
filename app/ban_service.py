@@ -372,8 +372,10 @@ def execute(
     """
     # 手动封禁是唯一「界面点出来的封禁」，actor 默认取本机用户；
     # source 非 manual 说明是程序链路，记成 system 而不是当前用户名。
-    who = actor or (audit.ACTOR_SYSTEM if source and source != "manual" else audit.actor_local())
-    action = audit.ACTION_BAN_AUTO if (source and source != "manual") else audit.ACTION_BAN_MANUAL
+    # `blacklist` 同理：加黑名单是人点的按钮，记成本机用户才答得出「谁封的」。
+    manual_like = (not source) or source in ("manual", "blacklist")
+    who = actor or (audit.actor_local() if manual_like else audit.ACTOR_SYSTEM)
+    action = audit.ACTION_BAN_MANUAL if manual_like else audit.ACTION_BAN_AUTO
 
     if not firewall.is_admin():
         audit.record(

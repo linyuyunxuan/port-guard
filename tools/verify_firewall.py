@@ -39,6 +39,8 @@ from core import firewall as fw
 TEST_IP = "198.51.100.1"
 # 同一网段，用于「脏描述」用例（与 TEST_IP 分开，避免两步互相干扰）
 DIRTY_IP = "198.51.100.2"
+# 黑名单允许写 CIDR，封禁路径必须支持网段（否则网段条目等于没拦）
+NET_IP = "198.51.100.0/24"
 # 命令注入载荷：原实现会真的执行后半截，等于在输入框打字即可提权执行命令
 INJECTION = '1.2.3.4"; Start-Process calc; #'
 # 内网地址：规则引擎硬保护，任何情况下都拒绝封禁
@@ -209,6 +211,30 @@ def run_checks() -> Dict[str, Any]:
                 name5 not in set(fw.list_rule_names()),
                 f"规则名={name5}",
             )
+
+        # 13/14/15：黑名单的网段条目必须真的能封（user: 黑名单/封禁的 IP 不能继续访问）
+        ok6, name6, e6 = fw.block_ip(NET_IP, duration_sec=3600)
+        rec.add("13 CIDR 网段可封禁（黑名单允许网段写法）", ok6, name6 or e6)
+        if ok6:
+            _code, out6 = fw._run(
+                ["netsh", "advfirewall", "firewall", "show", "rule", f"name={name6}", "verbose"]
+            )
+            text6 = out6 or ""
+            # 不解析本地化表头，只确认「目标网段出现在规则里」+「动作是阻止」
+            rec.add(
+                "14 规则里确实是该网段且动作为阻止",
+                NET_IP in text6 and any(k in text6 for k in ("阻止", "Block")),
+                text6.strip().splitlines()[0] if text6.strip() else "读不到规则详情",
+            )
+            fw.unblock_by_name(name6)
+            rec.add(
+                "15 CIDR 规则已清理",
+                name6 not in set(fw.list_rule_names()),
+                f"规则名={name6}",
+            )
+
+        ok7, n7, e7 = fw.block_ip("192.168.0.0/16")
+        rec.add("16 内网网段被硬保护，拒绝封禁", (not ok7) and (not n7), e7)
     except Exception:
         result["error"] = traceback.format_exc()
         rec.add("XX 未预期异常", False, result["error"])

@@ -101,6 +101,8 @@ def _fail_all(monkeypatch, ps_out: str, netsh_desc_fails: bool = True):
     """PS 全失败；netsh 只在「带 description」时失败（真机上的行为）"""
     calls = []
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
+    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
     monkeypatch.setattr(firewall, "_ps_cmdlet_missing", None)
     monkeypatch.setattr(firewall, "_powershell", lambda script, timeout=30: (1, ps_out))
 
@@ -134,6 +136,8 @@ def test_block_ip_passes_sanitized_description(monkeypatch):
     """真机上 netsh 收到的描述里不能再出现危险字符（净化发生在发命令之前）"""
     calls = []
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
+    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
     monkeypatch.setattr(firewall, "_ps_cmdlet_missing", True)  # 模拟 2008 R2：只有 netsh
 
     def fake_run(cmd, timeout=30):
@@ -168,6 +172,8 @@ def test_missing_ps_cmdlet_is_cached(monkeypatch):
     """
     ps_calls = []
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
+    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
     monkeypatch.setattr(firewall, "_ps_cmdlet_missing", None)
 
     def fake_ps(script, timeout=30):
@@ -187,6 +193,8 @@ def test_missing_ps_cmdlet_is_cached(monkeypatch):
 def test_transient_ps_failure_does_not_poison_cache(monkeypatch):
     """偶发失败（不是「命令不存在」）不能被缓存，否则后续封禁永远跳过 PS"""
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
+    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
     monkeypatch.setattr(firewall, "_ps_cmdlet_missing", None)
     monkeypatch.setattr(firewall, "_powershell", lambda script, timeout=30: (1, "拒绝访问"))
     monkeypatch.setattr(firewall, "_run", lambda cmd, timeout=30: (0, ""))
@@ -331,6 +339,8 @@ def test_unblock_all_falls_back_to_netsh(monkeypatch):
         return 0, ""
 
     monkeypatch.setattr(firewall, "is_admin", lambda: True)
+    # block_ip 写入后会回读复核规则存在性；单测里防火墙是假的，直接放行
+    monkeypatch.setattr(firewall, "rule_exists", lambda name: True)
     monkeypatch.setattr(firewall, "_ps_cmdlet_missing", True)
     monkeypatch.setattr(firewall, "_run", fake_run)
     monkeypatch.setattr(firewall, "_powershell", lambda script, timeout=30: (0, ""))

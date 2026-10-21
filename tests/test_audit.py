@@ -647,6 +647,10 @@ def test_add_blacklist_is_audited(isolated_env, msgbox, monkeypatch, as_user):
         def _set_status(self, *_a, **_k):
             pass
 
+        def _sync_blacklist_bans(self, *_a, **_k):
+            # 加黑后要联动防火墙封禁（后台线程）；本用例只验审计，把这一步短路
+            pass
+
     _call(main_window.MainWindow._add_blacklist, _Host(), IP)
 
     assert eng.saved == 1
@@ -654,6 +658,45 @@ def test_add_blacklist_is_audited(isolated_env, msgbox, monkeypatch, as_user):
     assert row["actor"] == "alice"
     assert row["target_type"] == "blacklist"
     assert row["target_id"] == IP
+
+
+def test_add_blacklist_triggers_firewall_sync(isolated_env, msgbox, monkeypatch, as_user):
+    """加入黑名单必须**立刻**写防火墙 —— 只进名单不拦截等于没拦。"""
+    from gui import main_window
+
+    class _Set(set):
+        def add(self, x):
+            super().add(x)
+
+    class _Eng:
+        def __init__(self):
+            self.blacklist = _Set()
+            self.whitelist = _Set()
+
+        def save_lists(self):
+            pass
+
+    monkeypatch.setattr(main_window, "get_engine", _Eng)
+
+    class _PageRules:
+        def reload(self):
+            pass
+
+    seen = {}
+
+    class _Host:
+        page_rules = _PageRules()
+
+        def _set_status(self, *_a, **_k):
+            pass
+
+        def _sync_blacklist_bans(self, added, removed):
+            seen["added"] = list(added)
+            seen["removed"] = list(removed)
+
+    _call(main_window.MainWindow._add_blacklist, _Host(), IP)
+    assert seen.get("added") == [IP], "加入黑名单后没有触发防火墙封禁"
+    assert seen.get("removed") == []
 
 
 def test_gui_audit_failure_does_not_break_ban_delete(isolated_env, msgbox, monkeypatch):

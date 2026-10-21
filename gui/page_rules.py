@@ -10,9 +10,10 @@
     而不是只把控件 setEnabled(False) 后看起来像坏了。
 """
 
+import threading
 from typing import Dict, List, Tuple
 
-from app import audit
+from app import audit, blacklist_service
 from core.config import (
     LEVEL_CRITICAL,
     LEVEL_HIGH,
@@ -21,6 +22,7 @@ from core.config import (
     LEVEL_MEDIUM,
     LEVEL_NORMAL,
 )
+from core.logger import get_logger
 from core.rule_engine import get_engine
 from core.rules_meta import RULE_DESCS, RULE_LABELS, RULE_PARAMS
 from gui.components import PageHeader
@@ -49,6 +51,8 @@ from qtcompat import (
 LEVEL_ITEMS = [LEVEL_NORMAL, LEVEL_LOW, LEVEL_MEDIUM, LEVEL_HIGH, LEVEL_CRITICAL]
 LEVEL_ITEM_LABELS = [LEVEL_LABEL[x] for x in LEVEL_ITEMS]
 ACTION_ITEMS = [("suggest_ban", "生成封禁建议"), ("alert", "仅告警")]
+
+log = get_logger()
 
 
 class RuleCard(QFrame):
@@ -244,12 +248,15 @@ def _split(text: str) -> List[str]:
 
 class RulesPage(QWidget):
     rules_saved = Signal()
+    # 黑名单变更 → 防火墙联动的结果（后台线程跑完回主线程）
+    blacklist_sync_done = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cards: Dict[str, RuleCard] = {}
         self._dirty = False
         self._loading = True
+        self.blacklist_sync_done.connect(self._on_blacklist_sync_done)
         self._build()
         self.reload()
 
@@ -516,6 +523,16 @@ class RulesPage(QWidget):
                 result=audit.RESULT_FAIL,
             )
             return
+        added, removed = blacklist_service.diff(old_black, set(black.entries()))
+        if (added or removed) and not self._confirm_blacklist_sync(added, removed):
+            # 用户放弃同步：名单已经写盘了，必须说清楚「名单生效了但没拦」
+            QMessageBox.warning(
+                self,
+                "已取消联动封禁",
+                "名单已保存，但**没有**对防火墙做任何改动。\n"
+                f"新增 {len(added)} 条、移除 {len(removed)} 条仍按原状态拦截，"
+                "可在封禁页手工处理。",
+            )
         audit.record(
             audit.ACTION_LIST_SAVE,
             target_type="list",
@@ -529,9 +546,56 @@ class RulesPage(QWidget):
             after={"black": sorted(black.entries()), "white": sorted(white.entries())},
         )
         self.rules_saved.emit()
-        QMessageBox.information(
-            self, "已保存", f"黑名单 {len(black)} 条，白名单 {len(white)} 条，已即时生效。"
+        self._sync_blacklist(added, removed)
+
+    # ── 黑名单 → 防火墙联动 ──
+    def _confirm_blacklist_sync(self, added: List[str], removed: List[str]) -> bool:
+        """批量改名单等于批量写/删防火墙规则，必须先讲清楚再动手。"""
+        lines: List[str] = []
+        if added:
+            lines.append(f"新增 {len(added)} 个 IP：立即在 Windows 防火墙**永久封禁**")
+            lines += [f"   · {ip}" for ip in added[:10]]
+            if len(added) > 10:
+                lines.append(f"   … 其余 {len(added) - 10} 个")
+        if removed:
+            lines.append(f"移除 {len(removed)} 个 IP：解封**仅限黑名单来源**的封禁")
+            lines.append("   （手工封禁 / 自动封禁不会因此被解封）")
+            lines += [f"   · {ip}" for ip in removed[:10]]
+        return (
+            QMessageBox.question(
+                self,
+                "黑名单联动防火墙",
+                "\n".join(lines) + "\n\n继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            == QMessageBox.StandardButton.Yes
         )
+
+    def _sync_blacklist(self, added: List[str], removed: List[str]) -> None:
+        if not added and not removed:
+            QMessageBox.information(
+                self, "已保存", f"黑名单 {len(get_engine().blacklist)} 条，规则已即时生效。"
+            )
+            return
+
+        def work():
+            try:
+                res = blacklist_service.apply_changes(added, removed)
+            except Exception as e:
+                log.exception("黑名单联动封禁失败")
+                res = {"admin": False, "failed": [(ip, str(e)) for ip in added]}
+            self.blacklist_sync_done.emit(res)
+
+        threading.Thread(target=work, daemon=True, name="blacklist-sync").start()
+
+    def _on_blacklist_sync_done(self, res) -> None:
+        summary = blacklist_service.format_summary(res)
+        detail = blacklist_service.format_detail(res)
+        if res.get("admin") and not res.get("failed") and not res.get("unban_failed"):
+            QMessageBox.information(self, "黑名单已生效", summary + "\n\n" + detail)
+            return
+        QMessageBox.warning(self, "黑名单未完全生效", summary + "\n\n" + detail)
 
 
 def _lines(text: str) -> List[str]:

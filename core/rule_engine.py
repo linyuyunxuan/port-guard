@@ -82,6 +82,22 @@ class _IPSet:
             return False
         return any(addr in net for net in self._nets)
 
+    def covers_network(self, entry: str) -> bool:
+        """该集合是否覆盖一个网段（与任一成员网段**重叠**即算）。
+
+        黑名单允许写 CIDR，`__contains__` 只吃单个 IP，所以「1.2.3.0/24 会不会
+        误伤内网」必须用这个单独判 —— 否则把 192.168.0.0/16 塞进黑名单就能
+        把整个内网封掉。
+        """
+        try:
+            net = ipaddress.ip_network(entry, strict=False)
+        except Exception:
+            return False
+        if any(net.overlaps(p) for p in self._nets):
+            return True
+        # 网段里只含一个地址且该地址在精确集合里，也算覆盖（如 /32）
+        return net.num_addresses == 1 and str(net.network_address) in self._exact
+
     def __len__(self) -> int:
         return len(self._exact) + len(self._nets)
 
@@ -115,6 +131,27 @@ _NEVER_BAN = _IPSet(NEVER_BAN_NETWORKS)
 
 def is_never_ban(ip: str) -> bool:
     return ip in _NEVER_BAN
+
+
+def is_never_ban_target(value: str) -> bool:
+    """封禁目标（单 IP 或 CIDR）是否落在受保护范围。
+
+    单 IP 走精确/CIDR 匹配；CIDR 走**网段重叠**判定 ——
+    「192.168.1.0/24」这种写法用 `is_never_ban` 是判不出来的
+    （ip_address() 解析带斜杠会失败，直接返回 False），
+    不补这一层就等于允许用户把内网整段封掉。
+    解析不了的值一律按受保护处理（宁可拒绝，不可误封）。
+    """
+    v = (value or "").strip()
+    if not v:
+        return True
+    if "/" in v:
+        try:
+            net = ipaddress.ip_network(v, strict=False)
+        except Exception:
+            return True
+        return _NEVER_BAN.covers_network(str(net))
+    return v in _NEVER_BAN
 
 
 def has_http_context(rec: AccessRecord) -> bool:

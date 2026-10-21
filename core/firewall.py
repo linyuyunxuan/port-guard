@@ -250,27 +250,57 @@ def _create_rule(name: str, ip: str, desc: str) -> Tuple[bool, str]:
     return False, " | ".join(errs)
 
 
+def rule_exists(name: str) -> bool:
+    """规则是否真的存在于系统防火墙里（按名字精确判定）。
+
+    为什么必须有这一层：`netsh` / `New-NetFirewallRule` 返回 0 只代表命令被接受，
+    不代表规则被策略放行。没有复核时，界面会显示「已封禁」而实际拦截不存在 ——
+    对安全工具来说这是最坏的一种失败：人以为安全了。
+    """
+    if not name:
+        return False
+    try:
+        if name in list_rule_names():
+            return True
+    except Exception:
+        log.exception("回读规则列表失败，改用精确名探测 name=%s", name)
+    # 列表可能因权限/解析失败而为空，再按精确名探一次（不解析本地化表头，只找名字）
+    try:
+        code, out = _run(["netsh", "advfirewall", "firewall", "show", "rule", f"name={name}"])
+    except Exception:
+        log.exception("精确名探测规则失败 name=%s", name)
+        return False
+    text = out or ""
+    return code == 0 and name.lower() in text.lower()
+
+
 def block_ip(ip: str, duration_sec: Optional[int] = None, note: str = "") -> Tuple[bool, str, str]:
     """
     创建入站阻止规则。
     返回 (成功, rule_name, 错误信息)
 
+    `ip` 可以是单个 IP，也可以是 CIDR 网段（黑名单允许写网段）——
+    网段会先过受保护范围的重叠判定，内网/回环/保留段一律拒绝。
+
     `note` 只是规则描述里的附注（来自封禁原因 / 归属地）。它**从不是封禁的前置条件**：
     描述被防火墙拒绝时会自动降级为「无描述」重建，绝不能因为一句人话让封禁失败。
+
+    创建成功后会**回读复核规则确实存在**，读不到就再建一次；仍读不到按失败返回
+    （调用方据此把封禁记录标成 failed，而不是显示「已封禁」却拦不住）。
     """
     if not is_admin():
         return False, "", "需要管理员权限才能修改 Windows 防火墙"
 
     # ── 唯一入口做校验：非法输入在这里就被拒绝，不产生任何命令 ──
     try:
-        safe_ip = normalize_ip(ip)
+        safe_ip = normalize_ip(ip, allow_network=True)
     except InvalidIP as e:
         log.warning("拒绝封禁：%s（输入 %r）", e, ip)
         return False, "", str(e)
 
-    from core.rule_engine import is_never_ban
+    from core.rule_engine import is_never_ban_target
 
-    if is_never_ban(safe_ip):
+    if is_never_ban_target(safe_ip):
         return False, "", f"{safe_ip} 属于受保护地址段，拒绝封禁"
 
     name = rule_name(safe_ip)
@@ -290,14 +320,28 @@ def block_ip(ip: str, duration_sec: Optional[int] = None, note: str = "") -> Tup
                     desc,
                     err[:200],
                 )
-                return True, name, ""
-            err = f"{err} | 无描述重试: {err2}"
-        if ok:
+                ok, err = True, ""
+            else:
+                err = f"{err} | 无描述重试: {err2}"
+        if not ok:
+            log.error("封禁 %s 失败：%s", safe_ip, err[:400])
+            return False, "", err[:600]
+
+        # 复核：命令成功 ≠ 规则存在（可能被组策略/安全软件拦掉）
+        if rule_exists(name):
             log.info("已封禁 %s（规则 %s）", safe_ip, name)
             return True, name, ""
 
-        log.error("封禁 %s 失败：%s", safe_ip, err[:400])
-        return False, "", err[:600]
+        log.error("封禁 %s 的规则写入后回读不到，重建一次（规则 %s）", safe_ip, name)
+        _create_rule(name, safe_ip, "")
+        if rule_exists(name):
+            log.info("已封禁 %s（规则 %s，回读复核通过）", safe_ip, name)
+            return True, name, ""
+        return (
+            False,
+            "",
+            f"防火墙命令返回成功，但回读不到规则 {name} —— 可能被组策略或安全软件拦截",
+        )
 
 
 def unblock_by_name(name: str) -> Tuple[bool, str]:

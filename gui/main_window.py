@@ -7,6 +7,7 @@ PortGuard — 主窗口
 - app/*.py        封禁编排 / 维护 / 服务控制 / 离线库同步（不依赖 Qt，可单测）
 """
 
+import contextlib
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
@@ -279,6 +280,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
     # 批量封禁在后台线程跑，结束后用信号把结果送回 GUI 线程
     # （直接在工作线程里改状态栏是跨线程操作控件，Qt 会随机崩）
     batch_ban_done = Signal(int, int)  # (成功数, 失败数)
+    # 黑名单 → 防火墙联动的结果（写规则慢，必须后台跑完再回主线程提示）
+    blacklist_sync_done = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -655,6 +658,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self.page_settings.logs_open_requested.connect(self._open_logs_dir)
         self.page_settings.watch_changed.connect(self._on_watch_changed)
         self.batch_ban_done.connect(self._on_batch_ban_done)
+        self.blacklist_sync_done.connect(self._on_blacklist_sync_done)
         self.page_logs.logs_open_requested.connect(self._open_logs_dir)
         self.page_iplookup.xdb_sync_requested.connect(self._sync_xdb_now)
 
@@ -676,7 +680,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             QMessageBox.question(
                 self,
                 "加入黑名单",
-                f"将 {ip} 加入黑名单，之后所有来自该 IP 的访问都会判为严重风险。\n\n继续？",
+                f"将 {ip} 加入黑名单，并**立即在 Windows 防火墙拦截**该 IP 的所有入站访问"
+                "（永久，直到移出黑名单）。\n\n继续？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             != QMessageBox.StandardButton.Yes
@@ -710,6 +715,41 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         )
         self.page_rules.reload()
         self._set_status(f"已把 {ip} 加入黑名单", C.success)
+        # 名单只是「意图」，拦截必须落到防火墙：名单保存后立刻封禁（后台线程，
+        # 写规则可能要几秒）。非管理员时会被明确告知「未实际拦截」，不假成功。
+        self._sync_blacklist_bans([ip], [])
+
+    def _sync_blacklist_bans(self, added, removed) -> None:
+        """把黑名单变更落到防火墙（后台线程 → 信号回主线程）。"""
+
+        def work():
+            from app import blacklist_service
+
+            try:
+                res = blacklist_service.apply_changes(added, removed)
+            except Exception as e:
+                log.exception("黑名单联动封禁失败")
+                res = {"admin": False, "failed": [(ip, str(e)) for ip in added]}
+            self.blacklist_sync_done.emit(res)
+
+        threading.Thread(target=work, daemon=True, name="blacklist-sync").start()
+
+    def _on_blacklist_sync_done(self, res) -> None:
+        from app import blacklist_service
+
+        self._refresh_stats(force=True)
+        with contextlib.suppress(Exception):
+            self.page_bans.refresh()
+        summary = blacklist_service.format_summary(res)
+        if res.get("admin") and not res.get("failed") and not res.get("unban_failed"):
+            self._set_status(summary, C.success)
+            return
+        self._set_status(summary, C.warning)
+        QMessageBox.warning(
+            self,
+            "黑名单未完全生效",
+            summary + "\n\n" + blacklist_service.format_detail(res),
+        )
 
     def _on_rules_saved(self) -> None:
         self._set_status("规则配置已更新并生效", C.success)
