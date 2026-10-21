@@ -2,15 +2,11 @@
 
 为什么需要它：源码跑通不代表打包产物跑通。真实踩过的坑 ——
 
-1. 打包成窗口程序（`console=False`）后 `sys.stdout`/`sys.stderr` 是 `None`，
-   uvicorn 的彩色 formatter 会执行 `sys.stdout.isatty()` 并抛 AttributeError，
-   被 `dictConfig` 包成「Unable to configure formatter 'default'」，
-   接收服务在绑定端口之前就炸了。**这条路径只在窗口化 exe 里出现。**
-2. 判定「跑起来了」不能只看进程存活：窗口化程序崩溃时会弹错误框并一直卡住，
-   进程同样「活着」。必须看日志里的启动标志位。
+判定「跑起来了」不能只看进程存活：窗口化程序崩溃时会弹错误框并一直卡住，
+进程同样「活着」。必须看日志里的启动标志位。
 
 两道检查：
-- `exe --selfcheck`：在「无控制台」条件下真启停一次接收服务，用退出码断言
+- `exe --diag --quiet`：环境诊断必须能在产物里跑通（拷到别的电脑排障就靠它）
 - 正常启动一次：验证真实 Qt 插件能加载、完整界面链路不报错
 
 用法：
@@ -40,8 +36,6 @@ DATA_DIR = os.path.join(os.environ.get("APPDATA", ""), "PortGuard")
 LOG_FILE = os.path.join(DATA_DIR, "logs", "portguard.log")
 
 OK_MARK = "后端就绪"
-SELFCHECK_MARK = "无控制台启动接收服务 通过"
-SELFCHECK_END = "自检结束：通过"
 FROZEN_MARK = "运行方式=打包 exe"
 BAD_MARKS = (
     "界面启动失败",
@@ -225,23 +219,6 @@ def _kill(image: str) -> None:
     )
 
 
-def _run_selfcheck(exe: str, timeout: int = 180) -> Tuple[Optional[int], str]:
-    try:
-        p = subprocess.run(
-            [exe, "--selfcheck"],
-            cwd=os.path.dirname(exe),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout,
-            check=False,
-        )
-        return p.returncode, ""
-    except subprocess.TimeoutExpired:
-        return None, f"--selfcheck 超过 {timeout} 秒未退出"
-    except Exception as e:
-        return None, f"启动失败：{e}"
-
-
 def _run_diag(exe: str, timeout: int = 120) -> Tuple[Optional[int], str]:
     """跑 `--diag --quiet`：验证「拷到别的电脑」时的排障入口在打包产物里可用。
 
@@ -325,41 +302,14 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
         before = _snapshot(DATA_DIR)
         rec.add("02 记录运行前用户数据快照", True, f"文件数={len(before)} 目录={DATA_DIR}")
 
-        # ── 第一道：无控制台自检（唯一能覆盖「窗口化 + std 流为 None」的路径）──
-        mark1 = _log_mark()
-        code, err = _run_selfcheck(exe)
-        text1 = _log_since(mark1)
-        rec.add("03 --selfcheck 退出码为 0", code == 0, f"退出码={code} {err}".strip())
-
-        rec.add(
-            "04 自检覆盖了无控制台启动接收服务",
-            SELFCHECK_MARK in text1 and SELFCHECK_END in text1,
-            next(
-                (ln.strip() for ln in text1.splitlines() if SELFCHECK_MARK in ln),
-                "未找到自检通过标志",
-            ),
-        )
-
-        rec.add(
-            "05 确认运行的是打包产物（sys.frozen）",
-            FROZEN_MARK in text1,
-            next(
-                (ln.strip() for ln in text1.splitlines() if FROZEN_MARK in ln),
-                f"未找到「{FROZEN_MARK}」",
-            ),
-        )
-
-        hits1 = [m for m in BAD_MARKS if m in text1]
-        rec.add("06 自检段无失败/异常痕迹", not hits1, f"命中={hits1}")
-
-        # ── 第二道：环境自诊断（拷到别的电脑排障就靠它，必须能在产物里跑通）──
+        # ── 第一道：环境自诊断（拷到别的电脑排障就靠它，必须能在产物里跑通）──
         reports_before = _diag_reports()
         code_diag, err_diag = _run_diag(exe)
-        rec.add("07 --diag 退出码为 0", code_diag == 0, f"退出码={code_diag} {err_diag}".strip())
+        rec.add("03 --diag 退出码为 0", code_diag == 0, f"退出码={code_diag} {err_diag}".strip())
         dpath, dtext = _read_newest_report(reports_before)
-        rec.add("08 --diag 写出了报告文件", bool(dpath), dpath or "未见新的 diag-*.txt")
+        rec.add("04 --diag 写出了报告文件", bool(dpath), dpath or "未见新的 diag-*.txt")
         rec.add(
-            "09 报告含系统版本与依赖闭包",
+            "05 报告含系统版本与依赖闭包",
             "【系统】" in dtext and "【依赖闭包】" in dtext,
             f"{len(dtext)} 字符",
         )
@@ -370,14 +320,14 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
         prefix = QT_LIB_PREFIX.get(binding, "")
         if not prefix:
             rec.add(
-                "10 Qt 关键库按真实加载方式探测成功",
+                "06 Qt 关键库按真实加载方式探测成功",
                 False,
                 f"报告里读不到 Qt 线路（原值={binding or '空'}），无法判定该断言哪条线",
             )
         else:
             probes = [f"{prefix}Core.dll", f"{prefix}Widgets.dll"]
             rec.add(
-                "10 Qt 关键库按真实加载方式探测成功",
+                "06 Qt 关键库按真实加载方式探测成功",
                 all(f"✓ {p}" in dtext for p in probes),
                 "；".join(
                     next(
@@ -388,7 +338,7 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
                 ),
             )
 
-        # ── 第三道：正常启动，验证真实 Qt 插件与完整界面链路 ──
+        # ── 第二道：正常启动，验证真实 Qt 插件与完整界面链路 ──
         mark2 = _log_mark()
         env = dict(os.environ)
         if not desktop:
@@ -409,7 +359,7 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
                 died_at = elapsed
                 break
         rec.add(
-            f"11 正常启动后存活 {max(1, watch)} 秒",
+            f"07 正常启动后存活 {max(1, watch)} 秒",
             died_at is None,
             f"存活 {elapsed} 秒"
             + (f"，第 {died_at} 秒退出，码={proc.returncode}" if died_at else ""),
@@ -417,25 +367,33 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
 
         text2 = _log_since(mark2)
         rec.add(
-            "12 后端就绪标志位出现",
+            "08 后端就绪标志位出现",
             OK_MARK in text2,
             next(
                 (ln.strip() for ln in text2.splitlines() if OK_MARK in ln), f"未找到「{OK_MARK}」"
             ),
         )
+        rec.add(
+            "09 确认运行的是打包产物（sys.frozen）",
+            FROZEN_MARK in text2,
+            next(
+                (ln.strip() for ln in text2.splitlines() if FROZEN_MARK in ln),
+                f"未找到「{FROZEN_MARK}」",
+            ),
+        )
         hits2 = [m for m in BAD_MARKS if m in text2]
-        rec.add("13 界面启动段无失败/异常痕迹", not hits2, f"命中={hits2}")
+        rec.add("10 界面启动段无失败/异常痕迹", not hits2, f"命中={hits2}")
 
         after = _snapshot(DATA_DIR)
         new = sorted(set(after) - set(before))
         changed = sorted(k for k in set(after) & set(before) if after[k] != before[k])
         rec.add(
-            "14 运行期写出用户数据（新建或更新）",
+            "11 运行期写出用户数据（新建或更新）",
             bool(new or changed),
             f"新建={new[:8]} 变更={changed[:8]}",
         )
 
-        result["log_tail"] = "\n".join((text1 + text2).splitlines()[-20:])
+        result["log_tail"] = "\n".join(text2.splitlines()[-20:])
     except Exception:
         result["error"] = traceback.format_exc()
         rec.add("XX 未预期异常", False, result["error"])
@@ -460,7 +418,7 @@ def run_checks(exe: str, watch: int, desktop: bool) -> Dict[str, Any]:
             check=False,
             creationflags=CREATE_NO_WINDOW,
         ).stdout
-        rec.add("15 收尾无残留进程", image.encode() not in leftover, f"镜像={image}")
+        rec.add("12 收尾无残留进程", image.encode() not in leftover, f"镜像={image}")
 
     result["ok"] = rec.all_ok()
     return result

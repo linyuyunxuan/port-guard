@@ -1,17 +1,13 @@
 """
-日志与启动体检测试（回归 2026-10-16 的「接收服务启动失败」）
+日志与启动体检测试
 
 背景：窗口化运行（pythonw / 打包 exe 的 `console=False`）下 `sys.stdout` 与
-`sys.stderr` 都是 None。uvicorn 的 `DefaultFormatter.__init__` 会执行
-`sys.stdout.isatty()`，于是抛 AttributeError，被 `logging.config.dictConfig`
-包成 `ValueError: Unable to configure formatter 'default'` —— 服务压根没走到
-绑定端口那一步，而界面提示的是「可能被占用或权限不足」，把排障方向带偏。
+`sys.stderr` 都是 None。任何第三方库只要调一次 `sys.stdout.isatty()` 就会抛
+AttributeError —— 曾被 uvicorn 的日志 formatter 触发，表现成「服务启动失败」，
+而界面提示「可能被占用或权限不足」，把排障方向完全带偏（上报服务已在 1.2 移除，
+但这条兜底对任何库都有效，因此继续锁死）。
 
-这里锁死三道防线：
-① `ensure_std_streams()` —— std 流永不为 None
-② `report_server` 给 uvicorn 传 `log_config=None` —— 不走它那套 formatter
-③ uvicorn 绑定失败抛的是 SystemExit（BaseException），必须被捕获并如实归因
-
+这里锁死防线：`ensure_std_streams()` —— std 流永不为 None。
 外加「日志按日期清理」与「保留天数/执行时刻可改」的行为。
 
 ⚠️ 打补丁的时机很讲究：pytest 的全局捕获会在「夹具装配完成、用例体开始」之间
@@ -22,7 +18,6 @@
 
 import logging
 import os
-import socket
 import sys
 import time
 
@@ -37,14 +32,6 @@ def _no_console(monkeypatch) -> None:
     monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", None)
     assert sys.stdout is None and sys.stderr is None, "pytest 捕获把标准流换回去了"
-
-
-def _free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = int(s.getsockname()[1])
-    s.close()
-    return port
 
 
 # ═══════════════════ 防线 ①：替身流 ═══════════════════
@@ -69,121 +56,6 @@ def test_ensure_std_streams_keeps_real_streams():
     from core.logger import ensure_std_streams
 
     assert ensure_std_streams() == []  # 正常情况下什么都不改
-
-
-def test_null_stream_satisfies_uvicorn_formatter(monkeypatch):
-    """防线 ① 独立成立：即使真的走到 uvicorn 的 formatter 也不会崩"""
-    _no_console(monkeypatch)
-    from uvicorn.logging import DefaultFormatter
-
-    from core.logger import ensure_std_streams
-
-    ensure_std_streams()
-    assert DefaultFormatter().use_colors is False  # 修复前这里抛 AttributeError
-
-
-# ═══════════════════ 防线 ②：不复用 uvicorn 的日志配置 ═══════════════════
-
-
-def test_default_uvicorn_config_reproduces_the_bug(monkeypatch):
-    """复现原始缺陷（uvicorn 若已修掉则跳过，避免测试变成版本绑定的断言）"""
-    _no_console(monkeypatch)
-    import uvicorn
-    from fastapi import FastAPI
-
-    try:
-        uvicorn.Config(app=FastAPI(), host="127.0.0.1", port=0, log_level="warning")
-    except ValueError as e:
-        assert "formatter 'default'" in str(e)
-    else:
-        pytest.skip("当前 uvicorn 版本已不再默认使用该 formatter")
-
-
-def test_uvicorn_config_disables_its_own_logging(isolated_env, monkeypatch):
-    """启动时必须显式传 `log_config=None` —— 这是不再触发该崩溃的关键"""
-    init_db()
-    cfg.warm()
-
-    import uvicorn
-
-    from core import report_server
-
-    captured: dict = {}
-    real_init = uvicorn.Config.__init__
-
-    def spy(self, *args, **kwargs):
-        captured.update(kwargs)
-        return real_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(uvicorn.Config, "__init__", spy)
-    _no_console(monkeypatch)
-
-    port = _free_port()
-    ok = report_server.start_server(port)
-    report_server.stop_server()
-
-    assert ok, report_server.get_start_error()
-    assert captured.get("log_config", "未传") is None, f"实际传入：{captured.get('log_config')}"
-
-
-def test_report_server_starts_without_console(isolated_env, monkeypatch):
-    """防线 ②：std 流为 None 时，接收服务必须真的能起来"""
-    init_db()
-    cfg.warm()
-
-    from core import report_server
-
-    _no_console(monkeypatch)
-    port = _free_port()
-    ok = report_server.start_server(port)
-    err = report_server.get_start_error()
-    detail = report_server.get_start_error_detail()
-    report_server.stop_server()
-
-    assert ok, f"无控制台环境下启动失败：{err}\n{detail}"
-
-
-# ═══════════════════ 防线 ③：失败原因如实归因 ═══════════════════
-
-
-def test_occupied_port_is_reported_accurately(isolated_env):
-    """端口被占用 → 归因 occupied，且提示里给出可执行的下一步"""
-    init_db()
-    cfg.warm()
-
-    from core import report_server
-
-    hold = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    hold.bind(("127.0.0.1", 0))
-    hold.listen(1)
-    port = int(hold.getsockname()[1])
-    try:
-        ok = report_server.start_server(port)
-        err = report_server.get_start_error()
-        cause = report_server.get_start_error_cause()
-        hint = report_server.get_start_error_hint()
-        report_server.stop_server()
-    finally:
-        hold.close()
-
-    assert not ok
-    assert cause == report_server.CAUSE_OCCUPIED, f"归因={cause} 信息={err}"
-    assert "占用" in hint
-    assert "权限不足" not in hint  # 不能再把原因含糊地推给权限
-
-
-def test_cause_classification():
-    import errno
-
-    from core import report_server as rs
-
-    assert rs._cause_of(OSError(errno.EADDRINUSE, "in use")) == rs.CAUSE_OCCUPIED
-    assert rs._cause_of(OSError(errno.EACCES, "denied")) == rs.CAUSE_PERMISSION
-    assert rs._cause_of(ValueError("boom")) == rs.CAUSE_INTERNAL
-    # Windows 下 winerror 优先于 errno
-    exc = OSError(2, "no such file")
-    exc.winerror = 10048
-    assert rs._cause_of(exc) == rs.CAUSE_OCCUPIED
 
 
 # ═══════════════════ 日志文件：按日期清理 ═══════════════════

@@ -3,15 +3,15 @@ PortGuard — 主窗口
 
 职责被刻意收窄为「界面组装 + 页面切换 + 信号连线 + 托盘」。
 其它逻辑分别落在：
-- gui/mixins.py   事件泵 / 统计 / 服务启停（Qt 胶水）
-- app/*.py        封禁编排 / 维护 / 服务控制 / 离线库同步（不依赖 Qt，可单测）
+- gui/mixins.py   事件泵 / 统计 / 状态栏（Qt 胶水）
+- app/*.py        封禁编排 / 维护 / 离线库同步（不依赖 Qt，可单测）
 """
 
 import contextlib
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from app import audit, ban_service, server_ctl
+from app import audit, ban_service
 from app.xdb_service import get_service as get_xdb_service
 from core import firewall
 from core import settings as cfg
@@ -24,7 +24,7 @@ from core.logger import get_logger
 from core.rule_engine import get_engine, is_never_ban
 from gui.about_dialog import AboutDialog, ClickableLabel, register_about_shortcut
 from gui.components import ShieldMark, TopStatusBar
-from gui.mixins import EventPumpMixin, ServerCtlMixin
+from gui.mixins import EventPumpMixin
 from gui.page_access import AccessPage
 from gui.page_bans import BansPage, ManualBanDialog
 from gui.page_events import EventsPage
@@ -181,11 +181,11 @@ class BanDurationDialog(QDialog):
 
         why = QLabel("\n".join(why_lines))
         why.setWordWrap(True)
-        why.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        why.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         form.addRow(why)
 
         note = QLabel("将执行 New-NetFirewallRule 创建入站阻止规则（需管理员权限）。")
-        note.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        note.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         note.setWordWrap(True)
         form.addRow(note)
 
@@ -221,7 +221,7 @@ class BatchBanDialog(QDialog):
         lay.setSpacing(10)
 
         head = QLabel(f"将封禁 {len(ips)} 个 IP（已按 IP 去重）")
-        head.setStyleSheet(f"color:{C.text_primary};font-size:13px;font-weight:600;")
+        head.setStyleSheet(f"color:{C.text_primary};font-size:14.5px;font-weight:600;")
         lay.addWidget(head)
 
         box = QTextEdit()
@@ -251,7 +251,7 @@ class BatchBanDialog(QDialog):
                 reasons += f" 等 {len(skipped)} 个"
             note = QLabel(f"已自动跳过：{reasons}")
             note.setWordWrap(True)
-            note.setStyleSheet(f"color:{C.warning};font-size:12px;")
+            note.setStyleSheet(f"color:{C.warning};font-size:13.5px;")
             lay.addWidget(note)
 
         tip = QLabel(
@@ -259,7 +259,7 @@ class BatchBanDialog(QDialog):
             "过程中可继续操作界面，结果会写进运行日志与封禁管理。"
         )
         tip.setWordWrap(True)
-        tip.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        tip.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         lay.addWidget(tip)
 
         btns = QDialogButtonBox(
@@ -276,7 +276,7 @@ class BatchBanDialog(QDialog):
         return 0 if m == 0 else m * 60
 
 
-class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
+class MainWindow(EventPumpMixin, QMainWindow):
     # 批量封禁在后台线程跑，结束后用信号把结果送回 GUI 线程
     # （直接在工作线程里改状态栏是跨线程操作控件，Qt 会随机崩）
     batch_ban_done = Signal(int, int)  # (成功数, 失败数)
@@ -286,8 +286,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_TITLE}  v{APP_VERSION}")
-        self.setMinimumSize(1200, 720)
-        self.resize(1360, 820)
+        self.setMinimumSize(1240, 720)
+        self.resize(1440, 900)
         self.setStyleSheet(GLOBAL_STYLE)
 
         self._app_icon = _make_icon()
@@ -307,13 +307,12 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self._setup_timers()
         self._load_geo_async()
         self._refresh_stats(force=True)
-        self._maybe_start_server_on_launch()
         self._maybe_start_watcher_on_launch()
 
         # 启动后延迟做一次离线库检查（后台线程，不阻塞界面）
         QTimer.singleShot(3000, lambda: self._maybe_sync_xdb(first_run=True))
 
-        self._maybe_warn_insecure()
+        self._init_permission_hint()
 
     # ═══════════════════════════════════════════════
     #  小工具
@@ -348,18 +347,15 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         col.setSpacing(0)
 
         self.topbar = TopStatusBar()
-        self.si_server = self.topbar.add_item("接收服务")
         self.si_watch = self.topbar.add_item("本机观察")
         self.si_admin = self.topbar.add_item("权限")
-        self.si_server.set_state("接收服务 未启动", C.text_muted)
         self.si_watch.set_state("本机观察 未启动", C.text_muted)
         self.si_admin.set_state("权限 检测中…", C.text_muted)
-        # 只有「服务 / 观察」可点（跳设置页），「权限」点不动 —— 权限无法在程序内提升，
+        # 只有「观察」可点（跳设置页），「权限」点不动 —— 权限无法在程序内提升，
         # 可点却不办事比不可点更糟，所以不给它手型光标与 tooltip。
-        for item in (self.si_server, self.si_watch):
-            item.setCursor(Qt.CursorShape.PointingHandCursor)
-            item.setToolTip("打开设置页")
-            item.clicked.connect(self._goto_settings)
+        self.si_watch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.si_watch.setToolTip("打开设置页")
+        self.si_watch.clicked.connect(self._goto_settings)
         col.addWidget(self.topbar)
 
         self.stack = QStackedWidget()
@@ -391,17 +387,17 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         # 服务与观察的运行态已上移到顶部状态条，不再重复（P0-8）。
         sb = QStatusBar()
         sb.setSizeGripEnabled(False)
-        sb.setFixedHeight(26)
+        sb.setFixedHeight(30)
         self.setStatusBar(sb)
         self.lbl_status = QLabel("正在初始化…")
-        self.lbl_status.setStyleSheet(f"color:{C.text_secondary};font-size:11px;")
+        self.lbl_status.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
         # QSS 的 QStatusBar padding 不会作用到 permanent widget 的几何上，
         # 不补内缩时左右文字会贴到窗口边缘（实测左侧 x=2、右侧贴 1360）
         self.lbl_status.setContentsMargins(6, 0, 0, 0)
         self.lbl_geo = QLabel("定位库 加载中")
-        self.lbl_geo.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_geo.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
         self.lbl_xdb = QLabel("IP 库 —")
-        self.lbl_xdb.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_xdb.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
         sb.addWidget(self.lbl_status, 1)
         for w in (self._status_sep(), self.lbl_xdb, self._status_sep(), self.lbl_geo):
             sb.addPermanentWidget(w)
@@ -436,7 +432,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         # ── 品牌区（高 64）：自绘盾牌 + 竖排两行 ──
         brand = QWidget()
         brand.setObjectName("sidebar_brand")
-        brand.setFixedHeight(64)
+        brand.setFixedHeight(68)
         bl = QHBoxLayout(brand)
         bl.setContentsMargins(16, 0, 16, 0)
         bl.setSpacing(8)
@@ -472,7 +468,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             sl.addSpacing(12)
             gl = QLabel(group)
             gl.setObjectName("nav_group")
-            gl.setFixedHeight(28)
+            gl.setFixedHeight(30)
             sl.addWidget(gl)
             for idx in indexes:
                 name = NAV_ITEMS[idx][0]
@@ -539,11 +535,8 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self._switch_page(PAGE_SETTINGS)
 
     # ═══════════════════════════════════════════════
-    #  顶部状态条（由 mixins / 启停逻辑驱动）
+    #  顶部状态条（由 mixins 驱动）
     # ═══════════════════════════════════════════════
-
-    def _set_server_state(self, text: str, color: str) -> None:
-        self.si_server.set_state(text, color)
 
     def _set_watch_state(self, text: str, color: str) -> None:
         self.si_watch.set_state(text, color)
@@ -605,8 +598,6 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         menu = QMenu()
         a_show = QAction("显示主窗口", self)
         a_show.triggered.connect(self._show_window)
-        self.a_server = QAction("启动接收服务", self)
-        self.a_server.triggered.connect(self._toggle_server)
         a_sync = QAction("立即同步离线 IP 库", self)
         a_sync.triggered.connect(lambda: self._sync_xdb_now(force=False))
         a_about = QAction("关于", self)
@@ -614,7 +605,6 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         a_quit = QAction("退出", self)
         a_quit.triggered.connect(self._quit)
         menu.addAction(a_show)
-        menu.addAction(self.a_server)
         menu.addSeparator()
         menu.addAction(a_sync)
         menu.addSeparator()
@@ -651,7 +641,6 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         self.page_monitor.ask_settings.connect(self._goto_settings)
         self.page_bans.request_refresh_stats.connect(lambda: self._refresh_stats(force=True))
         self.page_rules.rules_saved.connect(self._on_rules_saved)
-        self.page_settings.server_toggled.connect(self._toggle_server)
         self.page_settings.settings_saved.connect(self._on_settings_saved)
         self.page_settings.xdb_sync_requested.connect(self._sync_xdb_now)
         self.page_settings.xdb_check_requested.connect(self._check_xdb_now)
@@ -854,11 +843,11 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             # 文案只留「已加载」：缓存条数是内部字段，露在 26px 状态栏里既挤又难懂，
             # 收到 tooltip 里（视觉走查：定位库：已加载 v0（缓存 0）读起来像异常）
             self.lbl_geo.setText("定位库 已加载")
-            self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:11px;")
+            self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:12.5px;")
             self.lbl_geo.setToolTip(f"离线定位库 v{gen} · 缓存 {ci.get('size', 0)} 条")
         else:
             self.lbl_geo.setText("定位库 不可用")
-            self.lbl_geo.setStyleSheet(f"color:{C.danger};font-size:11px;")
+            self.lbl_geo.setStyleSheet(f"color:{C.danger};font-size:12.5px;")
             self.lbl_geo.setToolTip(f"定位库加载失败：{err}")
             QMessageBox.warning(
                 self, "定位库加载失败", f"IP 归属地库加载失败，归属地将显示为未知。\n\n{err}"
@@ -1056,23 +1045,11 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             QMessageBox.warning(self, "提权失败", f"{err}\n\n请手动右键程序 → 以管理员身份运行。")
 
     # ═══════════════════════════════════════════════
-    #  安全提示
+    #  启动提示
     # ═══════════════════════════════════════════════
 
-    def _maybe_warn_insecure(self) -> None:
-        """监听局域网但没设 Key 时主动提示（默认不会发生，防止用户手动改回危险组合）"""
-        host = (cfg.get("listen_host", "127.0.0.1") or "").strip()
-        key = (cfg.get("api_key", "") or "").strip()
-        if host not in ("127.0.0.1", "localhost", "::1") and not key:
-            QMessageBox.warning(
-                self,
-                "安全提示",
-                f"当前监听地址为 {host}（非本机），但没有设置 API Key。\n\n"
-                f"局域网内任意主机都能伪造上报记录，进而污染风险判定、"
-                f"甚至在你开启自动封禁后封掉任意 IP。\n\n"
-                f"请在「设置 → 上报接收服务」里设置 API Key，或把监听地址改回 127.0.0.1。",
-            )
-
+    def _init_permission_hint(self) -> None:
+        """启动时提示一次权限状态（封禁能力完全取决于它）"""
         if not firewall.is_admin():
             self._set_status("提示：以管理员身份运行才能执行封禁", C.warning)
         else:
@@ -1094,7 +1071,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             self.hide()
             self.tray.showMessage(
                 "PortGuard 仍在运行",
-                "程序已最小化到系统托盘，接收服务继续工作。",
+                "程序已最小化到系统托盘，本机端口观察继续工作。",
                 QSystemTrayIcon.MessageIcon.Information,
                 3000,
             )
@@ -1114,16 +1091,6 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             self.page_logs.shutdown()
         except Exception:
             log.exception("停止日志页定时器失败")
-        try:
-            from app.notify_service import get_service as get_notify_service
-
-            get_notify_service().stop(timeout=3.0)
-        except Exception:
-            log.exception("停止告警推送线程失败")
-        try:
-            server_ctl.stop()
-        except Exception:
-            log.exception("停止服务失败")
         try:
             from core.db_writer import stop_writer
 

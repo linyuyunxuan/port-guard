@@ -11,28 +11,7 @@ import sys
 
 APP_NAME = "PortGuard"
 APP_TITLE = "PortGuard 端口访问防御工具"
-APP_VERSION = "1.1.0"
-
-# 默认监听端口（避开 sql-api-manager 的 8090）
-DEFAULT_LISTEN_PORT = 18080
-
-# 默认监听地址：**只监听本机**。
-# 需要局域网内其他主机上报时，由用户在设置页显式打开「允许局域网访问」，
-# 届时程序会强制要求设置 API Key。把"暴露到网络"变成显式选择而非默认。
-DEFAULT_LISTEN_HOST = "127.0.0.1"
-LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
-
-# 上报时间戳与本机时间的允许偏差（秒）：超出即以本机时间为准。
-# 放在这里是为了让「配置默认值」与「代码兜底值」同源 —— settings 表读不到时
-# （例如上报在 warm() 之前进来）用同一个数，不会出现两套口径。
-DEFAULT_TS_SKEW_SEC = 300
-
-# 「绑定所有网卡」的地址。集中在这里定义有两个目的：
-#   1) 全项目只有这一处硬编码字面量，S104（bind-all-interfaces）单点豁免；
-#   2) 默认值、设置页、安全检查共用同一常量，避免三处写法各自漂移。
-WILDCARD_HOST = "0.0.0.0"  # noqa: S104 —— 唯一允许出现该字面量的地方
-# 被视为「对所有网卡监听」的等价写法（含 IPv6 与通配符），供安全检测使用
-BIND_ALL_HOSTS = (WILDCARD_HOST, "::", "*")
+APP_VERSION = "1.2.0"
 
 # ── 风险等级 ──
 LEVEL_NORMAL = "normal"
@@ -262,22 +241,6 @@ DEFAULT_AUDIT_RETENTION_DAYS = 180
 
 # ── 默认设置（写入 settings 表）──
 DEFAULT_SETTINGS = {
-    # 服务
-    "listen_port": str(DEFAULT_LISTEN_PORT),
-    "listen_host": DEFAULT_LISTEN_HOST,
-    "api_key": "",
-    "cors_origins": "",  # 逗号分隔白名单，留空=不加 CORS 中间件
-    "rate_limit_per_sec": "300",  # 每个来源 IP 每秒允许的上报数
-    "rate_limit_burst": "600",  # 桶容量（允许的瞬时突发）
-    "max_body_mb": "2",  # 单次请求体上限（MB）
-    "autostart_server": "0",  # 1=启动程序时自动开启接收服务
-    # 上报来源可信度（详见 core.report_server._is_loopback_source）：
-    # 1=仅可信来源（回环地址，或本次请求通过 API Key 校验）才采信 body 里的 ip；
-    # 0=一律使用 TCP 对端地址，忽略 body 里的 ip
-    "trust_reported_ip": "1",
-    "report_max_ts_skew_sec": str(
-        DEFAULT_TS_SKEW_SEC
-    ),  # 上报 timestamp 与本机时间的最大偏差（秒），超出按本机时间计
     # 封禁
     "auto_mode": "0",  # 1=自动封禁（默认关闭）
     "auto_ban_threshold": "90",  # 自动封禁的最低风险分
@@ -328,20 +291,13 @@ DEFAULT_SETTINGS = {
     "xdb_sync_interval_hours": "24",  # 自动检查间隔（小时）
     "xdb_sync_on_start": "1",  # 1=启动后后台检查一次
     "xdb_auto_download": "1",  # 1=发现新版本自动下载并热换（全程校验+可回滚）
-    "xdb_source": "",  # 自定义镜像前缀，留空用内置源列表
+    # 自定义镜像源：JSON 数组，每项一个模板前缀（含 {path} 占位），按顺序优先尝试。
+    # 空数组 = 只用内置源；旧的单条 xdb_source 仍会被读取并自动迁移过来。
+    "xdb_sources": "[]",
     "xdb_proxy": "",  # 下载代理，留空=直连
     "xdb_last_check_at": "0",  # epoch 毫秒
     "xdb_last_update_at": "0",  # epoch 毫秒
     "xdb_last_result": "",  # 最近一次同步结果摘要
-    # ── 外部告警通道（Webhook）──
-    "webhook_enabled": "0",  # 1=启用外部告警推送（默认关闭）
-    "webhook_url": "",  # 对端接收地址，留空=不发送
-    "webhook_secret": "",  # HMAC-SHA256 签名密钥，留空=不签名
-    "webhook_timeout_sec": "10",  # 单次请求超时（秒，1-30）
-    "webhook_min_level": LEVEL_HIGH,  # 低于该级别的告警不推送（默认只推高风险及以上）
-    "webhook_max_per_min": "20",  # 每分钟最多推送条数（令牌桶限流）
-    "webhook_verify_ssl": "1",  # 1=校验证书；0=关闭校验（仅排查老旧服务器 TLS 兼容问题）
-    "webhook_allow_http": "0",  # 1=允许明文 http，且仅限内网 IP 地址（域名仍拒绝）
 }
 
 # 外部可关闭的联网行为（企业内网无出口时用环境变量一键关掉）

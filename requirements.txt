@@ -26,11 +26,3 @@ PySide2==5.15.2.1; python_version < "3.9"
 # 完整版会额外拖入 Addons（Qt3D/Charts/Multimedia/Quick3D…）与 WebEngine/Pdf，
 # 实测 site-packages/PySide6 从 215 MB 涨到 656 MB。导入路径不变，代码零改动。
 PySide6-Essentials>=6.6; python_version >= "3.9"
-
-# ── 业务系统上报接收服务 ──
-fastapi>=0.110
-uvicorn>=0.27
-# [standard] 附带 httptools / uvloop / watchfiles 等加速件。
-# 它们在 3.8 上已经不太好找轮子，所以只给开发栈装；纯 Python 的 h11 实现
-# 对本项目的上报量完全够用。
-uvicorn[standard]>=0.29; python_version >= "3.9"

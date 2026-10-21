@@ -4,7 +4,6 @@ PortGuard 端口访问防御工具 — 程序入口
 用法：
     python main.py                 # 普通权限，仅监控 + 建议
     （以管理员身份运行）            # 启用封禁/解封功能
-    python main.py --selfcheck     # 交付冒烟：无控制台条件下启停一次接收服务
     python main.py --diag          # 环境自诊断：查「为什么这台电脑跑不起来」
 
 本环境使用专用虚拟环境：
@@ -80,7 +79,7 @@ def _check_deps(interactive: bool = True) -> bool:
         ]
         msg = "\n".join(lines)
         if not interactive:
-            # 自动化场景（如 --selfcheck）不弹窗：模态对话框会让流水线直接挂住
+            # 无人在场的自动化场景不弹窗：模态对话框会让流水线直接挂住
             print(msg, file=sys.stderr)
             return False
         # 用 ctypes 弹原生框：tkinter 在打包时被 excludes 排除，窗口化运行时
@@ -139,61 +138,6 @@ def _init_backend() -> None:
             "当前进程没有控制台（窗口化运行的正常现象），已为 %s 挂上安全空流",
             "/".join(_PATCHED_STREAMS),
         )
-
-
-def _selfcheck() -> int:
-    """
-    交付冒烟自检：在「模拟无控制台」的条件下，把接收服务真正启停一次。
-
-    为什么做成命令行开关（`PortGuard.exe --selfcheck`）：
-    打包后的窗口程序（`console=False`）没法自动化点击界面，而「窗口化 + std 流为
-    None」恰恰是唯一能让接收服务启动失败的环境 —— uvicorn 的彩色 formatter 会执行
-    `sys.stdout.isatty()`，std 流为 None 时抛 AttributeError，被 dictConfig 包成
-    「Unable to configure formatter 'default'」。上一版打包验证就是因为只看了
-    「后端就绪」而漏掉了这条路径。退出码可直接被脚本/流水线断言。
-
-    结果同时写入日志文件（窗口程序没有 stdout，靠 print 是看不到的）。
-    """
-    import socket
-
-    from core.logger import get_logger, log_file
-
-    log = get_logger("main")
-
-    saved_out, saved_err = sys.stdout, sys.stderr
-    sys.stdout, sys.stderr = None, None
-    ok = False
-    detail = ""
-    port = 0
-    try:
-        from core.logger import ensure_std_streams
-
-        patched = ensure_std_streams()
-        from core import report_server
-        from core import settings as cfg
-
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("127.0.0.1", 0))
-        port = int(s.getsockname()[1])
-        s.close()
-
-        # 用回环地址 + 现有 Key，避免为跑个自检而改动用户设置
-        cfg.set("listen_host", "127.0.0.1", persist=False)
-        ok = report_server.start_server(port, cfg.get("api_key", ""))
-        detail = report_server.get_start_error_detail() or report_server.get_start_error()
-        report_server.stop_server()
-        log.info("自检：std 流兜底=%s 无控制台启动接收服务 %s", patched, "通过" if ok else "失败")
-    except Exception:
-        detail = traceback.format_exc()
-    finally:
-        sys.stdout, sys.stderr = saved_out, saved_err
-
-    log.info("自检结束：%s（端口 %d）", "通过" if ok else "失败", port)
-    if not ok:
-        log.error("自检失败原因：\n%s", detail)
-    with contextlib.suppress(Exception):
-        print(f"PortGuard 自检：{'通过' if ok else '失败'}（细节见 {log_file()}）", flush=True)
-    return 0 if ok else 1
 
 
 def _run_diag() -> int:
@@ -328,22 +272,17 @@ def main() -> int:
     global _PATCHED_STREAMS
     _PATCHED_STREAMS = ensure_std_streams()
 
-    selfcheck = "--selfcheck" in sys.argv
-
     # 自诊断必须排在一切依赖检查之前：它要回答的正是「依赖为什么起不来」
     if "--diag" in sys.argv:
         return _run_diag()
 
-    if not _check_deps(interactive=not selfcheck):
+    if not _check_deps():
         return 2
 
     try:
         _init_backend()
     except Exception:
         err = traceback.format_exc()
-        if selfcheck:
-            print(err, file=sys.stderr)
-            return 1
         try:
             import tkinter.messagebox as mb
 
@@ -351,10 +290,6 @@ def main() -> int:
         except Exception:
             print(err, file=sys.stderr)
         return 1
-
-    # 交付冒烟：只验证「无控制台下接收服务能否启动」，不起 Qt 界面
-    if selfcheck:
-        return _selfcheck()
 
     # 无人值守初始化：安全启用防火墙 + 对齐封禁，然后退出（不起界面）
     if "--enable-firewall" in sys.argv:
@@ -366,9 +301,6 @@ def main() -> int:
     try:
         from qtcompat import QApplication, QFont, QMessageBox, Qt, exec_app
     except ImportError as exc:
-        if selfcheck:
-            print(traceback.format_exc(), file=sys.stderr)
-            return 3
         return _qt_import_failed(exc, traceback.format_exc())
 
     # 高分屏缩放：Qt5 需要显式打开，Qt6 默认已开。
@@ -384,10 +316,10 @@ def main() -> int:
     app.setApplicationDisplayName("PortGuard 端口访问防御工具")
     app.setQuitOnLastWindowClosed(False)  # 关闭窗口后驻留托盘
 
-    app.setFont(QFont("Microsoft YaHei UI", 9))
+    app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setStyle("Fusion")
 
-    # 单实例保护（避免重复占用上报端口）。
+    # 单实例保护（避免两个实例同时操作防火墙与数据库）。
     # 用 Windows 命名互斥体而不是 QSharedMemory —— PySide2（Qt5）没有导出
     # QSharedMemory，而一套产物要同时支持 Qt5/Qt6，见 core/single_instance.py。
     try:

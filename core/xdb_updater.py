@@ -43,6 +43,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from core import settings as cfg
 from core.config import (
@@ -241,16 +242,105 @@ def _open(url: str, timeout: float, direct: bool, extra_headers: Optional[Dict] 
     return op.open(req, timeout=timeout)
 
 
+#: 自定义源条数上限。多于此值不再往下试 —— 每次同步都要按顺序探一遍，
+#: 挂十几个源只会把「检查更新」拖成分钟级。
+MAX_CUSTOM_SOURCES = 10
+
+
+def custom_sources() -> List[str]:
+    """设置里的自定义镜像源（按用户排列的顺序）。
+
+    存的是 JSON 数组；兼容 1.1.0 的单条 `xdb_source`（老库里可能有值），
+    迁移策略是「读的时候合并」，不写回 —— 用户没打开设置页时不该产生写操作。
+    """
+    raw = (cfg.get("xdb_sources", "") or "").strip()
+    items: List[str] = []
+    if raw:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            # 手改坏了（比如写成逗号分隔）就按单条处理，不让整组源失效
+            data = [raw]
+        if isinstance(data, str):
+            data = [data]
+        if isinstance(data, list):
+            items = [str(x).strip() for x in data if str(x).strip()]
+    legacy = (cfg.get("xdb_source", "") or "").strip()
+    if legacy and legacy not in items:
+        items.append(legacy)
+    seen = set()
+    out = []
+    for t in items:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= MAX_CUSTOM_SOURCES:
+            break
+    return out
+
+
+def custom_source_hosts() -> List[str]:
+    """自定义源里出现的主机名（用于扩展白名单）。"""
+    hosts = []
+    for tpl in custom_sources():
+        probe = tpl.replace("{path}", "data/ip2region_v4.xdb")
+        try:
+            host = (urlparse(probe).hostname or "").lower()
+        except Exception:
+            host = ""
+        if host:
+            hosts.append(host)
+    return hosts
+
+
+#: 一定属于内网 / 本机的域名后缀（自定义源里出现就直接丢弃）。
+_INTERNAL_SUFFIXES = (
+    ".local",
+    ".internal",
+    ".intranet",
+    ".lan",
+    ".home",
+    ".corp",
+    ".localdomain",
+)
+
+
+def _is_private_host(host: str) -> bool:
+    """字面量内网 / 环回地址判定（防 SSRF）。
+
+    只查字面量，不做 DNS 解析：解析会阻塞且可能被 PTR 欺骗，
+    而这里要挡的是「把下载源改成 127.0.0.1 / 10.x 去读本机或内网资源」。
+
+    另外挡掉**单标签主机名**（`https://mirror/{path}`）与常见内网域后缀 ——
+    它们只能靠本机 DNS 后缀补全解析，指向的一定是内网。
+    """
+    h = host.strip().lower().strip("[]")
+    if not h:
+        return True
+    if h in ("localhost", "localhost.localdomain"):
+        return True
+    if "." not in h:  # 单标签 → 靠 search suffix 解析，必然是内网
+        return True
+    if _INTERNAL_SUFFIXES and h.endswith(_INTERNAL_SUFFIXES):
+        return True
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(h.split("%")[0])
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+
+
 def _source_list() -> List[str]:
     """
-    组装下载源列表。用户可在设置里用 xdb_source 指定一个自定义模板前缀
-    （形如 `https://my-mirror.example.com/ip2region/{path}`），优先尝试。
+    组装下载源列表：**自定义源优先**（按用户排列的顺序），失败再落到内置源。
     """
-    tpls: List[str] = []
-    custom = (cfg.get("xdb_source", "") or "").strip()
-    if custom:
-        tpls.append(custom)
-    tpls.extend(XDB_SOURCE_TEMPLATES)
+    tpls = custom_sources()
+    for t in XDB_SOURCE_TEMPLATES:
+        if t not in tpls:
+            tpls.append(t)
     return tpls
 
 
@@ -259,6 +349,8 @@ def _allowed_hosts() -> List[str]:
     extra = (cfg.get("xdb_extra_hosts", "") or "").strip()
     if extra:
         hosts.extend(h.strip().lower() for h in extra.split(",") if h.strip())
+    # 用户自己填的镜像源视为可信主机，否则「填了也用不了」
+    hosts.extend(custom_source_hosts())
     return hosts
 
 
@@ -271,9 +363,16 @@ def _build_urls(name: str) -> List[str]:
     for tpl in _source_list():
         url = tpl.replace("{path}", up)
         try:
-            out.append(safe_https_url(url, allowed_hosts=hosts))
+            clean = safe_https_url(url, allowed_hosts=hosts)
         except InvalidURL as e:
             log.warning("跳过不合规的下载源：%s", e)
+            continue
+        host = (urlparse(clean).hostname or "").lower()
+        if _is_private_host(host):
+            # 自定义源允许任意域名，但不允许指向内网 / 本机（SSRF）
+            log.warning("跳过指向内网地址的下载源：%s", host)
+            continue
+        out.append(clean)
     return out
 
 

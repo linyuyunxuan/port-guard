@@ -4,21 +4,21 @@
   · 6 组竖排（约 1780px，要滚 2.4 屏）改成 **3 个下划线 tab** —— 服务与采集 /
     防护与告警 / 数据与离线库；
   · 标签列固定 128px 右对齐，所有控件左缘落在同一条竖线（P1-5）；
-  · 局域网警告、自动封禁警告**只在对应开关打开时**出现在表单里，不常驻；
+  · 自动封禁警告**只在开关打开时**出现在表单里，不常驻；
   · 「未保存」标记：任一控件改动即在标题区亮起，保存后熄灭（P1-12）。
 
-不改任何判定逻辑与信号契约：sp_port / btn_xdb_check / tg_xdb_auto / lbl_watch_state
+不改任何判定逻辑与信号契约：btn_xdb_check / tg_xdb_auto / lbl_watch_state
 等属性名被 selftest 与主窗口直接引用，全部保留。
 """
 
 import contextlib
 import datetime
-import secrets
+import json
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from app import audit, maintenance
-from core import firewall, report_server, xdb_updater
+from core import firewall, xdb_updater
 from core import settings as cfg
 from core.config import (
     BAN_DURATION_TIER_DEFAULTS,
@@ -26,17 +26,13 @@ from core.config import (
     DEFAULT_BAN_RETENTION_DAYS,
     DEFAULT_ESCALATION_FACTOR,
     DEFAULT_ESCALATION_MAX_SEC,
-    DEFAULT_LISTEN_HOST,
-    DEFAULT_LISTEN_PORT,
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_RISK_RETENTION_DAYS,
-    DEFAULT_TS_SKEW_SEC,
     LEVEL_CRITICAL,
     LEVEL_HIGH,
     LEVEL_LABEL,
     LEVEL_LOW,
     LEVEL_MEDIUM,
-    WILDCARD_HOST,
     XDB_UPSTREAM,
     db_path,
     user_data_dir,
@@ -81,11 +77,11 @@ LEVEL_LABELS = [LEVEL_LABEL[x] for x in LEVEL_ITEMS]
 LABEL_W = 128
 
 #: 备份表：行高与列宽（库 / 备份文件 / 大小 / 备份时间）。文件列是唯一的拉伸列
-BACKUP_ROW_H = 24
-BACKUP_WIDTHS = [68, 300, 80, 148]
+BACKUP_ROW_H = 28
+BACKUP_WIDTHS = [78, 345, 92, 170]
 
 #: 数据库备份表：库只有一份，不需要「库」列
-DB_BACKUP_WIDTHS = [320, 88, 148]
+DB_BACKUP_WIDTHS = [368, 101, 170]
 
 #: 后台任务进行中的提示语（VACUUM 可能几十秒，必须让用户知道程序没死）
 DB_TASK_TEXT = {
@@ -100,7 +96,7 @@ DB_TASK_NAME = {"vacuum": "整理数据库", "reindex": "重建索引", "backup"
 
 # ── 操作审计表 ──
 AUDIT_HEADERS = ["时间", "操作者", "操作", "对象", "摘要", "结果"]
-AUDIT_WIDTHS = [148, 130, 100, 90, 420, 60]
+AUDIT_WIDTHS = [170, 150, 115, 104, 483, 69]
 AUDIT_CENTER_COLS = [0, 2, 3, 5]
 COL_AUDIT_SUMMARY = 4
 AUDIT_RESULT_LABEL = {
@@ -196,21 +192,17 @@ class _Panel(QFrame):
 
 
 class SettingsPage(QWidget):
-    server_toggled = Signal(bool)  # 请求主窗口启动/停止服务
     settings_saved = Signal()
     xdb_sync_requested = Signal(bool)  # 立即同步（True=强制重下）
     xdb_check_requested = Signal()  # 只检查
     logs_open_requested = Signal()
     watch_changed = Signal()  # 本机端口观察的开关/参数发生变化
-    # Webhook 测试的结果由后台线程回调，用它跨线程回到主线程再改控件
-    webhook_result = Signal(object)
     # 数据库维护（VACUUM / 重建索引 / 备份 / 恢复）在后台线程跑，结果同样经信号回主线程
     db_task_done = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._loading = True  # load() 期间不点亮「未保存」
-        self._report_url = ""
         self._bak_rows: List[Dict] = []  # 备份表当前行 -> 备份条目（与表格行号同序）
         self._db_rows: List[Dict] = []  # 数据库备份表当前行 -> 备份条目
         self._db_busy = False
@@ -219,7 +211,6 @@ class SettingsPage(QWidget):
         self._hint_timer = QTimer(self)
         self._hint_timer.setSingleShot(True)
         self._hint_timer.timeout.connect(self._reset_hint)
-        self.webhook_result.connect(self._on_webhook_result)
         self.db_task_done.connect(self._on_db_task_done)
         self._build()
         self.load()
@@ -262,96 +253,6 @@ class SettingsPage(QWidget):
     # ── Tab 1：服务与采集 ──
     def _tab_service(self) -> QWidget:
         page, page_layout = self._scroll_page()
-
-        panel = _Panel("上报接收服务")
-        self.sp_port = QSpinBox()
-        self.sp_port.setRange(1, 65535)
-        self.sp_port.setValue(DEFAULT_LISTEN_PORT)
-        self.sp_port.setFixedWidth(120)
-
-        self.tg_lan = ToggleSwitch(False)
-        self.tg_lan.toggled.connect(self._on_lan_toggle)
-        self.lbl_lan = QLabel("")
-        self.lbl_lan.setObjectName("form_hint")
-        panel.add("监听端口", self.sp_port)
-        panel.add("允许局域网访问", _row_widget(self.tg_lan, self.lbl_lan, spacing=10))
-
-        # 只在开关打开时出现（P1-4）：平时不占高度，也不制造「常驻警告疲劳」
-        self.warn_lan = WarnBanner(
-            "局域网内其他主机可伪造上报记录，进而污染风险判定、"
-            "甚至借自动封禁之手封掉任意 IP —— 因此会强制要求 API Key。",
-            level="warning",
-        )
-        self.warn_lan.setVisible(False)
-        panel.add_block(self.warn_lan)
-
-        self.ed_key = QLineEdit()
-        self.ed_key.setPlaceholderText("留空表示不校验；监听局域网地址时会强制要求")
-        self.ed_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ed_key.setMaximumWidth(300)
-        b_show = QPushButton("显示")
-        b_show.setObjectName("btn_outline")
-        b_show.setFixedWidth(52)
-        b_show.clicked.connect(self._toggle_key_echo)
-        b_gen = QPushButton("生成")
-        b_gen.setObjectName("btn_outline")
-        b_gen.setFixedWidth(52)
-        b_gen.clicked.connect(self._generate_key)
-        b_copy = QPushButton("复制")
-        b_copy.setObjectName("btn_outline")
-        b_copy.setFixedWidth(52)
-        b_copy.clicked.connect(self._copy_key)
-        panel.add("API Key", (self.ed_key, b_show, b_gen, b_copy))
-
-        # ── 上报侧可信度 ──
-        # body 里的 ip / timestamp 都是业务系统给的，能直接左右判定结果，
-        # 所以这里给运维一个总闸与阈值，而不是让程序默默信任。
-        self.tg_trust_ip = ToggleSwitch(True)
-        self.sp_ts_skew = QSpinBox()
-        self.sp_ts_skew.setRange(0, 3600)
-        self.sp_ts_skew.setSuffix(" 秒")
-        self.sp_ts_skew.setValue(DEFAULT_TS_SKEW_SEC)
-        self.sp_ts_skew.setFixedWidth(120)
-        panel.add(
-            "上报来源 IP",
-            _row_widget(self.tg_trust_ip, self._sw_label("信任上报中的来源 IP"), spacing=10),
-        )
-        panel.add("时间戳最大偏差", self.sp_ts_skew)
-
-        hint_trust = QLabel(
-            "勾掉后一律按 TCP 对端地址计；不勾时，仅回环来源或通过 API Key 校验的请求，"
-            "其上报的 ip 才会被采信。时间戳与本机时间不符或超出偏差时，按本机时间计。"
-        )
-        hint_trust.setObjectName("hint")
-        hint_trust.setWordWrap(True)
-        hint_trust.setToolTip(
-            "上报的 ip 与 timestamp 都来自业务系统，可被伪造：\n\n"
-            "· ip 伪造 —— 给任意 IP 刷风险分，甚至借自动封禁封掉正常来源；\n"
-            "· 时间戳伪造 —— 规则引擎用它推进滑动窗口，往回拨能让窗口永远累积不起来，"
-            "往前拨会让清理逻辑把窗口清空，4 条窗口型规则全部失效。\n\n"
-            "因此这两项由服务端按「来源可信度 + 偏差阈值」兜底。"
-        )
-        panel.add_block(hint_trust, span=False)
-
-        self.lbl_server_state = QLabel("")
-        self.lbl_server_state.setObjectName("form_hint")
-        self.btn_server = QPushButton("启动服务")
-        self.btn_server.setObjectName("btn_success")
-        self.btn_server.clicked.connect(self._toggle_server)
-        panel.add("服务状态", (self.btn_server, self.lbl_server_state))
-
-        # 上报地址：只读可选中 + 一键复制（运维要把 URL 贴进业务系统，P2-5）
-        self.lbl_endpoint = QLabel("")
-        self.lbl_endpoint.setObjectName("mono_hint")
-        self.lbl_endpoint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        btn_ep = QPushButton("复制")
-        btn_ep.setObjectName("btn_outline")
-        btn_ep.setFixedWidth(52)
-        btn_ep.setToolTip("复制上报地址（POST /api/v1/access/report）")
-        btn_ep.clicked.connect(self._copy_endpoint)
-        panel.add("上报地址", (self.lbl_endpoint, btn_ep))
-
-        page_layout.addWidget(panel)
 
         # ── 本机端口访问观察 ──
         watch = _Panel("本机端口访问观察")
@@ -434,13 +335,11 @@ class SettingsPage(QWidget):
         self.lbl_watch_state.setWordWrap(True)
         watch.add("运行状态", self.lbl_watch_state)
 
-        hint = QLabel(
-            "自采不依赖业务系统上报；两种通道可同时开启，事件按「本机端口 + 远端 IP」去重"
-        )
+        hint = QLabel("两条通道可同时开启，事件按「本机端口 + 远端 IP + 远端端口」去重")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         hint.setToolTip(
-            "程序自己观察本机端口，不依赖业务系统上报。\n\n"
+            "程序自己观察本机端口，不依赖任何外部数据源。\n\n"
             "· TCP 连接表轮询：免管理员权限，但只能看见当前仍连着的连接；\n"
             "· 防火墙日志：连被丢弃的扫描都看得见，需管理员开启一次日志记录。"
         )
@@ -515,12 +414,6 @@ class SettingsPage(QWidget):
         self.sp_esc_max.setSuffix(" 小时")
         self.sp_esc_max.setFixedWidth(160)
 
-        self.sp_rate = QSpinBox()
-        self.sp_rate.setRange(0, 100000)
-        self.sp_rate.setValue(300)
-        self.sp_rate.setSuffix(" 次/秒/IP（0=不限流）")
-        self.sp_rate.setFixedWidth(220)
-
         ban.add("自动封禁最低评分", self.sp_threshold)
         ban.add("默认封禁时长", self.sp_duration)
         ban.add("严重档时长", self.sp_dur_critical)
@@ -530,7 +423,6 @@ class SettingsPage(QWidget):
         ban.add("重复封禁递增", _row_widget(self.tg_escalation, spacing=10))
         ban.add("递增倍数", self.sp_esc_factor)
         ban.add("递增封顶", self.sp_esc_max)
-        ban.add("上报限流", self.sp_rate)
 
         hint_strategy = QLabel(
             "时长优先级：规则指定 > 重复封禁递增 > 风险等级分档 > 默认封禁时长。"
@@ -575,87 +467,6 @@ class SettingsPage(QWidget):
         note.setWordWrap(True)
         lay.addWidget(note)
 
-        # ── 外部告警通道 ──
-        hook = _Panel("外部告警通道（Webhook）")
-        self.tg_hook = ToggleSwitch(False)
-        self.tg_hook.toggled.connect(self._on_hook_toggle)
-        self.lbl_hook = QLabel("")
-        self.lbl_hook.setObjectName("form_hint")
-        hook.add("启用推送", _row_widget(self.tg_hook, self.lbl_hook, spacing=10))
-
-        self.ed_hook_url = QLineEdit()
-        self.ed_hook_url.setPlaceholderText("https://alert.example.com/hooks/portguard")
-        self.ed_hook_url.setMaximumWidth(560)
-        hook.add("接收地址", self.ed_hook_url)
-
-        self.ed_hook_secret = QLineEdit()
-        self.ed_hook_secret.setPlaceholderText("留空=不签名；填写后每条约附带 HMAC-SHA256 签名")
-        self.ed_hook_secret.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ed_hook_secret.setMaximumWidth(420)
-        b_secret = QPushButton("显示")
-        b_secret.setObjectName("btn_outline")
-        b_secret.setFixedWidth(52)
-        b_secret.clicked.connect(self._toggle_secret_echo)
-        hook.add("签名密钥", _row_widget(self.ed_hook_secret, b_secret, spacing=8))
-
-        self.cb_hook_level = QComboBox()
-        self.cb_hook_level.addItems(LEVEL_LABELS)
-        self.cb_hook_level.setFixedWidth(140)
-
-        self.sp_hook_timeout = QSpinBox()
-        self.sp_hook_timeout.setRange(1, 30)
-        self.sp_hook_timeout.setValue(10)
-        self.sp_hook_timeout.setSuffix(" 秒")
-        self.sp_hook_timeout.setFixedWidth(120)
-
-        self.sp_hook_max = QSpinBox()
-        self.sp_hook_max.setRange(1, 600)
-        self.sp_hook_max.setValue(20)
-        self.sp_hook_max.setSuffix(" 条/分钟")
-        self.sp_hook_max.setFixedWidth(140)
-
-        hook.add("推送级别", self.cb_hook_level)
-        hook.add("请求超时", self.sp_hook_timeout)
-        hook.add("推送限流", self.sp_hook_max)
-
-        self.tg_hook_http = ToggleSwitch(False)
-        hook.add(
-            "允许内网 http",
-            _row_widget(self.tg_hook_http, self._sw_label("仅内网 IP，域名仍拒绝"), spacing=10),
-        )
-        self.tg_hook_ssl = ToggleSwitch(True)
-        self.tg_hook_ssl.toggled.connect(self._on_hook_ssl_toggle)
-        hook.add(
-            "校验 TLS 证书",
-            _row_widget(self.tg_hook_ssl, self._sw_label("关闭后链路上可被窃听"), spacing=10),
-        )
-
-        # 只在关闭校验时出现（P1-4）：这是明确的安全降级，必须当场说清代价
-        self.warn_hook = WarnBanner(
-            "已关闭 TLS 证书校验：告警内容在链路上可能被中间人窃听或篡改。"
-            "仅用于排查老旧服务器（如 Server 2008 R2 的 TLS 兼容问题），问题解决后请立即恢复。",
-            level="danger",
-        )
-        self.warn_hook.setVisible(False)
-        hook.add_block(self.warn_hook)
-
-        self.lbl_hook_state = QLabel("未测试")
-        self.lbl_hook_state.setObjectName("form_hint")
-        self.lbl_hook_state.setWordWrap(True)
-        b_hook_test = QPushButton("发送测试")
-        b_hook_test.setObjectName("btn_outline")
-        b_hook_test.clicked.connect(self._test_webhook)
-        hook.add("连通性", _row_widget(self.lbl_hook_state, b_hook_test, spacing=10))
-        lay.addWidget(hook)
-
-        note_hook = QLabel(
-            "告警以 JSON POST 送达：ip / level / score / reason / geo / local_port / ts / host；"
-            "配置密钥后附带 X-PortGuard-Signature（对端用同一密钥复算即可验真伪）。"
-            "推送在后台线程进行并按限流发送，不影响界面响应。"
-        )
-        note_hook.setObjectName("hint")
-        note_hook.setWordWrap(True)
-        lay.addWidget(note_hook)
         lay.addStretch(1)
         return page
 
@@ -682,11 +493,35 @@ class SettingsPage(QWidget):
         self.tg_xdb_start = ToggleSwitch(True)
         self.tg_xdb_download = ToggleSwitch(True)
 
-        self.ed_xdb_source = QLineEdit()
-        self.ed_xdb_source.setPlaceholderText(
-            "留空使用内置源（CDN / 官方 / 镜像 / Gitee 自动容错）；也可填自定义镜像，用 {path} 占位"
+        # 自定义镜像源：可编辑下拉框 + 增删。下拉里**全部条目都会保存**，
+        # 同步时按列表顺序依次尝试，全挂才回落内置源 —— 所以「选中哪一条」
+        # 不影响结果，只是一个待编辑的槽位（_wire_dirty 里对它豁免）。
+        self.cb_xdb_source = QComboBox()
+        self.cb_xdb_source.setEditable(True)
+        # 回车不自动入列表：否则「打完字想先看看」就变成悄悄加了一条
+        self.cb_xdb_source.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.cb_xdb_source.setMinimumWidth(400)
+        self.cb_xdb_source.setMaximumWidth(600)
+        self.cb_xdb_source.setToolTip(
+            f"最多 {xdb_updater.MAX_CUSTOM_SOURCES} 条，按列表顺序依次尝试，全部失败才回落内置源。\n"
+            "地址用 {path} 占位，例如 https://mirror.example.com/ip2region/{path}\n"
+            "自定义域名不必加白名单，但不允许指向内网 / 回环地址（防 SSRF）。"
         )
-        self.ed_xdb_source.setMaximumWidth(560)
+        _le = self.cb_xdb_source.lineEdit()
+        if _le is not None:
+            _le.setPlaceholderText("留空用内置源；自定义镜像用 {path} 占位")
+        self.lbl_xdb_src = QLabel("")
+        self.lbl_xdb_src.setObjectName("form_hint")
+
+        self.btn_xdb_src_add = QPushButton("添加")
+        self.btn_xdb_src_add.setObjectName("btn_outline")
+        self.btn_xdb_src_add.setToolTip("把输入框里的地址加入列表")
+        self.btn_xdb_src_add.clicked.connect(self._add_xdb_source)
+
+        self.btn_xdb_src_del = QPushButton("删除")
+        self.btn_xdb_src_del.setObjectName("btn_outline")
+        self.btn_xdb_src_del.setToolTip("从列表里移除当前选中 / 输入的地址")
+        self.btn_xdb_src_del.clicked.connect(self._del_xdb_source)
 
         xdb.add("自动检查更新", self.tg_xdb_auto)
         xdb.add("检查间隔", self.sp_xdb_interval)
@@ -700,7 +535,16 @@ class SettingsPage(QWidget):
                 spacing=8,
             ),
         )
-        xdb.add("自定义镜像源", self.ed_xdb_source)
+        xdb.add(
+            "自定义镜像源",
+            _row_widget(
+                self.cb_xdb_source,
+                self.btn_xdb_src_add,
+                self.btn_xdb_src_del,
+                self.lbl_xdb_src,
+                spacing=8,
+            ),
+        )
 
         self.xdb_bar = QProgressBar()
         self.xdb_bar.setRange(0, 100)
@@ -890,7 +734,7 @@ class SettingsPage(QWidget):
         把行标成可复用，磁盘不会因此变小，真正归还空间得靠 VACUUM。
 
         耗时操作（VACUUM / 恢复）一律丢后台线程，结果经 `db_task_done` 回到主线程，
-        worker 绝不碰控件 —— 与离线库同步、Webhook 测试同一个套路。
+        worker 绝不碰控件 —— 与离线库同步同一个套路。
         """
         div = QFrame()
         div.setObjectName("panel_divider")
@@ -1062,7 +906,7 @@ class SettingsPage(QWidget):
         self.tbl_audit.setWordWrap(False)
         self.tbl_audit.setTabKeyNavigation(False)
         self.tbl_audit.verticalHeader().setVisible(False)
-        self.tbl_audit.verticalHeader().setDefaultSectionSize(26)
+        self.tbl_audit.verticalHeader().setDefaultSectionSize(30)
         self.tbl_audit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         align_headers(self.tbl_audit, AUDIT_CENTER_COLS)
         hh = self.tbl_audit.horizontalHeader()
@@ -1085,7 +929,7 @@ class SettingsPage(QWidget):
         self.btn_audit_next.setFixedWidth(80)
         self.btn_audit_next.clicked.connect(lambda: self._goto_audit_page(self._audit_page + 1))
         self.lbl_audit_page = QLabel("共 0 条，第 1/1 页")
-        self.lbl_audit_page.setStyleSheet(f"color:{C.text_secondary};font-size:12px;")
+        self.lbl_audit_page.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
         pager.addWidget(self.btn_audit_prev)
         pager.addWidget(self.btn_audit_next)
         pager.addSpacing(6)
@@ -1096,7 +940,7 @@ class SettingsPage(QWidget):
         self.lbl_audit_hint = QLabel(
             "记录谁在何时做了什么：本机操作记 Windows 用户名，"
             "程序自动（到期巡检 / 定期清理 / 自动封禁）记 system，"
-            "HTTP 上报触发的记 http:<来源IP>。"
+            "老库里还留着 1.1.0 之前 HTTP 上报触发的 http:<来源IP>。"
         )
         self.lbl_audit_hint.setObjectName("form_hint")
         self.lbl_audit_hint.setWordWrap(True)
@@ -1211,7 +1055,7 @@ class SettingsPage(QWidget):
     def _sw_label(text: str) -> QLabel:
         """开关右侧的小字说明"""
         lb = QLabel(text)
-        lb.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
+        lb.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
         return lb
 
     def _wire_dirty(self) -> None:
@@ -1223,11 +1067,24 @@ class SettingsPage(QWidget):
         for sp in self.findChildren(QSpinBox):
             sp.valueChanged.connect(self._mark_dirty)
         for le in self.findChildren(QLineEdit):
+            # 镜像源下拉自带的输入框：setCurrentIndex 会改写它的文本，
+            # 但「选中哪一条」不改变保存结果（列表全部都会存），记成未保存
+            # 会误导。它只在**用户真的打字**（textEdited）时算改动。
+            if le is self.cb_xdb_source.lineEdit():
+                continue
             le.textChanged.connect(self._mark_dirty)
         for cb in self.findChildren(QComboBox):
+            if cb is self.cb_xdb_source:
+                continue
             cb.currentIndexChanged.connect(self._mark_dirty)
         for tg in self.findChildren(ToggleSwitch):
             tg.toggled.connect(self._mark_dirty)
+        # 镜像源：打字算改动，增删条目由 _add/_del_xdb_source 自己点亮；
+        # 文本变化一律重算「已填 N 条」。
+        _le = self.cb_xdb_source.lineEdit()
+        if _le is not None:
+            _le.textEdited.connect(self._mark_dirty)
+            _le.textChanged.connect(self._refresh_xdb_src_hint)
 
     def _mark_dirty(self, *_args) -> None:
         if not self._loading:
@@ -1238,7 +1095,7 @@ class SettingsPage(QWidget):
         if dirty:
             self._hint_timer.stop()
             self.lbl_dirty.setText("● 未保存")
-            self.lbl_dirty.setStyleSheet(f"color:{C.warning};font-size:12px;")
+            self.lbl_dirty.setStyleSheet(f"color:{C.warning};font-size:13.5px;")
             self.lbl_dirty.setVisible(True)
         else:
             self.lbl_dirty.setVisible(False)
@@ -1248,7 +1105,7 @@ class SettingsPage(QWidget):
         """保存成功后在原位显示 4 秒提示，不弹模态框（P1-12）"""
         stamp = datetime.datetime.now().strftime("%H:%M:%S")
         self.lbl_dirty.setText(f"✓ 已保存 {stamp}")
-        self.lbl_dirty.setStyleSheet(f"color:{C.success};font-size:12px;")
+        self.lbl_dirty.setStyleSheet(f"color:{C.success};font-size:13.5px;")
         self.lbl_dirty.setVisible(True)
         self._hint_timer.start(4000)
 
@@ -1264,21 +1121,12 @@ class SettingsPage(QWidget):
     # ═══════════════════════════════════════════════
 
     def load(self) -> None:
-        # 服务
-        self.sp_port.setValue(cfg.get_int("listen_port", DEFAULT_LISTEN_PORT))
-        host = cfg.get("listen_host", DEFAULT_LISTEN_HOST)
-        self.tg_lan.setChecked(host not in ("127.0.0.1", "localhost", "::1"))
-        self.ed_key.setText(cfg.get("api_key", ""))
-        self.tg_trust_ip.setChecked(cfg.get_bool("trust_reported_ip", True))
-        self.sp_ts_skew.setValue(cfg.get_int("report_max_ts_skew_sec", DEFAULT_TS_SKEW_SEC))
-        self._on_lan_toggle(self.tg_lan.isChecked())
-
         # 离线库
         self.tg_xdb_auto.setChecked(cfg.get_bool("xdb_auto_sync", True))
         self.sp_xdb_interval.setValue(cfg.get_int("xdb_sync_interval_hours", 24))
         self.tg_xdb_start.setChecked(cfg.get_bool("xdb_sync_on_start", True))
         self.tg_xdb_download.setChecked(cfg.get_bool("xdb_auto_download", True))
-        self.ed_xdb_source.setText(cfg.get("xdb_source", ""))
+        self._set_xdb_sources(xdb_updater.custom_sources())
 
         # 封禁
         self.tg_auto.setChecked(cfg.get_bool("auto_mode", False))
@@ -1304,7 +1152,6 @@ class SettingsPage(QWidget):
             (cfg.get_int("ban_escalation_max_sec", DEFAULT_ESCALATION_MAX_SEC) + 3599) // 3600
         )
         self._on_escalation_toggle(self.tg_escalation.isChecked())
-        self.sp_rate.setValue(cfg.get_int("rate_limit_per_sec", 300))
 
         # 告警
         self.tg_sound.setChecked(cfg.get_bool("alert_sound", True))
@@ -1316,21 +1163,6 @@ class SettingsPage(QWidget):
         )
         self.cb_popup.setCurrentIndex(max(0, min(idx, self.cb_popup.count() - 1)))
         self.sp_merge.setValue(cfg.get_int("alert_merge_sec", 60))
-
-        # 外部告警通道（Webhook）
-        self.tg_hook.setChecked(cfg.get_bool("webhook_enabled", False))
-        self.ed_hook_url.setText(cfg.get("webhook_url", ""))
-        self.ed_hook_secret.setText(cfg.get("webhook_secret", ""))
-        lvl = (cfg.get("webhook_min_level", LEVEL_HIGH) or LEVEL_HIGH).strip().lower()
-        self.cb_hook_level.setCurrentIndex(
-            max(0, LEVEL_ITEMS.index(lvl)) if lvl in LEVEL_ITEMS else 2
-        )
-        self.sp_hook_timeout.setValue(cfg.get_int("webhook_timeout_sec", 10))
-        self.sp_hook_max.setValue(cfg.get_int("webhook_max_per_min", 20))
-        self.tg_hook_http.setChecked(cfg.get_bool("webhook_allow_http", False))
-        self.tg_hook_ssl.setChecked(cfg.get_bool("webhook_verify_ssl", True))
-        self._on_hook_toggle(self.tg_hook.isChecked())
-        self._on_hook_ssl_toggle(self.tg_hook_ssl.isChecked())
 
         # 数据（四张表各自的保留期）
         self.sp_retention.setValue(cfg.get_int("log_retention_days", DEFAULT_LOG_RETENTION_DAYS))
@@ -1348,7 +1180,6 @@ class SettingsPage(QWidget):
         self.sp_cache.setValue(cfg.get_int("geo_cache_size", 20000))
 
         self._on_auto_toggle(self.tg_auto.isChecked())
-        self._refresh_server_state()
         self.refresh_xdb_state()
 
         # 本机端口访问观察
@@ -1360,28 +1191,8 @@ class SettingsPage(QWidget):
         self._set_dirty(False)
 
     def save(self) -> None:
-        # 局域网监听 + 空 Key 是危险组合：保存时强制作出选择
-        lan = self.tg_lan.isChecked()
-        key = self.ed_key.text().strip()
-        if lan and not key:
-            key = secrets.token_urlsafe(24)
-            self.ed_key.setText(key)
-            QMessageBox.information(
-                self,
-                "已自动生成 API Key",
-                "监听局域网地址必须设置 API Key，已自动生成一个：\n\n"
-                f"{key}\n\n请复制到业务系统的 X-API-Key 请求头。",
-            )
-
         cfg.set_many(
             {
-                "listen_port": self.sp_port.value(),
-                # 用户显式打开「允许局域网访问」时才监听全网卡；此时强制 API Key
-                # （上面已自动生成），因此这是有意为之，不是配置疏漏。
-                "listen_host": WILDCARD_HOST if lan else DEFAULT_LISTEN_HOST,
-                "api_key": key,
-                "trust_reported_ip": "1" if self.tg_trust_ip.isChecked() else "0",
-                "report_max_ts_skew_sec": self.sp_ts_skew.value(),
                 "auto_mode": "1" if self.tg_auto.isChecked() else "0",
                 "auto_ban_threshold": self.sp_threshold.value(),
                 "default_ban_duration_sec": self.sp_duration.value() * 60,
@@ -1394,7 +1205,6 @@ class SettingsPage(QWidget):
                 # 上限 365 天 = app.ban_service.MAX_BAN_SECONDS，别改大：
                 # 超出部分会被 prepare() 里的 clamp_int 静默截断
                 "ban_escalation_max_sec": self.sp_esc_max.value() * 3600,
-                "rate_limit_per_sec": self.sp_rate.value(),
                 "alert_sound": "1" if self.tg_sound.isChecked() else "0",
                 "alert_popup_level": (
                     "none"
@@ -1402,14 +1212,6 @@ class SettingsPage(QWidget):
                     else LEVEL_ITEMS[self.cb_popup.currentIndex() - 1]
                 ),
                 "alert_merge_sec": self.sp_merge.value(),
-                "webhook_enabled": "1" if self.tg_hook.isChecked() else "0",
-                "webhook_url": self.ed_hook_url.text().strip(),
-                "webhook_secret": self.ed_hook_secret.text().strip(),
-                "webhook_min_level": LEVEL_ITEMS[max(0, self.cb_hook_level.currentIndex())],
-                "webhook_timeout_sec": self.sp_hook_timeout.value(),
-                "webhook_max_per_min": self.sp_hook_max.value(),
-                "webhook_allow_http": "1" if self.tg_hook_http.isChecked() else "0",
-                "webhook_verify_ssl": "1" if self.tg_hook_ssl.isChecked() else "0",
                 "log_retention_days": self.sp_retention.value(),
                 # 另外三张表各自的保留期（语义见 core.config.DEFAULT_*_RETENTION_DAYS）
                 "risk_retention_days": self.sp_risk_retention.value(),
@@ -1422,7 +1224,8 @@ class SettingsPage(QWidget):
                 "xdb_sync_interval_hours": self.sp_xdb_interval.value(),
                 "xdb_sync_on_start": "1" if self.tg_xdb_start.isChecked() else "0",
                 "xdb_auto_download": "1" if self.tg_xdb_download.isChecked() else "0",
-                "xdb_source": self.ed_xdb_source.text().strip(),
+                "xdb_source": "",  # 1.1.0 的单条字段：迁到 xdb_sources 后清空，避免两处打架
+                "xdb_sources": json.dumps(self._xdb_sources(), ensure_ascii=False),
             }
         )
 
@@ -1453,8 +1256,8 @@ class SettingsPage(QWidget):
         except Exception:
             log.exception("应用日志保留天数失败")
 
-        # 审计：只记「改了哪些键」，不记值 —— api_key / webhook_secret 是
-        # 真正的凭据，把新值写进审计表等于把密钥复制一份到明文可查的地方。
+        # 审计：只记「改了哪些键」，不记值 —— 把配置值抄进审计表等于
+        # 把一份快照存到明文可查的地方，将来改了配置反而对不上。
         audit.record(
             audit.ACTION_SETTINGS_SAVE,
             target_type="setting",
@@ -1462,14 +1265,11 @@ class SettingsPage(QWidget):
             after={
                 "auto_mode": self.tg_auto.isChecked(),
                 "auto_ban_threshold": self.sp_threshold.value(),
-                "listen_host": WILDCARD_HOST if lan else DEFAULT_LISTEN_HOST,
                 "log_retention_days": self.sp_retention.value(),
                 "risk_retention_days": self.sp_risk_retention.value(),
                 "ban_retention_days": self.sp_ban_retention.value(),
                 "audit_retention_days": self.sp_audit_retention.value(),
-                "webhook_enabled": self.tg_hook.isChecked(),
             },
-            detail="API Key 与 Webhook 密钥的值不写入审计",
         )
 
         self._set_dirty(False)
@@ -1485,41 +1285,10 @@ class SettingsPage(QWidget):
         )
         self.warn_auto.setVisible(bool(on))
 
-    def _on_lan_toggle(self, on: bool) -> None:
-        self.lbl_lan.setText(
-            "已开启：局域网内其他主机可上报（需 API Key）" if on else "已关闭（推荐）：仅本机可上报"
-        )
-        self.warn_lan.setVisible(bool(on))
-
     def _on_escalation_toggle(self, on: bool) -> None:
         """递增关闭时倍数 / 封顶没有意义，置灰避免用户以为改了会生效"""
         self.sp_esc_factor.setEnabled(on)
         self.sp_esc_max.setEnabled(on)
-
-    def _toggle_key_echo(self) -> None:
-        if self.ed_key.echoMode() == QLineEdit.EchoMode.Password:
-            self.ed_key.setEchoMode(QLineEdit.EchoMode.Normal)
-        else:
-            self.ed_key.setEchoMode(QLineEdit.EchoMode.Password)
-
-    def _generate_key(self) -> None:
-        self.ed_key.setText(secrets.token_urlsafe(24))
-        self.ed_key.setEchoMode(QLineEdit.EchoMode.Normal)
-
-    def _copy_key(self) -> None:
-        """复制 Key：只改按钮文案做反馈，不弹模态框"""
-        QApplication.clipboard().setText(self.ed_key.text().strip())
-        self._flash_copied("API Key 已复制")
-
-    def _copy_endpoint(self) -> None:
-        QApplication.clipboard().setText(self._report_url)
-        self._flash_copied("上报地址已复制")
-
-    def _flash_copied(self, text: str) -> None:
-        self.lbl_dirty.setText(f"✓ {text}")
-        self.lbl_dirty.setStyleSheet(f"color:{C.success};font-size:12px;")
-        self.lbl_dirty.setVisible(True)
-        self._hint_timer.start(2500)
 
     # ═══════════════════════════════════════════════
     #  本机端口观察
@@ -1602,7 +1371,7 @@ class SettingsPage(QWidget):
                     f"运行中 · 端口 {len(ports)} 个 · 已采集 {st.get('emitted', 0)} 条"
                     f" · 去重 {st.get('deduped', 0)} 条"
                 )
-                self.lbl_watch_state.setStyleSheet(f"color:{C.success};font-size:12.5px;")
+                self.lbl_watch_state.setStyleSheet(f"color:{C.success};font-size:13.5px;")
             else:
                 bits = ["未启动"]
                 if not win_net.available():
@@ -1610,7 +1379,7 @@ class SettingsPage(QWidget):
                 if not win_fwlog.logging_enabled():
                     bits.append("（防火墙日志未开启）")
                 self.lbl_watch_state.setText(" ".join(bits))
-                self.lbl_watch_state.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
+                self.lbl_watch_state.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         except Exception:
             log.debug("刷新本机观察状态失败", exc_info=True)
 
@@ -1640,40 +1409,6 @@ class SettingsPage(QWidget):
         self.tg_watch_pid.setChecked(cfg.get_bool("watch_resolve_pid", True))
         self.tg_watch_skip.setChecked(cfg.get_bool("watch_skip_history", True))
         self.tg_watch_autoban.setChecked(cfg.get_bool("watch_auto_ban", False))
-
-    # ═══════════════════════════════════════════════
-    #  服务控制
-    # ═══════════════════════════════════════════════
-
-    def _toggle_server(self) -> None:
-        self.server_toggled.emit(not report_server.is_running())
-
-    def refresh_server_state(self) -> None:
-        self._refresh_server_state()
-
-    def _refresh_server_state(self) -> None:
-        running = report_server.is_running()
-        port = report_server.get_port() or self.sp_port.value()
-        fallback = WILDCARD_HOST if self.tg_lan.isChecked() else DEFAULT_LISTEN_HOST
-        host = report_server.get_host() if running else fallback
-        if running:
-            self.btn_server.setText("停止服务")
-            self.btn_server.setObjectName("btn_danger")
-            self.lbl_server_state.setText(f"运行中，监听 {host}:{port}")
-            self.lbl_server_state.setStyleSheet(f"color:{C.success};font-size:12.5px;")
-        else:
-            self.btn_server.setText("启动服务")
-            self.btn_server.setObjectName("btn_success")
-            self.lbl_server_state.setText("未启动")
-            self.lbl_server_state.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
-        self.btn_server.style().unpolish(self.btn_server)
-        self.btn_server.style().polish(self.btn_server)
-
-        shown = "127.0.0.1" if host in ("127.0.0.1", "localhost", "::1") else host
-        self._report_url = f"http://{shown}:{port}/api/v1/access/report"
-        self.lbl_endpoint.setText(
-            f"POST {self._report_url}\nGET  http://{shown}:{port}/api/v1/health"
-        )
 
     # ═══════════════════════════════════════════════
     #  离线库状态
@@ -1731,7 +1466,7 @@ class SettingsPage(QWidget):
             color = C.success
         elif stage in ("download", "verify", "apply", "reload", "check"):
             color = C.warning
-        self.lbl_xdb_progress.setStyleSheet(f"color:{color};font-size:12.5px;")
+        self.lbl_xdb_progress.setStyleSheet(f"color:{color};font-size:13.5px;")
         if stage in ("done", "uptodate", "failed"):
             self.refresh_xdb_state()
 
@@ -1749,6 +1484,89 @@ class SettingsPage(QWidget):
         ):
             return
         self.xdb_sync_requested.emit(True)
+
+    # ── 自定义镜像源（下拉多值） ──
+
+    def _xdb_items(self) -> List[str]:
+        """下拉列表里已确认的条目（不含输入框里尚未「添加」的那一条）。"""
+        return [
+            self.cb_xdb_source.itemText(i).strip()
+            for i in range(self.cb_xdb_source.count())
+            if self.cb_xdb_source.itemText(i).strip()
+        ]
+
+    def _xdb_sources(self) -> List[str]:
+        """要落库的全部源：列表条目 + 当前输入框内容（用户随手打了没点「添加」也不丢）。"""
+        out: List[str] = []
+        seen = set()
+        texts = self._xdb_items()
+        texts.append(self.cb_xdb_source.currentText())
+        for raw in texts:
+            t = (raw or "").strip()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+            if len(out) >= xdb_updater.MAX_CUSTOM_SOURCES:
+                break
+        return out
+
+    def _set_xdb_sources(self, items: List[str]) -> None:
+        """回填下拉（load 用）。屏蔽信号，否则会点亮「未保存」。"""
+        self.cb_xdb_source.blockSignals(True)
+        self.cb_xdb_source.clear()
+        for t in list(items)[: xdb_updater.MAX_CUSTOM_SOURCES]:
+            self.cb_xdb_source.addItem(t)
+        if self.cb_xdb_source.count():
+            self.cb_xdb_source.setCurrentIndex(0)
+        else:
+            self.cb_xdb_source.setCurrentIndex(-1)
+            self.cb_xdb_source.setEditText("")
+        self.cb_xdb_source.blockSignals(False)
+        self._refresh_xdb_src_hint()
+
+    def _refresh_xdb_src_hint(self, *_args) -> None:
+        """右侧小字：告诉用户「填了几条、按什么顺序生效」。"""
+        items = self._xdb_items()
+        pending = self.cb_xdb_source.currentText().strip()
+        extra = 1 if pending and pending not in items else 0
+        n = len(items) + extra
+        if n:
+            self.lbl_xdb_src.setText(f"已填 {n} 条，按列表顺序依次尝试")
+        else:
+            self.lbl_xdb_src.setText("未填 → 只用内置源")
+        # 只有「输入框里有字」或「列表非空」时才有东西可删
+        self.btn_xdb_src_del.setEnabled(bool(pending) or bool(items))
+
+    def _add_xdb_source(self) -> None:
+        text = self.cb_xdb_source.currentText().strip()
+        if not text:
+            return
+        if text in self._xdb_items():
+            self._refresh_xdb_src_hint()
+            return
+        if self.cb_xdb_source.count() >= xdb_updater.MAX_CUSTOM_SOURCES:
+            self._refresh_xdb_src_hint()
+            return
+        self.cb_xdb_source.addItem(text)
+        self.cb_xdb_source.setCurrentIndex(self.cb_xdb_source.count() - 1)
+        self._refresh_xdb_src_hint()
+        self._mark_dirty()
+
+    def _del_xdb_source(self) -> None:
+        idx = self.cb_xdb_source.currentIndex()
+        if idx < 0:
+            # 只是打了字还没入列表：清空输入框即可
+            self.cb_xdb_source.setEditText("")
+        else:
+            self.cb_xdb_source.removeItem(idx)
+            if self.cb_xdb_source.count():
+                self.cb_xdb_source.setCurrentIndex(min(idx, self.cb_xdb_source.count() - 1))
+            else:
+                self.cb_xdb_source.setCurrentIndex(-1)
+                self.cb_xdb_source.setEditText("")
+        self._refresh_xdb_src_hint()
+        self._mark_dirty()
 
     # ═══════════════════════════════════════════════
     #  离线库备份与回滚
@@ -1801,7 +1619,7 @@ class SettingsPage(QWidget):
         else:
             text = "尚无备份。每次在线同步换库前都会自动备份，届时这里会列出可回滚的版本。"
         self.lbl_bak.setText(text)
-        self.lbl_bak.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_bak.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
 
     def _restore_backup(self) -> None:
         row = self.tbl_bak.currentRow()
@@ -1944,7 +1762,7 @@ class SettingsPage(QWidget):
         else:
             text = "尚无数据库备份。先点「立即备份」打一份快照，之后才能恢复。"
         self.lbl_db_bak.setText(text)
-        self.lbl_db_bak.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+        self.lbl_db_bak.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
 
     def _db_run(self, kind: str, fn) -> None:
         """把耗时任务丢到后台线程，同一时刻只允许一个。
@@ -1975,7 +1793,7 @@ class SettingsPage(QWidget):
             b.setEnabled(not busy)
         if busy:
             self.lbl_db_state.setText(text)
-            self.lbl_db_state.setStyleSheet(f"color:{C.warning};font-size:12.5px;")
+            self.lbl_db_state.setStyleSheet(f"color:{C.warning};font-size:13.5px;")
             QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
             self._db_cursor = True
         else:
@@ -2005,7 +1823,7 @@ class SettingsPage(QWidget):
         else:
             text = f"✗ {DB_TASK_NAME.get(kind, kind)}失败：{msg}"
         self.lbl_db_state.setText(text)
-        self.lbl_db_state.setStyleSheet(f"color:{C.success if ok else C.danger};font-size:12.5px;")
+        self.lbl_db_state.setStyleSheet(f"color:{C.success if ok else C.danger};font-size:13.5px;")
 
         self._audit_db_task(kind, ok, msg)
 
@@ -2015,7 +1833,6 @@ class SettingsPage(QWidget):
             self._loading = True
             try:
                 self.load()
-                self.refresh_server_state()
             finally:
                 self._loading = False
             self._set_dirty(False)
@@ -2099,54 +1916,6 @@ class SettingsPage(QWidget):
                 "local_port": 8080,
             }
         )
-
-    # ═══════════════════════════════════
-    #  外部告警通道（Webhook）
-    # ═══════════════════════════════════
-
-    def _on_hook_toggle(self, on: bool) -> None:
-        self.lbl_hook.setText(
-            "启用后按推送级别实时外发" if on else "关闭：仅本机托盘 / 声音 / 弹窗"
-        )
-
-    def _on_hook_ssl_toggle(self, on: bool) -> None:
-        self.warn_hook.setVisible(not on)
-
-    def _toggle_secret_echo(self) -> None:
-        if self.ed_hook_secret.echoMode() == QLineEdit.EchoMode.Password:
-            self.ed_hook_secret.setEchoMode(QLineEdit.EchoMode.Normal)
-        else:
-            self.ed_hook_secret.setEchoMode(QLineEdit.EchoMode.Password)
-
-    def _webhook_form(self) -> dict:
-        """表单当前值（含未保存的改动），供「发送测试」直接验证"""
-        return {
-            "url": self.ed_hook_url.text().strip(),
-            "secret": self.ed_hook_secret.text().strip(),
-            "timeout": self.sp_hook_timeout.value(),
-            "allow_http": self.tg_hook_http.isChecked(),
-            "verify_ssl": self.tg_hook_ssl.isChecked(),
-        }
-
-    def _test_webhook(self) -> None:
-        from app import notify_service
-
-        self.lbl_hook_state.setText("发送中…")
-        self.lbl_hook_state.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
-        notify_service.get_service().test(
-            overrides=self._webhook_form(), on_done=self.webhook_result.emit
-        )
-
-    def _on_webhook_result(self, res) -> None:
-        ok, kind, status, message = res
-        if ok:
-            text, color = f"✓ 已送达（HTTP {status}）", C.success
-        else:
-            text = f"✗ {message}"
-            # 「配置不对」是提醒而不是故障，别用红色吓人
-            color = C.warning if kind in ("invalid", "timeout") else C.danger
-        self.lbl_hook_state.setText(text)
-        self.lbl_hook_state.setStyleSheet(f"color:{color};font-size:12.5px;")
 
     def _clean_logs(self) -> None:
         """

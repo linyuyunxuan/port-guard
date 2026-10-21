@@ -43,7 +43,7 @@ def test_settings_hits_cache_not_db(monkeypatch):
 
     monkeypatch.setattr(cfg.database, "get_setting_optional", counting)
     for _ in range(3):
-        cfg.get("listen_port")
+        cfg.get("auto_mode")
     assert calls["n"] == 0, "预热后回源次数应为 0（全部命中缓存）"
 
 
@@ -144,28 +144,6 @@ def test_migration_refuses_future_version():
     finally:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.close()
-
-
-def test_legacy_insecure_settings_are_fixed():
-    """老库「监听 0.0.0.0 且 Key 为空」必须被收敛回 127.0.0.1"""
-    import core.database as db
-    from core.database import _connect, _fix_insecure_legacy_settings
-
-    init_db()
-    conn = _connect()
-    try:
-        conn.execute("UPDATE settings SET value='0.0.0.0' WHERE key='listen_host'")
-        conn.execute("UPDATE settings SET value='' WHERE key='api_key'")
-        conn.execute("DELETE FROM settings WHERE key='_security_migrated_v110'")
-        conn.commit()
-        _fix_insecure_legacy_settings(conn)
-        host = conn.execute("SELECT value FROM settings WHERE key='listen_host'").fetchone()[
-            "value"
-        ]
-        assert host == "127.0.0.1"
-    finally:
-        conn.close()
-    _ = db
 
 
 def test_update_ban_rejects_unknown_columns():

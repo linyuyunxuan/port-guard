@@ -10,12 +10,9 @@ PortGuard 端到端自检（离屏运行，不需要显示器）
 规则 —— 封禁只跑到 prepare() 的校验阶段就停。
 """
 
-import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 from typing import Any, List
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -36,7 +33,7 @@ app = QApplication(sys.argv)
 
 # ── 1. 后端初始化（与 main.py 完全同一条路径）──
 import main as app_main
-from core import db_writer, report_server, xdb_updater
+from core import db_writer, xdb_updater
 from core import settings as cfg
 from core.config import APP_VERSION
 from core.database import count_today, query_access_logs, query_risk_events
@@ -46,7 +43,7 @@ from core.rule_engine import get_engine
 
 app_main._init_backend()
 check("后端初始化（日志/数据库/设置缓存/批量写入器）", cfg.is_warmed())
-check("APP_VERSION", APP_VERSION == "1.1.0", APP_VERSION)
+check("APP_VERSION", APP_VERSION == "1.2.0", APP_VERSION)
 
 # 自检期间必须关掉自动封禁与弹窗告警：本脚本会喂入「恶意样本」，
 # 若开着自动封禁、又恰好以管理员身份运行，就会真的往系统防火墙上写规则。
@@ -87,48 +84,52 @@ check(
     f"auto_sync={st['auto_sync']} interval={st['interval_hours']}h",
 )
 
-# ── 4. 上报处理 + 批量落库 ──
-from core.report_server import _process
+# ── 4. 采集记录处理 + 批量落库（与本机观察器同一条链路）──
+from core.pipeline import process_record
 
 n_acc_before = len(query_access_logs(1000))
 
 t0 = time.perf_counter()
-r1 = _process(
-    {
-        "ip": "113.118.113.77",
-        "local_port": 3000,
-        "protocol": "http",
-        "method": "GET",
-        "path": "/api/products",
-        "status_code": 200,
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
-        "bytes": 1024,
-    },
-    "113.118.113.77",
+r1 = process_record(
+    AccessRecord(
+        ip="113.118.113.77",
+        local_port=3000,
+        protocol="tcp",
+        method="GET",
+        path="/api/products",
+        status_code=200,
+        user_agent="Mozilla/5.0 (Windows NT 10.0)",
+        size=1024,
+        tags={"channel": "table"},
+    ),
+    allow_auto_ban=False,
+    actor="system",
 )
 check(
     "正常访问判定",
-    r1["risk_level"] == "normal" and r1["suggest_ban"] is False,
-    f"score={r1['risk_score']} geo={r1['geo']}",
+    r1.level == "normal" and r1.suggest_ban is False,
+    f"score={r1.score} disposition={r1.disposition}",
 )
 
-r2 = _process(
-    {
-        "ip": "45.33.32.156",
-        "local_port": 8080,
-        "protocol": "http",
-        "method": "POST",
-        "path": "/admin/login",
-        "status_code": 401,
-        "user_agent": "sqlmap/1.7",
-        "bytes": 512,
-    },
-    "45.33.32.156",
+r2 = process_record(
+    AccessRecord(
+        ip="45.33.32.156",
+        local_port=8080,
+        protocol="http",
+        method="POST",
+        path="/admin/login",
+        status_code=401,
+        user_agent="sqlmap/1.7",
+        size=512,
+        tags={"channel": "table"},
+    ),
+    allow_auto_ban=False,
+    actor="system",
 )
 check(
     "恶意访问判定（单次只告警，不封禁）",
-    r2["risk_score"] >= 45 and "scanner_ua" in r2["matched_rules"],
-    f"score={r2['risk_score']} level={r2['risk_level']} rules={r2['matched_rules']}",
+    r2.score >= 45 and "scanner_ua" in r2.matched_rules,
+    f"score={r2.score} level={r2.level} rules={r2.matched_rules}",
 )
 
 check("批量写入排空", db_writer.get_writer().flush(timeout=5))
@@ -229,9 +230,11 @@ check(
     f"今日风险={win.page_monitor.card_risk.value_lbl.text()}",
 )
 
-# 设置页（本次新增：局域网开关 / 离线库在线同步组）
+# 设置页（封禁策略 / 离线库在线同步组）
 check(
-    "设置页-监听端口", win.page_settings.sp_port.value() > 0, str(win.page_settings.sp_port.value())
+    "设置页-封禁策略组",
+    win.page_settings.sp_threshold.value() > 0,
+    f"阈值={win.page_settings.sp_threshold.value()}",
 )
 check(
     "设置页-离线库同步组已就绪",
@@ -332,89 +335,14 @@ check(
     f"score={rec.risk_score} duration={rec.duration_sec}s status={rec.status}",
 )
 
-# ── 7. 真实 HTTP 服务 ──
-PORT = 18099
-# 真实库里可能已经设了 API Key，测接口时带上，避免自检把鉴权当失败
-API_KEY = cfg.get("api_key", "")
-check(
-    "启动接收服务",
-    report_server.start_server(PORT, API_KEY),
-    f"running={report_server.is_running()} port={report_server.get_port()} "
-    f"key={'已启用' if API_KEY else '未启用'}",
-)
-time.sleep(1.2)
-
-# 本机 curl/urllib 默认走系统代理，测本地端口必须绕开代理
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-
-def http(path: str, payload=None, headers=None):
-    url = f"http://127.0.0.1:{PORT}{path}"
-    data = json.dumps(payload).encode() if payload is not None else None
-    h = {"Content-Type": "application/json"}
-    if API_KEY:
-        h["X-API-Key"] = API_KEY
-    h.update(headers or {})
-    req = urllib.request.Request(url, data=data, headers=h)
-    with opener.open(req, timeout=6) as resp:
-        return resp.status, resp.read().decode()
-
-
-def http_expect_error(path: str, payload=None, headers=None):
-    try:
-        return http(path, payload, headers)
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
-
-
-try:
-    code, body = http("/api/v1/health")
-    check("GET /api/v1/health", code == 200 and '"status":"ok"' in body, body[:140])
-
-    code, body = http("/api/v1/version")
-    check("GET /api/v1/version", code == 200 and APP_VERSION in body, body[:140])
-
-    code, body = http(
-        "/api/v1/access/report",
-        {
-            "ip": "8.8.8.8",
-            "local_port": 3389,
-            "method": "GET",
-            "path": "/",
-            "status_code": 200,
-            "user_agent": "curl/8.0",
-        },
-    )
-    check("POST /api/v1/access/report", code == 200 and '"success":true' in body, body[:200])
-
-    # 注入 payload 必须在 HTTP 层被 400 拒绝
-    code, body = http_expect_error(
-        "/api/v1/access/report",
-        {"ip": '1.2.3.4"; Start-Process calc; #', "local_port": 3000, "path": "/"},
-    )
-    check("HTTP 层拒绝非法 IP（拒绝命令注入）", code == 400, body[:160])
-
-    # 交互式文档必须关闭
-    code, _ = http_expect_error("/docs")
-    check("交互式文档已关闭（/docs 404）", code == 404)
-except Exception as e:
-    check("HTTP 接口测试", False, f"{type(e).__name__}: {e}")
-finally:
-    report_server.stop_server()
-
-check("停止接收服务", not report_server.is_running())
-
-# ── 8. 无控制台启动回归（窗口化运行的真实场景）──
-# pythonw / 打包后 console=False 时 sys.stdout 与 sys.stderr 是 None。此前 uvicorn 的
-# DefaultFormatter 会因此抛 AttributeError（sys.stdout.isatty()），被 dictConfig 包成
-# 「Unable to configure formatter 'default'」——接收服务直接起不来，而界面提示的却是
-# 「可能被占用或权限不足」。这一段就是那个 bug 的回归护栏。
+# ── 7. 无控制台运行（窗口化产物的真实场景）──
+# pythonw / 打包后 console=False 时 sys.stdout 与 sys.stderr 是 None，第三方库
+# 一旦调用 sys.stdout.isatty() 就会抛 AttributeError。logger 的兜底必须仍然生效。
 _saved_out, _saved_err = sys.stdout, sys.stderr
 sys.stdout = None  # 模拟窗口化运行：无控制台
 sys.stderr = None
-_nc_ok = _nc_null_ok = False
+_nc_null_ok = False
 _nc_patched: List[str] = []
-_nc_err = _nc_detail = ""
 try:
     from core.logger import ensure_std_streams
 
@@ -429,10 +357,6 @@ try:
         _nc_null_ok = _out.isatty() is False and _err_out.isatty() is False
     except Exception:
         _nc_null_ok = False
-    _nc_ok = report_server.start_server(PORT + 1, API_KEY)
-    _nc_err = report_server.get_start_error()
-    _nc_detail = report_server.get_start_error_detail()
-    report_server.stop_server()
 finally:
     sys.stdout = _saved_out
     sys.stderr = _saved_err
@@ -441,7 +365,6 @@ check(
     "无控制台时自动兜底 std 流", set(_nc_patched) == {"stdout", "stderr"}, f"patched={_nc_patched}"
 )
 check("替身流可写且 isatty 为假", _nc_null_ok)
-check("无控制台下接收服务仍能启动", _nc_ok, f"{_nc_err} {_nc_detail[:120]}")
 
 # ── 9. 日志保留（定期清理）──
 from app import maintenance

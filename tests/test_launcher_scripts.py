@@ -27,7 +27,7 @@ BATS: List[Path] = sorted(ROOT.glob("*.bat"))
 BAT_NAMES = [p.name for p in BATS]
 
 # start.bat 是唯一带参数直通（main.py %*）的入口，能用来做端到端冒烟
-SELFCHECK_TIMEOUT = 180
+DIAG_TIMEOUT = 180
 
 
 def _known_interpreter() -> str:
@@ -103,24 +103,33 @@ def test_help_text_is_utf8() -> None:
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="批处理只在 Windows 上可执行")
-def test_start_bat_runs_selfcheck() -> None:
-    """真的执行 start.bat：证明「双击能起来」而不是「文件长得像能起来」。"""
+def test_start_bat_runs_diag() -> None:
+    """真的执行 start.bat：证明「双击能起来」而不是「文件长得像能起来」。
+
+    1.2.0 起上报服务连同 `--selfcheck` 一起删掉了，这里改用 `--diag --quiet`：
+    同样走完整的 .bat 链路（cmd 解析 → `_find_python.bat` 探测 → Python 启动），
+    而且诊断跑完自己退出。
+
+    `--quiet` 不能省：`--diag` 默认弹一个结论对话框等点击，在 CI 里没人点，
+    进程会永远挂着（subprocess 的 timeout 也救不了 —— .bat 拉起的 python
+    是孙进程，它继承的 stdout 管道不关，父进程的 communicate 会一直等）。
+    """
     if not _known_interpreter():
         pytest.skip("本机没有可用的 venv，跳过启动器端到端冒烟")
 
     # 走 .bat 而不是直接调 python：这一层要验的正是 cmd 的解析结果
     proc = subprocess.run(
-        ["cmd", "/c", str(ROOT / "start.bat"), "--selfcheck"],
+        ["cmd", "/c", str(ROOT / "start.bat"), "--diag", "--quiet"],
         cwd=str(ROOT),
         check=False,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=SELFCHECK_TIMEOUT,
+        timeout=DIAG_TIMEOUT,
     )
     out = proc.stdout.decode("utf-8", "replace")
-    assert proc.returncode == 0, f"start.bat --selfcheck 退出码 {proc.returncode}\n{out[-3000:]}"
-    # 自检本身要在日志里留「通过」，避免只看退出码
-    assert "自检结束：通过" in out or "自检：通过" in out, out[-3000:]
+    assert proc.returncode == 0, f"start.bat --diag 退出码 {proc.returncode}\n{out[-3000:]}"
+    # 诊断要真的打到结论，避免只看退出码（报告写不出来时退出码也可能是 0）
+    assert "结论" in out, out[-3000:]
     # 曾经的病灶：解释器探测失败会掉进裸 REPL，输出里会出现 >>> 提示符
     assert ">>>" not in out, f"启动器掉进了交互式 REPL：\n{out[-2000:]}"

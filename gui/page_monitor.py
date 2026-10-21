@@ -77,7 +77,7 @@ HEADERS = [
 # 端口要装下 5 位数 18080 (51)，协议要装下 HTTPS (37+16=53)，
 # 命中规则要装下「管理端口归属地检测」(108+16=124)。
 # 处置列 62：装「已放行/已拦截/仅提醒/待确认」四个三字词（实测 39 + 内边距 16）。
-COL_WIDTHS = [72, 60, 120, 146, 58, 60, 150, 52, 140, 62, 80]
+COL_WIDTHS = [83, 69, 138, 168, 67, 69, 173, 60, 161, 71, 92]
 COL_REQUEST = 6
 COL_DISPOSITION = 9
 
@@ -352,8 +352,6 @@ class MonitorPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._paused = False
-        self._server_on = False
-        self._server_port = 0
         self._empty_kind = ""
         self._capacity = cfg.get_int("monitor_buffer_size", 5000)
         self._provinces = set()
@@ -366,7 +364,7 @@ class MonitorPage(QWidget):
         root.setSpacing(12)
 
         # 标题区（56，7 页统一）
-        head = PageHeader("实时监控", "业务系统上报的每一次端口访问")
+        head = PageHeader("实时监控", "本机采集到的每一次端口访问")
         self.toggle_pause = ToggleSwitch(False)
         self.toggle_pause.toggled.connect(self._on_pause)
         head.add_action(labeled_toggle(self.toggle_pause, "暂停滚动"))
@@ -388,18 +386,18 @@ class MonitorPage(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索 IP / 路径 / User-Agent / 服务器…")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(280)
+        self.search.setFixedWidth(330)
         self.search.textChanged.connect(self._on_filter)
 
         self.scope = QComboBox()
         self.scope.addItems(["全部", "中国", "境外", "有风险", "高风险"])
-        self.scope.setFixedWidth(110)
+        self.scope.setFixedWidth(132)
         self.scope.currentTextChanged.connect(self._on_filter)
 
         self.port_filter = QSpinBox()
         self.port_filter.setRange(0, 65535)
         self.port_filter.setSpecialValueText("全部端口")
-        self.port_filter.setFixedWidth(110)
+        self.port_filter.setFixedWidth(132)
         self.port_filter.valueChanged.connect(self._on_filter)
 
         self.btn_clear = QPushButton("清空列表")
@@ -407,7 +405,7 @@ class MonitorPage(QWidget):
         self.btn_clear.clicked.connect(self._clear_view)
 
         self.lbl_count = QLabel("共 0 条")
-        self.lbl_count.setStyleSheet(f"color:{C.text_muted};font-size:11px;")
+        self.lbl_count.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
 
         bar.addWidget(self.search)
         bar.addWidget(self.scope)
@@ -439,14 +437,14 @@ class MonitorPage(QWidget):
         # 常显竖滚动条：滚动条出现/消失会让表格可视宽在 15↔25px 之间跳，
         # 结果列宽度每次翻页都变，读数时眼睛要重新找位置
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.table.verticalHeader().setDefaultSectionSize(30)
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._ctx_menu)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.setItemDelegateForColumn(1, RiskBadgeDelegate(self.table))
 
-        # 三态空态（无流量 / 服务未启动 / 筛选无结果）——之前这里只有一行灰字
-        self.empty = EmptyState("等待访问", "", "复制上报地址")
+        # 两态空态（无流量 / 筛选无结果）——之前这里只有一行灰字
+        self.empty = EmptyState("暂无访问", "开启「本机端口观察」后，命中的连接会实时出现在这里")
         self.empty.setVisible(False)
         if self.empty.btn is not None:
             self.empty.btn.clicked.connect(self._on_empty_action)
@@ -602,25 +600,19 @@ class MonitorPage(QWidget):
         self._update_empty()
 
     def _on_empty_action(self) -> None:
-        """空态按钮按当前状态分流：复制上报地址 / 去启动 / 重置筛选"""
+        """空态按钮分流：去设置页开观察 / 重置筛选"""
         if self._empty_kind == "norisk":
             self.search.clear()
             self.scope.setCurrentIndex(0)
             self.port_filter.setValue(0)
         elif self._empty_kind == "stopped":
             self.ask_settings.emit()
-        else:
-            from qtcompat import QApplication
-
-            port = self._server_port or 18080
-            QApplication.clipboard().setText(f"http://127.0.0.1:{port}/api/v1/access/report")
 
     def _update_empty(self, *_args) -> None:
         """表格与空态互斥：有行就显示表格。
 
-        三种「空」的原因完全不同，混成一句「暂无数据」等于什么都没说：
-          · 服务未启动 —— 根本不是「没流量」，是没在收
-          · 一条都没收到 —— 等服务在收，给出上报地址
+        两种「空」的原因不同，混成一句「暂无数据」等于什么都没说：
+          · 一条都没收到 —— 观察器没开或确实没人访问，引导去设置页开观察
           · 有数据但筛不出来 —— 引导重置筛选
         """
         total = self.model.total
@@ -634,19 +626,14 @@ class MonitorPage(QWidget):
         if total > 0:
             self._empty_kind = "norisk"
             self.empty.set_state("没有匹配记录", "换个关键字，或把范围改回「全部」", "重置筛选")
-        elif self._server_on:
-            self._empty_kind = "wait"
-            port = self._server_port or "监听端口"
-            self.empty.set_state("等待访问", f"接收服务已启动，{port} 尚未收到上报", "复制上报地址")
         else:
             self._empty_kind = "stopped"
-            self.empty.set_state("接收服务未启动", "启动后业务系统才能把访问记录发到本机", "去启动")
+            self.empty.set_state(
+                "暂无访问", "开启「本机端口观察」后，命中的连接会实时出现在这里", "去开启"
+            )
         self.empty.setVisible(True)
 
-    def set_stats(self, total: int, risk: int, bans: int, server_on: bool = False, port: int = 0):
-        # 服务运行态由顶部状态条统一表达；这里只留空态判定需要的信息（不额外显示）
-        self._server_on = server_on
-        self._server_port = port
+    def set_stats(self, total: int, risk: int, bans: int):
         self.card_total.set_value(total)
         self.card_risk.set_value(risk)
         self.card_ban.set_value(bans)

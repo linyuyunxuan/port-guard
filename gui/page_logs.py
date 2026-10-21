@@ -132,18 +132,18 @@ class LogsPage(QWidget):
         left.setSpacing(8)
         self.source = QComboBox()
         self.source.addItems(["程序运行日志", "端口访问日志"])
-        self.source.setFixedWidth(140)
+        self.source.setFixedWidth(164)
         self.source.currentIndexChanged.connect(self._on_source_changed)
 
         self.level = QComboBox()
         self.level.addItems([x[0] for x in LEVEL_FILTERS])
-        self.level.setFixedWidth(150)
+        self.level.setFixedWidth(170)
         self.level.currentIndexChanged.connect(self._render)
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索关键字（IP / 端口 / 规则 / 异常信息）…")
         self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(240)
+        self.search.setMinimumWidth(280)
         self.search.textChanged.connect(self._render)
 
         left.addWidget(self.source)
@@ -191,7 +191,7 @@ class LogsPage(QWidget):
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         f = QFont("Consolas")
         f.setStyleHint(QFont.StyleHint.Monospace)
-        f.setPixelSize(12)
+        f.setPixelSize(14)
         self.view.setFont(f)
         self.view.setStyleSheet(
             f"QPlainTextEdit{{background:{C.bg_input};color:{C.text_primary};"
@@ -200,7 +200,7 @@ class LogsPage(QWidget):
         )
         root.addWidget(self.view, 1)
 
-        # ── 页脚（11px 单行，只放页内统计）──
+        # ── 页脚（12.5px 单行，只放页内统计）──
         self.lbl_info = QLabel("")
         self.lbl_info.setObjectName("hint")
         root.addWidget(self.lbl_info)
@@ -213,7 +213,7 @@ class LogsPage(QWidget):
     @staticmethod
     def _sub_label(text: str) -> QLabel:
         lb = QLabel(text)
-        lb.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
+        lb.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
         return lb
 
     def _scroll_to_end(self) -> None:
@@ -436,7 +436,8 @@ def _access_row(rec: AccessRecord) -> _Row:
     elif channel == "fwlog":
         origin = f"本机采集·防火墙日志({tags.get('action', '')})"
     else:
-        origin = "业务系统上报"
+        # 1.1.0 之前业务系统可通过 HTTP 上报；这些历史记录仍要能正常显示
+        origin = "历史记录·旧版上报"
     proc = tags.get("process")
     if proc:
         origin += f"·{proc}"

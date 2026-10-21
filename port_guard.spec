@@ -12,16 +12,10 @@ PortGuard PyInstaller 打包配置
   并用 start_as_admin.bat / 界面上的「以管理员身份重启」按钮在需要时提权
 
 打包产物的运行验证（2026-10-16 实做过）：
-- **首选：`PortGuard.exe --selfcheck`** —— 在「模拟无控制台」的条件下真正启停一次接收服务，
-  退出码 0 即通过（窗口程序没有 stdout，`print` 看不到，细节看日志文件）。
-  这一步专门覆盖「窗口化 + sys.stdout 为 None」这条路径：uvicorn 的彩色 formatter 会执行
-  `sys.stdout.isatty()`，std 流为 None 时会抛 AttributeError，被 dictConfig 包成
-  「Unable to configure formatter 'default'」，表现成「接收服务启动失败」。
-- 但 `uac_admin=True` 的 exe 从非提权进程启动会直接被系统拒绝（ERROR_ELEVATION_REQUIRED），
-  所以要自动化跑 `--selfcheck` 时，另建一份 `uac_admin=False` 的临时 spec：
-      copy port_guard.spec _smoke.spec      # 把 uac_admin 改 False、name 改成 PortGuardSmoke
-      pyinstaller --noconfirm --workpath build_smoke --distpath dist_smoke _smoke.spec
-      dist_smoke\PortGuardSmoke\PortGuardSmoke.exe --selfcheck
+- **`PortGuard.exe --diag --quiet`** —— 打印系统内部版本、逐个探测运行库、扫描产物依赖闭包，
+  退出码 0 即通过。这是「拷到别的电脑跑不起来」时的第一手证据。
+- `uac_admin=True` 的 exe 从非提权进程启动会直接被系统拒绝（ERROR_ELEVATION_REQUIRED），
+  自动化验证请用 `tools/verify_exe.py`：它会自建 `uac_admin=False` 的冒烟产物再跑。
 - 判定「跑起来了」不能只看进程存活：窗口化程序崩溃时会弹错误框并一直卡住，进程同样“活着”。
   可靠做法是看 %APPDATA%/PortGuard/logs/portguard.log 里出现
   「PortGuard 后端就绪（配置项 N 条）」且没有「界面启动失败」。
@@ -109,21 +103,9 @@ for _name in _VC_RUNTIME:
     else:
         print(f"[port_guard.spec] 未找到 VC 运行库 {_name}（跳过，通常不影响）")
 
-hidden = [
-    "uvicorn.logging",
-    "uvicorn.loops",
-    "uvicorn.loops.auto",
-    "uvicorn.loops.asyncio",
-    "uvicorn.protocols",
-    "uvicorn.protocols.http",
-    "uvicorn.protocols.http.auto",
-    "uvicorn.protocols.http.h11_impl",
-    "uvicorn.protocols.websockets",
-    "uvicorn.protocols.websockets.auto",
-    "uvicorn.lifespan",
-    "uvicorn.lifespan.on",
-    "anyio._backends._asyncio",
-]
+# 没有任何需要显式声明的动态导入（原先列在这里的是 uvicorn 的协议栈，
+# 随上报接收服务一起移除了）。保留空列表是为了让 hiddenimports 的接线不动。
+hidden: list = []
 
 # 只打包真实存在的资源：离线 IP 库与会话数据已列入 .gitignore（体积大，
 # 可在设置页从上游同步），新克隆的仓库里可能没有，硬写路径会让 PyInstaller 直接报错。

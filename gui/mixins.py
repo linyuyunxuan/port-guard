@@ -7,7 +7,6 @@ PortGuard — 主窗口的行为 Mixin
 现在按职责拆开：
 - 本文件（gui/mixins.py）：与 Qt 生命周期强耦合的胶水逻辑
   · EventPumpMixin —— 事件泵 / 统计刷新 / 状态栏
-  · ServerCtlMixin —— 上报服务启停
 - app/*.py：不依赖 Qt 的业务编排（可单测）
 - gui/main_window.py：只剩界面组装与信号连线
 """
@@ -16,10 +15,8 @@ import contextlib
 import threading
 from typing import TYPE_CHECKING, Dict, Optional
 
-from app import ban_service, maintenance, server_ctl
-from app.notify_service import get_service as get_notify_service
+from app import ban_service, maintenance
 from app.xdb_service import get_service as get_xdb_service
-from core import report_server
 from core import settings as cfg
 from core.config import (
     DEFAULT_AUDIT_RETENTION_DAYS,
@@ -43,7 +40,7 @@ if TYPE_CHECKING:
     from gui.page_logs import LogsPage
     from gui.page_monitor import MonitorPage
     from gui.page_settings import SettingsPage
-    from qtcompat import QAction, QLabel, QMainWindow, QStackedWidget
+    from qtcompat import QLabel, QMainWindow, QStackedWidget
 
     # 这两个 Mixin 运行时通过 MainWindow 组合成 QMainWindow 的子类，
     # 但单看 Mixin 自身，self 只是个 object —— 类型检查器因此既认不出
@@ -173,13 +170,9 @@ class EventPumpMixin(_HostBase):
             if self.stack.currentWidget() is self.page_events:
                 self.page_events.refresh()
 
-        # 3) 告警
-        notify = get_notify_service()
+        # 3) 告警（只走程序内弹窗与托盘气泡）
         for a in bus.drain_alert(50):
             self.alerter.notify(a)
-            # 外部通道（Webhook）：入队即返回，真正的 HTTP 在后台线程。
-            # 这里绝不能同步发请求 —— 事件泵跑在 Qt 主线程上，会直接冻住界面。
-            notify.send(a)
 
         # 4) 封禁结果
         bans = bus.drain_ban(200)
@@ -223,7 +216,7 @@ class EventPumpMixin(_HostBase):
         self._set_status(f"离线库同步：{msg}", color)
         if self.lbl_xdb is not None:
             self.lbl_xdb.setText(f"IP 库 {msg[:24]}")
-            self.lbl_xdb.setStyleSheet(f"color:{color};font-size:11px;")
+            self.lbl_xdb.setStyleSheet(f"color:{color};font-size:12.5px;")
             self.lbl_xdb.setToolTip(msg)
 
         if stage == "done":
@@ -237,7 +230,7 @@ class EventPumpMixin(_HostBase):
             loc = self._locator()
             # 与 main_window._poll_geo 同一口径：状态栏只写「已加载」，细节进 tooltip
             self.lbl_geo.setText("定位库 已加载")
-            self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:11px;")
+            self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:12.5px;")
             self.lbl_geo.setToolTip(
                 f"离线定位库 v{loc.generation} · 缓存 {loc.cache_info().get('size', 0)} 条"
             )
@@ -259,15 +252,13 @@ class EventPumpMixin(_HostBase):
         except Exception:
             log.exception("统计刷新失败")
             total = risk = bans = unhandled = 0
-        self.page_monitor.set_stats(
-            total, risk, bans, report_server.is_running(), report_server.get_port()
-        )
+        self.page_monitor.set_stats(total, risk, bans)
         self.lbl_ban_count.setText(f"已封禁 {bans}")
         # 圆点颜色随计数切换：有数 danger / 0 时 success（P2-1）
         self._set_ban_count(bans)
         if unhandled:
             self.lbl_status.setText(f"有 {unhandled} 条风险事件待处理")
-            self.lbl_status.setStyleSheet(f"color:{C.warning};font-size:11px;")
+            self.lbl_status.setStyleSheet(f"color:{C.warning};font-size:12.5px;")
 
         # 状态栏上的本机观察指示 + 设置页的运行状态行
         with contextlib.suppress(Exception):
@@ -277,7 +268,7 @@ class EventPumpMixin(_HostBase):
 
     def _set_status(self, text: str, color: Optional[str] = None) -> None:
         self.lbl_status.setText(text)
-        self.lbl_status.setStyleSheet(f"color:{color or C.text_secondary};font-size:11px;")
+        self.lbl_status.setStyleSheet(f"color:{color or C.text_secondary};font-size:12.5px;")
 
     # ── 到期巡检 / 清理 ──
     def _check_expired(self) -> None:
@@ -413,64 +404,3 @@ class EventPumpMixin(_HostBase):
             return
         if svc.update_async(force=force):
             self._set_status("已开始同步离线 IP 库…", C.warning)
-
-
-class ServerCtlMixin(_HostBase):
-    """上报服务启停"""
-
-    page_settings: "SettingsPage"
-    a_server: "QAction"
-
-    # 由 EventPumpMixin 实现（MRO 中排在前面），在此声明仅供类型检查
-    def _set_status(self, text: str, color: Optional[str] = None) -> None:
-        raise NotImplementedError
-
-    def _refresh_stats(self, force: bool = False) -> None:
-        raise NotImplementedError
-
-    def _set_server_state(self, text: str, color: str) -> None:
-        raise NotImplementedError
-
-    def _maybe_start_server_on_launch(self) -> None:
-        if server_ctl.should_autostart():
-            QTimer.singleShot(600, lambda: self._toggle_server(True))
-        else:
-            self._update_server_labels()
-
-    def _toggle_server(self, start=None) -> None:
-        ok, msg = server_ctl.toggle(start)
-        if not ok:
-            self._set_status(msg.splitlines()[0], C.danger)
-            from qtcompat import QMessageBox
-
-            QMessageBox.warning(self, "启动失败", msg)
-        else:
-            color = C.success if report_server.is_running() else C.text_secondary
-            first = msg.splitlines()[0]
-            self._set_status(first, color)
-            if report_server.get_generated_key():
-                from qtcompat import QMessageBox
-
-                QMessageBox.information(
-                    self,
-                    "已启用局域网监听",
-                    msg + "\n\n安全提示：监听非本机地址时必须设置 API Key，"
-                    "否则局域网内任意主机都能伪造上报记录，"
-                    "进而污染风险判定甚至触发误封。",
-                )
-        self._update_server_labels()
-
-    def _update_server_labels(self) -> None:
-        st = server_ctl.state()
-        if st["running"]:
-            suffix = "" if st["loopback"] else "（局域网）"
-            self._set_server_state(f"接收服务 :{st['port']}{suffix}", C.success)
-            self.a_server.setText("停止接收服务")
-        else:
-            self._set_server_state("接收服务 未启动", C.text_muted)
-            self.a_server.setText("启动接收服务")
-        try:
-            self.page_settings.refresh_server_state()
-        except Exception:
-            log.exception("刷新服务状态失败")
-        self._refresh_stats(force=True)

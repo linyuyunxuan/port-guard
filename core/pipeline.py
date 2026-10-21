@@ -1,22 +1,22 @@
 """
-PortGuard — 记录处理流水线（上报来源 / 本机采集来源共用）
+PortGuard — 记录处理流水线（本机采集双通道共用）
 
 一条记录从「已经是合法的 AccessRecord」到「落库 + 投递 UI + 告警 + 自动封禁」
 的完整链路，抽成独立模块的原因：
 
-现在有**两类互不相干的来源**
-  1. 业务系统 HTTP 上报          → core/report_server.py
-  2. 本机端口访问采集（双通道）  → core/port_watcher.py
+本机采集有**两条互不相干的通道**
+  1. TCP 连接表快照   → core/port_watcher.py（table）
+  2. Windows 防火墙日志 → core/win_fwlog.py（fwlog）
 
-两条来源必须走**完全一致**的归属地查询、规则评分、落库事务、告警与自动封禁，
-否则「本机自己看到的扫描」与「业务系统上报的攻击」会得出不一致的结论 ——
-那是排障时最难查的一类问题（同一个 IP 在两处一个高危一个正常）。
+两条通道必须走**完全一致**的归属地查询、规则评分、落库事务、告警与自动封禁，
+否则「TCP 表看到的直连」与「防火墙日志看到的被丢包连接」会得出不一致的结论 ——
+那是排障时最难查的一类问题（同一个 IP 在两条通道一个高危一个正常）。
 
 本模块不依赖 Qt，可单测。
 """
 
 import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from core import settings as cfg
 from core.database import find_active_ban_by_ip
@@ -107,7 +107,7 @@ def auto_ban_record(
     # 回填 active/failed」之间的瞬态，正常情况下几毫秒就消失；而一旦进程在这
     # 个窗口里被杀掉（关机 / 崩溃），残留的 pending 就再没人回填，若把 pending
     # 也算作「已在封禁中」，这个 IP 将被永久漏封，是比偶发重复更糟的结果。
-    # 至于两条上报线程同时命中的并发窗口（微秒级），不值得为此在高频上报路径
+    # 至于两个采集通道同时命中的并发窗口（微秒级），不值得为此在高频路径
     # 上加全局锁 —— 后续真要收紧，应该走数据库唯一约束而不是锁。
     if existing is None:
         try:
@@ -156,11 +156,11 @@ def auto_ban_record(
         log.error("自动封禁失败 ip=%s err=%s", rec.ip, err)
 
     # 审计。这里必须记 —— 自动封禁是**唯一没有人在场**的封禁路径，
-    # 事后「这个 IP 为什么被封」只能靠这条记录回答。actor 由调用方带进来：
-    # HTTP 上报是 `http:<来源IP>`，本机采集是 `system`（见 process_record）。
+    # 事后「这个 IP 为什么被封」只能靠这条记录回答。actor 由调用方带进来
+    # （本机采集是 `system`，见 process_record；老库里还留着 `http:<来源IP>`）。
     #
-    # 懒导入而不是顶层导入：core.pipeline 被 core.report_server 顶层导入，
-    # 而 app.audit 又依赖 core.database，顶层互引会在部分入口下成环。
+    # 懒导入而不是顶层导入：app.audit 依赖 core.database，而 core.database 在
+    # 导入期又会牵到本模块的模型，顶层互引会在部分入口下成环。
     # 本文件 `from app.ban_service import ...` 也是同样的懒导入写法。
     from app.audit import ACTION_BAN_AUTO as _ACTION
     from app.audit import ACTOR_SYSTEM as _SYSTEM
@@ -224,7 +224,7 @@ def process_record(
       会传 False（用户可能只是想知道谁在访问，不想因为自采数据就封人）。
     · emit_alert —— 是否投递告警事件（托盘气泡/声音）。
     · actor —— 这条记录的「发起人」，只用于自动封禁的审计。
-      HTTP 上报传 `http:<来源IP>`，本机采集传 `system`，留空按 system 处理。
+      本机采集传 `system`，留空按 system 处理。
 
     返回评估结果（调用方通常还需要它来构造响应体）。
     """
@@ -299,26 +299,9 @@ def process_record(
                     "reason": result.reason or "命中风险规则",
                     "geo": geo.display,
                     "local_port": rec.local_port,
-                    # 弹窗/托盘气泡/Webhook 都靠这个字段回答「到底拦没拦」
+                    # 弹窗/托盘气泡都靠这个字段回答「到底拦没拦」
                     "disposition": result.disposition,
                 }
             )
 
     return result
-
-
-def result_payload(rec: AccessRecord, result: RiskResult) -> Dict[str, Any]:
-    """上报接口的响应体（与 v1.x 保持完全一致的字段；新增字段只增不改）"""
-    return {
-        "id": None,
-        "ip": rec.ip,
-        "geo": rec.geo.display,
-        "risk_score": result.score,
-        "risk_level": result.level,
-        "matched_rules": result.matched_rules,
-        "suggest_ban": result.suggest_ban,
-        # v1.2 新增：业务系统据此判断「这次访问到底被拦了没有」，
-        # 不必再去查封禁列表 —— 也避免它自己猜（猜错就会重复告警）。
-        "disposition": result.disposition,
-        "disposition_label": result.disposition_label,
-    }

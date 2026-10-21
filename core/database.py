@@ -18,7 +18,7 @@ import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.config import BIND_ALL_HOSTS, DEFAULT_SETTINGS, db_path
+from core.config import DEFAULT_SETTINGS, db_path
 from core.logger import get_logger
 from core.models import (
     STATUS_ACTIVE,
@@ -165,7 +165,6 @@ def init_db() -> None:
 
             migrate(conn)
 
-            _fix_insecure_legacy_settings(conn)
         finally:
             conn.close()
         _initialized = True
@@ -183,43 +182,6 @@ def reset_init_state() -> None:
     global _initialized
     with _init_lock:
         _initialized = False
-
-
-def _fix_insecure_legacy_settings(conn: sqlite3.Connection) -> None:
-    """
-    老库一次性安全迁移：把「监听 0.0.0.0 且 API Key 为空」这个敞口组合
-    收敛回只监听本机，并留下提示标记。
-
-    为什么必须做：DEFAULT_SETTINGS 用的是 INSERT OR IGNORE，改默认值只对
-    新装用户生效；老库会一直保持不安全组合。局域网任意主机可伪造上报 →
-    规则打满分 → 若开了自动封禁，就变成「借 PortGuard 之手封掉任意 IP」。
-    """
-    try:
-        rows = {
-            r["key"]: r["value"]
-            for r in conn.execute(
-                "SELECT key, value FROM settings WHERE key IN ('listen_host','api_key','_security_migrated_v110')"
-            )
-        }
-    except Exception:
-        return
-    if rows.get("_security_migrated_v110") == "1":
-        return
-
-    host = (rows.get("listen_host") or "").strip()
-    key = (rows.get("api_key") or "").strip()
-    if host in BIND_ALL_HOSTS and not key:
-        conn.execute("UPDATE settings SET value = ? WHERE key = 'listen_host'", ("127.0.0.1",))
-        log.warning(
-            "安全迁移：检测到「监听 0.0.0.0 且未设置 API Key」，"
-            "已将监听地址收敛为 127.0.0.1。如需局域网上报，"
-            "请在设置页打开「允许局域网访问」并设置 API Key。"
-        )
-    conn.execute(
-        "INSERT INTO settings(key, value) VALUES ('_security_migrated_v110','1') "
-        "ON CONFLICT(key) DO UPDATE SET value = '1'"
-    )
-    conn.commit()
 
 
 # ═══════════════════════════════════════════════════════════

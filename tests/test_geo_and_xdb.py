@@ -179,13 +179,40 @@ def test_build_urls_only_allowlisted_https(isolated_env):
     assert all("{path}" not in u for u in urls)
 
 
-def test_custom_source_outside_allowlist_is_dropped(isolated_env):
-    """自定义源若指向未授权主机（如内网地址）必须被丢弃，防 SSRF"""
+def test_custom_domain_is_trusted(isolated_env):
+    """自定义域名视为可信主机（要支持自建镜像），但只放行 https + 非内网字面量。
+
+    1.1.0 的做法是「自定义源也得命中静态白名单」，那等于填了也用不了；
+    现在改为「去掉白名单限制，改用 _is_private_host 挡内网」。
+    """
     init_db()
     cfg.warm()
-    cfg.set("xdb_source", "https://evil.internal.example/{path}")
+    cfg.set("xdb_source", "https://mirror.example.com/ip2region/{path}")
     urls = U._build_urls("ip2region_v4.xdb")
-    assert all("evil.internal.example" not in u for u in urls)
+    assert urls[0].startswith("https://mirror.example.com/")
+
+
+def test_internal_domain_suffix_is_dropped(isolated_env):
+    """内网域后缀 / 单标签主机名指向的一定是内网，必须丢弃"""
+    init_db()
+    cfg.warm()
+    cfg.set(
+        "xdb_sources",
+        json.dumps(
+            [
+                "https://nas.local/{path}",
+                "https://git.intranet/{path}",
+                "https://mirror/{path}",
+                "https://ok.example.com/{path}",
+            ]
+        ),
+    )
+    urls = U._build_urls("ip2region_v4.xdb")
+    assert urls[0].startswith("https://ok.example.com/")
+    assert len([u for u in urls if "ok.example.com" in u]) == 1
+    assert all("nas.local" not in u for u in urls)
+    assert all("git.intranet" not in u for u in urls)
+    assert all("https://mirror/" not in u for u in urls)
 
 
 def test_custom_https_source_is_preferred(isolated_env):
@@ -194,6 +221,93 @@ def test_custom_https_source_is_preferred(isolated_env):
     cfg.set("xdb_source", "https://cdn.statically.io/gh/lionsoul2014/ip2region/master/{path}")
     urls = U._build_urls("ip2region_v4.xdb")
     assert urls[0].startswith("https://cdn.statically.io/")
+
+
+# ═══════════════════ 自定义镜像源（多条） ═══════════════════
+
+
+def test_multiple_custom_sources_keep_user_order(isolated_env):
+    """多条自定义源按用户排列的顺序依次尝试，全部排在内置源之前"""
+    init_db()
+    cfg.warm()
+    cfg.set(
+        "xdb_sources",
+        json.dumps(
+            [
+                "https://mirror-a.example.com/ip2region/{path}",
+                "https://mirror-b.example.com/ip2region/{path}",
+            ]
+        ),
+    )
+    assert U.custom_sources() == [
+        "https://mirror-a.example.com/ip2region/{path}",
+        "https://mirror-b.example.com/ip2region/{path}",
+    ]
+    urls = U._build_urls("ip2region_v4.xdb")
+    assert urls[0].startswith("https://mirror-a.example.com/")
+    assert urls[1].startswith("https://mirror-b.example.com/")
+
+
+def test_legacy_single_source_is_merged_not_replaced(isolated_env):
+    """1.1.0 的单条 xdb_source 与新的 xdb_sources 合并，老的排后面（不覆盖新值）"""
+    init_db()
+    cfg.warm()
+    cfg.set("xdb_sources", json.dumps(["https://new.example.com/{path}"]))
+    cfg.set("xdb_source", "https://old.example.com/{path}")
+    assert U.custom_sources() == [
+        "https://new.example.com/{path}",
+        "https://old.example.com/{path}",
+    ]
+
+
+def test_custom_sources_are_deduped_and_capped(isolated_env):
+    """去重 + 截断到上限：挂十几个源只会把「检查更新」拖成分钟级"""
+    init_db()
+    cfg.warm()
+    items = [f"https://m{i}.example.com/{{path}}" for i in range(U.MAX_CUSTOM_SOURCES + 3)]
+    cfg.set("xdb_sources", json.dumps(items + items[:2]))
+    got = U.custom_sources()
+    assert len(got) == U.MAX_CUSTOM_SOURCES
+    assert got == items[: U.MAX_CUSTOM_SOURCES]
+
+
+def test_broken_json_falls_back_to_single_source(isolated_env):
+    """设置被手改成逗号分隔也不该让整组源失效"""
+    init_db()
+    cfg.warm()
+    cfg.set("xdb_sources", "https://only.example.com/{path}")
+    assert U.custom_sources() == ["https://only.example.com/{path}"]
+
+
+def test_private_host_source_is_dropped(isolated_env):
+    """自定义源免白名单，但不允许指向内网 / 回环（防 SSRF）"""
+    init_db()
+    cfg.warm()
+    cfg.set(
+        "xdb_sources",
+        json.dumps(
+            [
+                "https://127.0.0.1:8443/{path}",
+                "https://localhost/{path}",
+                "https://10.1.2.3/{path}",
+                "https://ok.example.com/{path}",
+            ]
+        ),
+    )
+    urls = U._build_urls("ip2region_v4.xdb")
+    assert all("127.0.0.1" not in u for u in urls)
+    assert all("localhost" not in u for u in urls)
+    assert all("10.1.2.3" not in u for u in urls)
+    assert urls[0].startswith("https://ok.example.com/")
+
+
+def test_http_source_is_rejected(isolated_env):
+    """只允许 https，http 源必须被丢弃"""
+    init_db()
+    cfg.warm()
+    cfg.set("xdb_sources", json.dumps(["http://plain.example.com/{path}"]))
+    urls = U._build_urls("ip2region_v4.xdb")
+    assert all(not u.startswith("http://") for u in urls)
 
 
 # ═══════════════════ 清单与状态 ═══════════════════
