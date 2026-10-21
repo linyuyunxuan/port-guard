@@ -4,9 +4,9 @@
 
 - 风险事件页回答「哪些访问**值得处理**」（规则命中的派生结论，可删、可确认）；
 - 本页回答「这台机器上**到底发生过什么**」——access_log 是原始流水，
-  不提供删除 / 改状态，只提供检索、翻页、看详情、导出。
+  只提供检索、翻页、看详情、导出，以及**一个**受控的清空入口（见第 5 条）。
 
-四条实现取舍：
+五条实现取舍：
 
 1. **分页而不是「最近 N 条」**：访问流水是唯一会涨到几十万行的表，
    事件页那个「最近 2000 条」的下拉在这里会变成「永远翻不到昨天」。
@@ -18,13 +18,25 @@
    原来的 offset 会指向一个不存在的页，界面就变成空表。
 4. **导出的是当前筛选结果，不是全库**，也不是当前页 —— 逐页查询拼起来，
    最多 `EXPORT_MAX_ROWS` 条，触顶时在结果框里说清楚。
+5. **「清空列表」删的是当前筛选范围内的全部记录，不受分页限制**。这是本页
+   唯一的破坏性操作，所以三道闸门都要有：确认框里写明「要删 N 条 / 当前页
+   只显示 M 条」、无筛选时额外强调「等于清空全部访问流水」、删完写审计
+   （`data.clear`）。风险事件与封禁记录一律不动 —— 流水没了不等于当时没发生。
+   页面级删除只提供这一种：不做行级删除，否则「删掉一条看着碍眼的记录」和
+   「这台机器到底被访问过什么」就说不清了。
 """
 
 import datetime
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
+from app import audit
 from core.config import LEVEL_LABEL
-from core.database import active_ban_ip_map, count_access_logs, query_access_logs
+from core.database import (
+    active_ban_ip_map,
+    count_access_logs,
+    delete_access_logs,
+    query_access_logs,
+)
 from core.logger import get_logger
 from core.models import AccessRecord, ms_to_str
 from core.rules_meta import rule_label
@@ -55,6 +67,7 @@ from qtcompat import (
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPushButton,
     Qt,
     QTableWidget,
@@ -248,6 +261,18 @@ class AccessPage(QWidget):
         self.btn_refresh.setObjectName("btn_outline")
         self.btn_refresh.clicked.connect(self.refresh)
         head.add_action(self.btn_refresh)
+
+        # 破坏性按钮用 outline 而不是实心红：本页的日常操作是「回溯查看」，
+        # 头部常驻一颗红色实心按钮会天天抢注意力；风险由确认框与审计承担。
+        self.btn_clear = QPushButton("清空列表")
+        self.btn_clear.setObjectName("btn_outline")
+        self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear.setToolTip(
+            "清空当前筛选范围内的全部访问记录（不受分页限制）。\n"
+            "风险事件与封禁记录不受影响；操作不可恢复，建议先导出 CSV。"
+        )
+        self.btn_clear.clicked.connect(self._clear_list)
+        head.add_action(self.btn_clear)
         root.addWidget(head)
 
         root.addLayout(self._build_filters())
@@ -538,6 +563,8 @@ class AccessPage(QWidget):
         self.btn_prev.setEnabled(self._page > 0)
         self.btn_next.setEnabled(self._page + 1 < pages)
         self.btn_export.setToolTip(f"导出当前筛选结果（{self._total} 条）")
+        # 一条都没有时「清空列表」无处可点：留着只会让人怀疑按钮坏了
+        self.btn_clear.setEnabled(self._total > 0)
 
     def _render(self, rows: List[AccessRecord]) -> None:
         if rows:
@@ -624,6 +651,125 @@ class AccessPage(QWidget):
             dialog_title="导出历史访问记录",
             scope_hint=scope,
         )
+
+    # ── 清空 ──
+    def _filter_scope_text(self) -> str:
+        """当前筛选条件的中文描述（确认框与审计共用，避免「弹窗说 A、审计记 B」）"""
+        parts: List[str] = []
+        kw = self.search.text().strip()
+        if kw:
+            parts.append(f"关键词「{kw}」")
+        if self.level.currentIndex() > 0:
+            parts.append(f"等级={self.level.currentText()}")
+        port = self.port.text().strip()
+        if port:
+            parts.append(f"端口={port}")
+        text = self.range.currentText()
+        if text == RANGE_CUSTOM:
+            parts.append(
+                f"时间 {self.dt_from.date().toString('yyyy-MM-dd')}"
+                f" 至 {self.dt_to.date().toString('yyyy-MM-dd')}"
+            )
+        elif text != RANGE_ALL:
+            parts.append(f"时间={text}")
+        return "、".join(parts)
+
+    def _clear_list(self) -> None:
+        """清空当前筛选范围内的访问记录（不受分页限制）。
+
+        为什么要先 count 再删：确认框里必须给出**要删多少条**，而这个数字来自
+        与列表查询同一个 `_access_where`。只写「确认清空？」的话，用户看到的
+        是每页 50 条，很容易以为只删这一页。
+
+        确认与执行之间仍可能有新记录落库（同一个筛选条件会被它们命中），所以
+        结果框和审计都用**实际删除条数**，同时把确认时的 `matched` 一并记下 ——
+        两个数字不一致时，能看出是「期间又来了新记录」而不是程序算错了。
+        """
+        since, until = self._range_ms()
+        kw = self.search.text().strip()
+        lvl = self._level_filter()
+        port = self._port_filter()
+        try:
+            total = count_access_logs(
+                keyword=kw, level=lvl, port=port, since_ts=since, until_ts=until
+            )
+        except Exception as e:
+            self._notify("读取失败", f"统计待清空的记录数失败：\n{e}", warn=True)
+            return
+        if total <= 0:
+            self._notify("没有可清空的记录", "当前筛选条件下没有访问记录，无需清空。")
+            return
+
+        scoped = self._filters_active()
+        if scoped:
+            scope_desc = self._filter_scope_text()
+            head = f"将清空「{scope_desc}」范围内的 {total} 条访问记录。"
+        else:
+            scope_desc = "全部时间、全部等级、全部端口（无筛选）"
+            head = f"当前没有任何筛选条件，将清空全部 {total} 条访问记录。"
+
+        if not self._confirm_clear(head, total):
+            return
+
+        try:
+            deleted = delete_access_logs(
+                keyword=kw,
+                level=lvl,
+                port=port,
+                since_ts=since,
+                until_ts=until,
+                # 无筛选时才是「清空全部」；数据层要求这种调用显式声明意图
+                all_rows=not scoped,
+            )
+        except Exception as e:
+            audit.record(
+                audit.ACTION_DATA_CLEAR,
+                target_type="access",
+                summary=f"清空访问列表失败（{scope_desc}）：{e}",
+                result=audit.RESULT_FAIL,
+                detail=str(e),
+            )
+            self._notify("清空失败", f"未能清空访问记录：\n{e}", warn=True)
+            return
+
+        # 破坏性操作必须留痕：事后唯一能回答「数据哪天没的、删了多少」的就是这条
+        audit.record(
+            audit.ACTION_DATA_CLEAR,
+            target_type="access",
+            summary=f"清空访问列表：{scope_desc}，删除 {deleted} 条",
+            before={"scope": scope_desc, "matched": total},
+            after={"deleted": deleted},
+        )
+        self._page = 0
+        self.refresh()
+        self._notify("已清空", f"已删除 {deleted} 条访问记录。")
+
+    def _confirm_clear(self, head: str, total: int) -> bool:
+        """清空前的确认框。单独成方法是为了让用例能稳定地「点取消 / 点清空」——
+
+        离屏环境下 `exec()` 会一直等到有人点按钮，用例没法测这条路径。
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("清空访问列表")
+        box.setText(head)
+        box.setInformativeText(
+            f"· 不受分页限制：当前页只显示 {len(self._rows)} 条，实际删除 {total} 条；\n"
+            "· 风险事件、封禁记录、黑白名单都不受影响；\n"
+            "· 删除后无法恢复，需要留档请先导出 CSV。"
+        )
+        btn_yes = box.addButton("清空", QMessageBox.ButtonRole.DestructiveRole)
+        btn_no = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        # 默认焦点给「取消」：这是不可逆操作，回车不该等于确认
+        box.setDefaultButton(btn_no)
+        box.exec()
+        return box.clickedButton() is btn_yes
+
+    def _notify(self, title: str, text: str, warn: bool = False) -> None:
+        if warn:
+            QMessageBox.warning(self, title, text)
+        else:
+            QMessageBox.information(self, title, text)
 
     # ── 行内操作 ──
     def _row_actions(self, r: AccessRecord) -> QWidget:

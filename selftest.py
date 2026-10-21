@@ -180,6 +180,17 @@ check(
     f"行数={win.page_bans.sug_table.rowCount()}",
 )
 
+# 历史访问页的「清空列表」：按钮存在，且可用性跟着「有没有记录」走
+# （一条都没有时置灰，否则用户点下去只会弹一个「没有可清空」的空框）
+win.page_access.refresh()
+_acc_total = win.page_access._total
+check(
+    "历史访问页清空入口",
+    win.page_access.btn_clear.text() == "清空列表"
+    and win.page_access.btn_clear.isEnabled() == (_acc_total > 0),
+    f"total={_acc_total} enabled={win.page_access.btn_clear.isEnabled()}",
+)
+
 win.page_iplookup.lookup_and_show("8.8.8.8")
 check(
     "IP 查询页",

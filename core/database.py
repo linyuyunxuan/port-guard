@@ -500,6 +500,51 @@ def delete_old_access(days: int) -> int:
         conn.close()
 
 
+def delete_access_logs(
+    keyword: str = "",
+    level: str = "",
+    port: Optional[int] = None,
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+    all_rows: bool = False,
+) -> int:
+    """按条件删除历史访问记录，返回实际删除条数（「历史访问」页的清空功能）。
+
+    条件与 `query_access_logs` / `count_access_logs` **同源**（都走
+    `_access_where`）—— 界面上看到什么，就删掉什么。这一点不能各写一套：
+    否则「确认框说删 320 条、实际删掉 5000 条」这种错没人能自查出来。
+
+    ⚠️ 两个刻意的约束：
+
+    1. **无条件删除必须显式传 `all_rows=True`**。`delete_access_logs()` 这种
+       空参调用一旦被某处手滑写进代码，就是静默清空整张访问流水表。把
+       「清空全部」做成需要明示意图的开关，比靠调用方自觉可靠。
+    2. **风险事件（risk_event）不删**。访问流水是「发生过什么」的原始事实，
+       风险事件是「当时判成了什么」的结论，两者保留期本身就是独立的
+       （见 `delete_old_risk_events` 的说明）。清流水顺手删证据，事后就再也
+       答不出「这个 IP 那天到底被判过什么」。
+
+    代价是 `risk_event.access_id` 会指向已删除的流水（当前没有任何读取路径
+    依赖这一列，事件详情里的回溯字段都直接存在 risk_event 上）。
+
+    删完**不做 VACUUM**：这里只归还行空间，数据库文件不会因此变小（与「清空
+    全部日志」同一口径）。真要缩文件请在设置页做「数据库整理」，那里才会
+    重建文件 —— 在清空路径上顺手 VACUUM 会让一次点击卡住几十秒。
+    """
+    where, args = _access_where(keyword, level, port, since_ts, until_ts)
+    if not where and not all_rows:
+        raise ValueError("无条件清空访问日志需显式传 all_rows=True")
+    # `where` 里只有固定片段，所有外部值都走参数绑定（见 _access_where）
+    sql = "DELETE FROM access_log WHERE 1=1" + where  # noqa: S608
+    conn = _connect()
+    try:
+        cur = conn.execute(sql, args)
+        conn.commit()
+        return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
 #: 允许被保留期清理**自动**删掉的封禁状态。
 #
 # 这一组是白名单而不是黑名单，原因：ban_list 的 status 里唯一「对应一条真实
