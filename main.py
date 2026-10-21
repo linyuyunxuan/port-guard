@@ -275,6 +275,49 @@ def _qt_import_failed(exc: BaseException, detail: str) -> int:
     return 3
 
 
+def _enable_firewall_cli() -> int:
+    """
+    `--enable-firewall`：安全启用 Windows 防火墙并对齐封禁，然后退出。
+
+    为什么要有这个开关：「封禁了却拦不住」最常见的根因是 **Windows 防火墙三个配置
+    文件全关** —— 规则写得再对也不参与过滤。界面里有对应按钮，但无桌面场景
+    （远程部署、计划任务、装完立刻初始化）点不到按钮，这条命令补的就是它。
+
+    打包版是无控制台程序，控制台看不到输出，所以结果同时写进
+    `%TEMP%/pg_enable_fw.log`，方便安装脚本与人工排查。
+    """
+    import os
+    import tempfile
+
+    from app import ban_service
+    from core import firewall
+
+    lines: list = []
+
+    def say(text: str = "") -> None:
+        lines.append(text)
+        print(text)
+
+    say(f"管理员权限: {firewall.is_admin()}")
+    say(f"启用前 profile: {firewall.format_profiles(firewall.profiles_state(force=True))}")
+    ok, err, detail = firewall.enable_firewall()
+    say(f"enable_firewall -> {ok} | {err}")
+    if ok:
+        created = len(detail.get("created") or [])
+        after = firewall.format_profiles(detail.get("profiles_after"))
+        say(f"新放行规则 {created} 条；启用后 profile: {after}")
+        say(f"封禁对齐: {ban_service.format_reenforce(ban_service.reenforce_all())}")
+    say(f"最终 profile: {firewall.format_profiles(firewall.profiles_state(force=True))}")
+    log_path = os.path.join(tempfile.gettempdir(), "pg_enable_fw.log")
+    try:
+        with open(log_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(lines) + "\n")
+        say(f"结果已写入 {log_path}")
+    except OSError as e:
+        say(f"写日志失败：{e}")
+    return 0 if ok else 1
+
+
 def main() -> int:
     # 第一件事：窗口化运行（pythonw / 打包后 console=False）没有控制台，
     # `sys.stdout` 与 `sys.stderr` 都是 None。第三方库会直接调用
@@ -312,6 +355,10 @@ def main() -> int:
     # 交付冒烟：只验证「无控制台下接收服务能否启动」，不起 Qt 界面
     if selfcheck:
         return _selfcheck()
+
+    # 无人值守初始化：安全启用防火墙 + 对齐封禁，然后退出（不起界面）
+    if "--enable-firewall" in sys.argv:
+        return _enable_firewall_cli()
 
     # Qt 导入必须单独兜住：这是「拷到别的电脑就跑不起来」的唯一现场。
     # 走到这里说明 Python 与被打包的运行库都正常（否则连这个 try 都进不来），
