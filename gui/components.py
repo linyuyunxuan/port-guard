@@ -16,7 +16,7 @@
 from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
 
 from app.export_csv import export_rows
-from gui.theme import C
+from gui.theme import C, small_button_style
 from gui.widgets import StatusItem
 from qtcompat import (
     QColor,
@@ -30,6 +30,7 @@ from qtcompat import (
     QPen,
     QPointF,
     QPolygonF,
+    QPushButton,
     Qt,
     QToolButton,
     QVBoxLayout,
@@ -38,7 +39,10 @@ from qtcompat import (
 )
 
 # 行内菜单项：(显示文字, 无参回调)。回调返回值被忽略，允许 ``int`` 之类的顺带返回。
-MenuEntry = Tuple[str, Callable[[], object]]
+# 回调传 ``None`` 表示「这个动作当前不可用」：菜单项照样显示但置灰。
+# 选择置灰而不是删掉，是因为用户必须先**看见**「已在封禁中」才知道不用再点；
+# 直接消失会让人以为这个功能出了 bug。
+MenuEntry = Tuple[str, Optional[Callable[[], object]]]
 
 
 class ShieldMark(QWidget):
@@ -289,25 +293,64 @@ def export_table_csv(
     QMessageBox.information(parent, "导出成功", f"已导出 {n} 条到：\n{path}{tail}")
 
 
-def row_menu_button(
-    entries: List[Optional[MenuEntry]], parent: Optional[QWidget] = None, size: int = 22
-) -> DotsButton:
-    """「更多操作」按钮：默认 22×22（表格行内），工具条传 size=32
+def build_menu(entries: List[Optional[MenuEntry]], parent: Optional[QWidget] = None) -> QMenu:
+    """按 MenuEntry 列表建菜单（行内「⋯」与右键菜单共用同一份动作定义）。
 
-    entries: [(菜单文字, 无参回调), ...]；列表里的 `None` 表示一条分隔线。
-    纯图标按钮必须同时具备 accessibleName 与 tooltip（`02_ux_spec.md` §6 规则 ④）；
-    但**不给它发明文字** —— 菜单里每一项才是有意义的动作名。
+    · 列表元素 `None` → 分隔线；
+    · 元素里的回调 `None` → 该项置灰（「已在封禁中」这类状态化文案）。
     """
-    btn = DotsButton(size, parent)
-
-    menu = QMenu(btn)
+    menu = QMenu(parent)
     for entry in entries:
         if entry is None:
             menu.addSeparator()
             continue
         text, callback = entry
         act = menu.addAction(text)
+        if callback is None:
+            act.setEnabled(False)
+            continue
         act.triggered.connect(_menu_slot(callback))
-    btn.setMenu(menu)
+    return menu
+
+
+def row_menu_button(
+    entries: List[Optional[MenuEntry]], parent: Optional[QWidget] = None, size: int = 22
+) -> DotsButton:
+    """「更多操作」按钮：默认 22×22（表格行内），工具条传 size=32
+
+    entries: [(菜单文字, 无参回调), ...]；列表里的 `None` 表示一条分隔线，
+    回调为 `None` 表示该项当前不可点（见 `build_menu`）。
+    纯图标按钮必须同时具备 accessibleName 与 tooltip（`02_ux_spec.md` §6 规则 ④）；
+    但**不给它发明文字** —— 菜单里每一项才是有意义的动作名。
+    """
+    btn = DotsButton(size, parent)
+    btn.setMenu(build_menu(entries, btn))
     btn.setEnabled(bool(entries))
+    return btn
+
+
+def ban_button(
+    on_click: Callable[[], object],
+    banned: bool = False,
+    text: str = "封禁",
+    tip: str = "",
+) -> QPushButton:
+    """行内主操作「封禁」按钮，**知道这个 IP 是不是已经在封禁中**。
+
+    已封禁 → 文案改「已封禁」并置灰。不这么做的话，用户对着同一行再点一次
+    只会弹一句「已处于封禁状态」，看上去跟「上次没生效」一模一样 —— 这是
+    「操作后状态不联动」里最容易被当成 bug 的那一处。
+
+    `tip` 用来补一句到期时间之类的上下文；置灰态下 tooltip 是唯一能看到
+    原因的地方，所以文案必须自带结论。
+    """
+    btn = QPushButton("已封禁" if banned else text)
+    btn.setFixedHeight(22)
+    btn.setStyleSheet(small_button_style("danger"))
+    btn.setToolTip(tip or ("该 IP 已在封禁中，解封请到「封禁管理」页" if banned else ""))
+    if banned:
+        btn.setEnabled(False)
+    else:
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(_menu_slot(on_click))
     return btn

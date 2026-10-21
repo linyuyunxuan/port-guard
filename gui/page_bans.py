@@ -2,7 +2,7 @@
 
 import datetime
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from app import audit, ban_service
 from app.export_csv import BAN_CSV_HEADERS, SUG_CSV_HEADERS, iter_ban_rows, iter_sug_rows
@@ -10,6 +10,7 @@ from core import firewall
 from core import settings as cfg
 from core.config import LEVEL_CRITICAL, LEVEL_HIGH, LEVEL_ORDER
 from core.database import (
+    active_ban_ip_map,
     count_active_bans,
     delete_ban_records,
     query_bans,
@@ -27,7 +28,7 @@ from core.models import (
     ms_to_str,
 )
 from core.validators import InvalidIP, normalize_ip
-from gui.components import PageHeader, export_table_csv, row_menu_button
+from gui.components import PageHeader, ban_button, export_table_csv, row_menu_button
 from gui.table_select import CheckColumn
 from gui.table_sort import (
     KIND_DATETIME,
@@ -233,6 +234,8 @@ class BansPage(QWidget):
         self._sug_rows_src = []
         self._ban_rows = []
         self._ban_rows_src = []
+        # 生效中的封禁（IP → 记录），建议表按钮据此显示「已封禁」
+        self._banned: Dict[str, Any] = {}
         self.sug_sort = TableSort(SUG_SORT_SPECS)
         self.ban_sort = TableSort(BAN_SORT_SPECS)
         # 到期但解不掉的条数（普通权限下由主窗口巡检回报），供权限条展示
@@ -594,6 +597,13 @@ class BansPage(QWidget):
             for r in query_risk_events(limit=200, handled=0)
             if r.get("risk_level") in (LEVEL_HIGH, LEVEL_CRITICAL)
         ]
+        # 建议表里可能混着「已经从别的页面封过、但事件还没回填」的 IP，
+        # 按钮要据此显示「已封禁」而不是让人再点一次
+        try:
+            self._banned = active_ban_ip_map()
+        except Exception:
+            log.exception("加载生效中的封禁失败（建议表按钮将按「未封禁」渲染）")
+            self._banned = {}
         # 排序状态跨刷新保留：用户按评分降序看建议，封完一条回来还想是降序
         self._sug_rows_src = rows
         self._sug_rows = self.sug_sort.apply(rows)
@@ -680,12 +690,13 @@ class BansPage(QWidget):
         lay.setSpacing(4)
         ip = r.get("ip", "")
         score = r.get("risk_score", 0)
+        ban = self._banned.get(str(ip))
 
-        b_ban = QPushButton("确认封禁")
-        b_ban.setFixedHeight(22)
-        b_ban.setStyleSheet(small_button_style("danger"))
-        b_ban.setCursor(Qt.CursorShape.PointingHandCursor)
-        b_ban.clicked.connect(lambda: self.ask_ban.emit(ip, score, reason))
+        b_ban = ban_button(
+            lambda: self.ask_ban.emit(ip, score, reason),
+            banned=ban is not None,
+            text="确认封禁",
+        )
 
         more = row_menu_button(
             [
@@ -737,21 +748,19 @@ class BansPage(QWidget):
         # 与风险事件页同一套去重口径：一个 IP 可能命中几十条事件，
         # 但防火墙只该多一条规则
         uniq: Dict[str, Any] = {}
-        ids_by_ip: Dict[str, List[int]] = {}
         for r in rows:
             ip = str(r.get("ip") or "")
             if not ip:
                 continue
-            ids_by_ip.setdefault(ip, []).append(int(r["id"]))
             old = uniq.get(ip)
             if old is None or int(r.get("risk_score") or 0) > int(old.get("risk_score") or 0):
                 uniq[ip] = r
+        # 事件状态由 `ban_service.execute` 按 IP 统一回填（见 page_events._batch_ban）
         items = [
             {
                 "ip": ip,
                 "score": int(r.get("risk_score") or 0),
                 "reason": r.get("summary") or "命中风险规则",
-                "event_ids": ids_by_ip.get(ip, []),
             }
             for ip, r in uniq.items()
         ]

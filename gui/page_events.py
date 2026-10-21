@@ -14,22 +14,25 @@
 """
 
 import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app import audit
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
 from core.config import LEVEL_LABEL, LEVEL_ORDER
 from core.database import (
+    active_ban_ip_map,
     delete_risk_events,
     query_risk_events,
     set_risk_handled_batch,
 )
+from core.logger import get_logger
 from core.models import HANDLED_LABEL, ms_to_str
 from core.rules_meta import rule_label
 from gui.components import (
     MenuEntry,
     PageHeader,
-    _menu_slot,
+    ban_button,
+    build_menu,
     export_table_csv,
     row_menu_button,
 )
@@ -67,6 +70,8 @@ from qtcompat import (
     QWidget,
     Signal,
 )
+
+log = get_logger(__name__)
 
 HEADERS = [
     "",
@@ -153,6 +158,31 @@ _HANDLED_ACTION = {
 def _handled_action(handled: int) -> str:
     """确认/忽略共用一个入口，按目标状态分流到两个 action"""
     return _HANDLED_ACTION.get(handled, audit.ACTION_EVENT_CONFIRM)
+
+
+def _handled_entries(handled: int, set_handled: Callable[[int], object]) -> List[MenuEntry]:
+    """「确认处理 / 忽略」两项随当前处理状态变：状态那项置灰、文案改成状态名。
+
+    `handled`：0 未处理 / 1 已确认 / 2 已忽略（见 `core.models.HANDLED_LABEL`）。
+    两个动作互为反向保留 —— 误点了「确认」还能在同一个菜单里改回「忽略」，
+    这是全页唯一能纠正误操作的地方。
+    """
+    if handled == 1:
+        return [("已确认", None), ("改为忽略", lambda: set_handled(2))]
+    if handled == 2:
+        return [("改为确认处理", lambda: set_handled(1)), ("已忽略", None)]
+    return [("确认处理", lambda: set_handled(1)), ("忽略", lambda: set_handled(2))]
+
+
+def _ban_tip(ban: Optional[Any]) -> str:
+    """已封禁行的按钮 tooltip：「到什么时候」比「已封禁」三个字更有用"""
+    if ban is None:
+        return ""
+    bid = getattr(ban, "id", "-")
+    exp = getattr(ban, "expire_at", None)
+    if not exp:
+        return f"该 IP 已永久封禁（记录 #{bid}）；解封请到「封禁管理」页"
+    return f"该 IP 已封禁，{ms_to_str(exp)} 到期（记录 #{bid}）；解封请到「封禁管理」页"
 
 
 def _event_snapshot(rows: List[Dict]) -> List[Dict]:
@@ -243,6 +273,9 @@ class EventsPage(QWidget):
         self._rows: List[Dict] = []
         self._rows_src: List[Dict] = []
         self._src: List[Dict] = []
+        # 生效中的封禁（IP → BanRecord），刷新时整体换一次；行内按钮据此
+        # 显示「已封禁」并置灰，避免用户对着同一条记录反复点
+        self._banned: Dict[str, Any] = {}
         self.sort = TableSort(SORT_SPECS)
         self._build()
         self.refresh()
@@ -512,6 +545,13 @@ class EventsPage(QWidget):
         )
         # 排序状态跨刷新保留：用户在「按评分降序」下改筛选条件，期望的还是降序
         self._rows_src = rows
+        # 行内按钮要知道「这个 IP 是不是已经封了」：一次查询给整张表用。
+        # 逐行查在 200 行的表上就是 200 次建连，渲染直接掉到秒级。
+        try:
+            self._banned = active_ban_ip_map()
+        except Exception:
+            log.exception("加载生效中的封禁失败（行内按钮将按「未封禁」渲染）")
+            self._banned = {}
         # 同类合并：同一「IP+端口+路径+等级+评分+规则+状态」折叠成一行（×N）。
         # 合并的是展示层，_rows_src 始终是后端原序原条数，导出/审计走 flatten 还原。
         merged = self.merge.isChecked()
@@ -730,23 +770,22 @@ class EventsPage(QWidget):
         # 同一 IP 在选定区间里常有多条事件（爆破就是几十条），按 IP 去重、
         # 取最高分那条作为封禁理由，避免把 20 条记录变成 20 次防火墙操作
         uniq: Dict[str, Dict] = {}
-        ids_by_ip: Dict[str, List[int]] = {}
         for r in rows:
             ip = r.get("ip") or ""
             if not ip:
                 continue
-            ids_by_ip.setdefault(ip, []).append(int(r["id"]))
             old = uniq.get(ip)
             if old is None or int(r.get("risk_score") or 0) > int(old.get("risk_score") or 0):
                 uniq[ip] = r
+        # 不再传事件 id：封禁成功时由 `ban_service.execute` 按 IP 把**所有**
+        # 未处理事件标成「已确认」。只回填勾选的那几条，会让筛选范围之外、
+        # 同一 IP 的其它待处理记录继续挂在「未处理」里 —— 用户看到的还是
+        # 「封了但状态没变」。
         items = [
             {
                 "ip": ip,
                 "score": int(r.get("risk_score") or 0),
                 "reason": r.get("summary") or "命中风险规则",
-                # 封禁成功后主窗口会把这些事件标为「已确认」，
-                # 否则用户封完回来看，事件还挂在「未处理」里
-                "event_ids": ids_by_ip.get(ip, []),
             }
             for ip, r in uniq.items()
         ]
@@ -789,12 +828,13 @@ class EventsPage(QWidget):
         ip = r.get("ip", "")
         score = r.get("risk_score", 0)
         reason = r.get("summary") or "命中风险规则"
+        ban = self._banned.get(str(ip))
 
-        b_ban = QPushButton("封禁")
-        b_ban.setFixedHeight(22)
-        b_ban.setStyleSheet(small_button_style("danger"))
-        b_ban.setCursor(Qt.CursorShape.PointingHandCursor)
-        b_ban.clicked.connect(lambda: self.ask_ban.emit(ip, score, reason))
+        b_ban = ban_button(
+            lambda: self.ask_ban.emit(ip, score, reason),
+            banned=ban is not None,
+            tip=_ban_tip(ban),
+        )
 
         more = row_menu_button(self._menu_entries(r))
 
@@ -804,11 +844,15 @@ class EventsPage(QWidget):
         return w
 
     def _menu_entries(self, r: Dict) -> List[Optional[MenuEntry]]:
-        """行内「⋯」与右键菜单共用同一份动作定义（P1-10 三表一致）"""
+        """行内「⋯」与右键菜单共用同一份动作定义（P1-10 三表一致）
+
+        处理状态直接体现在菜单文案上：「确认处理」在已确认的行里变成不可点的
+        「已确认」，用户不需要点进去才知道当前状态。
+        """
         ip = r.get("ip", "")
+        handled = int(r.get("handled") or 0)
         return [
-            ("确认处理", lambda: self._set_handled(r, 1)),
-            ("忽略", lambda: self._set_handled(r, 2)),
+            *_handled_entries(handled, lambda v: self._set_handled(r, v)),
             None,
             ("查询该 IP 归属地", lambda: self.ask_lookup.emit(ip)),
             ("复制 IP", lambda: self._copy(ip)),
@@ -817,14 +861,7 @@ class EventsPage(QWidget):
         ]
 
     def _row_menu(self, r: Dict, parent=None) -> QMenu:
-        menu = QMenu(parent)
-        for entry in self._menu_entries(r):
-            if entry is None:
-                menu.addSeparator()
-                continue
-            text, callback = entry
-            menu.addAction(text).triggered.connect(_menu_slot(callback))
-        return menu
+        return build_menu(self._menu_entries(r), parent)
 
     @staticmethod
     def _copy(text: str) -> None:

@@ -10,6 +10,7 @@ from core.config import (
     LEVEL_HIGH,
     LEVEL_LABEL,
 )
+from core.database import find_active_ban_by_ip
 from core.models import AccessRecord
 from gui.components import PageHeader
 from gui.theme import C
@@ -468,6 +469,15 @@ class MonitorPage(QWidget):
         a_copy_ua = QAction("复制 User-Agent", self)
         a_black = QAction("加入黑名单", self)
         a_ban = QAction("封禁该 IP…", self)
+        # 已封禁的 IP 把封禁项置灰并说明原因：不然点下去只会弹「已处于封禁状态」，
+        # 看上去跟「上次点了没生效」一模一样
+        try:
+            ban = find_active_ban_by_ip(rec.ip)
+        except Exception:
+            ban = None
+        if ban is not None:
+            a_ban.setText("已在封禁中")
+            a_ban.setEnabled(False)
         menu.addAction(a_lookup)
         menu.addAction(a_copy)
         menu.addAction(a_copy_ua)

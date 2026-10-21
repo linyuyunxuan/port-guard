@@ -787,6 +787,32 @@ def set_risk_handled_batch(event_ids: List[int], handled: int) -> int:
         conn.close()
 
 
+def set_risk_handled_by_ip(ip: str, handled: int = 1) -> int:
+    """把某个 IP 的**未处理**事件整批改状态，返回实际更新的行数。
+
+    封禁成功后必须调一次：否则用户封完 IP 回到事件页一看，同一批 IP 还挂在
+    「未处理」里，会以为封禁没生效（这正是「状态不跟着操作变」的主要来源）。
+
+    两个刻意的收窄：
+    · **只动 `handled = 0`**：被人工「忽略」过的事件是明确判断，封禁不该把它
+      翻成「已确认」；
+    · **`ip = ?` 等值匹配**：`query_bans` 那种 `ip LIKE %kw%` 会把 1.2.3.4
+      和 1.2.3.40 一起改掉。
+    """
+    key = (ip or "").strip()
+    if not key:
+        return 0
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "UPDATE risk_event SET handled = ? WHERE ip = ? AND handled = 0", (handled, key)
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
 def delete_risk_events(event_ids: List[int]) -> int:
     """批量删除风险事件，返回删除行数。
 
@@ -981,6 +1007,15 @@ def count_bans_by_ip(ip: str, since_ts: Optional[int] = None) -> int:
 
 def list_all_active_bans() -> List[BanRecord]:
     return query_bans(status=STATUS_ACTIVE, limit=100000)
+
+
+def active_ban_ip_map() -> Dict[str, BanRecord]:
+    """当前生效中的封禁，按 IP 索引 —— 界面行内按钮据此显示「已封禁」。
+
+    页面在 refresh 里查**一次**给整张表用：逐行调 `find_active_ban_by_ip`
+    在 200 行的表上就是 200 次建连 + 200 次查询，直接把渲染拖成秒级。
+    """
+    return {b.ip: b for b in list_all_active_bans()}
 
 
 def list_expired_bans(now: Optional[int] = None) -> List[BanRecord]:

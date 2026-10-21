@@ -34,6 +34,7 @@ from core.database import (
     list_expired_bans,
     mark_ban_unbanned,
     query_bans,
+    set_risk_handled_by_ip,
     update_ban,
 )
 from core.event_bus import bus
@@ -462,6 +463,21 @@ def execute(
         result=audit.RESULT_OK if ok else audit.RESULT_FAIL,
         detail=err or "",
     )
+
+    # 封禁真切落地 → 该 IP 的「未处理」事件整批标成「已确认」（人工/黑名单/
+    # 批量三条入口都走这里，所以只写一处）。
+    #
+    # ⚠️ 必须在 `bus.emit_ban` **之前**：界面收到封禁事件就会刷新事件页，
+    # 反过来（先投递再回填）刷新时读到的还是「未处理」，用户看到的就是
+    # 「封了但状态没变」—— 这正是要被修掉的那个反馈。
+    if ok:
+        try:
+            marked = set_risk_handled_by_ip(rec.ip, 1)
+            if marked:
+                log.info("封禁 %s 后回填 %d 条事件为已确认", rec.ip, marked)
+        except Exception:
+            # 回填失败不该让封禁本身变成失败：规则已经写进防火墙了
+            log.exception("封禁后回填事件状态失败 ip=%s", rec.ip)
 
     bus.emit_ban(
         {

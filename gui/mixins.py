@@ -189,7 +189,13 @@ class EventPumpMixin(_HostBase):
                     self._set_status(f"封禁 {b.get('ip')} 失败：{b.get('error')}", C.danger)
                 else:
                     self._set_status(f"已封禁 {b.get('ip')}", C.success)
-            if self.stack.currentWidget() is self.page_bans and self.page_bans.isVisible():
+            # 封禁会连带改两处状态：该 IP 的事件变「已确认」、行内「封禁」按钮
+            # 变「已封禁」。当前页不重刷的话，用户看到的是封禁前的快照 ——
+            # 「封了但什么都没变」的观感就是这么来的。
+            cur = self.stack.currentWidget()
+            if cur is self.page_events:
+                self.page_events.refresh()
+            elif cur is self.page_bans and self.page_bans.isVisible():
                 self.page_bans.refresh()
             self._refresh_stats(force=True)
 

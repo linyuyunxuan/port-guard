@@ -17,7 +17,7 @@ from core import firewall
 from core import settings as cfg
 from core.alerts import Alerter
 from core.config import APP_TITLE, APP_VERSION
-from core.database import find_active_ban_by_ip, init_db, set_risk_handled_batch
+from core.database import find_active_ban_by_ip, init_db
 from core.event_bus import bus
 from core.geo_locator import get_locator
 from core.logger import get_logger
@@ -976,8 +976,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
                     continue
             except Exception:
                 log.exception("批量封禁：查询已有封禁失败 ip=%s", rec.ip)
-            ids = [int(x) for x in (it.get("event_ids") or [])]
-            prepared.append((rec, ids))
+            prepared.append(rec)
 
         if not prepared:
             detail = "\n".join(f"· {ip}：{why}" for ip, why in skipped[:10])
@@ -988,7 +987,7 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             )
             return
 
-        dlg = BatchBanDialog([rec.ip for rec, _ in prepared], skipped, self)
+        dlg = BatchBanDialog([rec.ip for rec in prepared], skipped, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         duration = dlg.duration_sec()
@@ -997,8 +996,10 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
         def work():
             ok = 0
             fail = 0
-            banned_events: List[int] = []
-            for rec, ids in prepared:
+            # 事件状态不在这里回填：`ban_service.execute` 成功时已按 IP 把该 IP
+            # 下所有「未处理」事件标成「已确认」，且是在投递封禁事件**之前**做的，
+            # 所以界面收到结果时刷新到的就是最终状态。
+            for rec in prepared:
                 ban_id, err = ban_service.execute(
                     rec.ip, int(rec.risk_score or 0), rec.reason or "", duration
                 )
@@ -1018,14 +1019,6 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
                     )
                 else:
                     ok += 1
-                    banned_events.extend(ids)
-            # 封成功的 IP 所对应的事件标「已确认」：不标的话用户封完回来一看，
-            # 待确认建议里还挂着同一批 IP，会以为没生效
-            if banned_events:
-                try:
-                    set_risk_handled_batch(sorted(set(banned_events)), 1)
-                except Exception:
-                    log.exception("批量封禁后回填事件状态失败")
             self.batch_ban_done.emit(ok, fail)
 
         threading.Thread(target=work, daemon=True, name="ban-batch").start()
@@ -1037,6 +1030,21 @@ class MainWindow(EventPumpMixin, ServerCtlMixin, QMainWindow):
             )
         else:
             self._set_status(f"批量封禁完成：{ok} 个 IP 已封禁", C.success)
+        # 状态栏改完必须把**当前页**重刷一遍：封禁顺带改了事件的处理状态与
+        # 行内按钮的「已封禁」态，不刷新的话用户看到的还是封禁前的快照，
+        # 会以为一键封禁没生效（这正是「状态不跟操作联动」的主诉）。
+        self._refresh_current_page()
+
+    def _refresh_current_page(self) -> None:
+        """只重刷当前可见页 —— 隐藏页在切回来时本来就会 refresh（见 `_switch_page`）"""
+        cur = self.stack.currentWidget()
+        if cur is self.page_events:
+            self.page_events.refresh()
+        elif cur is self.page_bans:
+            self.page_bans.refresh()
+        elif cur is self.page_access:
+            self.page_access.refresh()
+        self._refresh_stats(force=True)
 
     def _restart_as_admin(self) -> None:
         ok, err = firewall.open_admin_restart()

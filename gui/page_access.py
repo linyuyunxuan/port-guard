@@ -21,16 +21,17 @@
 """
 
 import datetime
-from typing import Any, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from core.config import LEVEL_LABEL
-from core.database import count_access_logs, query_access_logs
+from core.database import active_ban_ip_map, count_access_logs, query_access_logs
+from core.logger import get_logger
 from core.models import AccessRecord, ms_to_str
 from core.rules_meta import rule_label
 from gui.components import (
     MenuEntry,
     PageHeader,
-    _menu_slot,
+    build_menu,
     export_table_csv,
     row_menu_button,
 )
@@ -62,6 +63,8 @@ from qtcompat import (
     QWidget,
     Signal,
 )
+
+log = get_logger(__name__)
 
 HEADERS = [
     "时间",
@@ -228,6 +231,8 @@ class AccessPage(QWidget):
         super().__init__(parent)
         self._rows: List[AccessRecord] = []
         self._total = 0
+        # 生效中的封禁（IP → 记录）：行内菜单据此把「封禁该 IP」置灰
+        self._banned: Dict[str, Any] = {}
         self._page = 0
         self._build()
         self.refresh()
@@ -507,6 +512,13 @@ class AccessPage(QWidget):
         )
         self._rows = rows
         self._total = total
+        # 行内菜单里的「封禁该 IP」要知道这个 IP 是不是已经在封禁中；
+        # 一次查询给整页用（逐行查 = 每页 N 次建连）
+        try:
+            self._banned = active_ban_ip_map()
+        except Exception:
+            log.exception("加载生效中的封禁失败（菜单将按「未封禁」渲染）")
+            self._banned = {}
         self._render(rows)
         self._update_pager()
 
@@ -627,6 +639,7 @@ class AccessPage(QWidget):
     def _menu_entries(self, r: AccessRecord) -> List[Optional[MenuEntry]]:
         """行内「⋯」与右键菜单共用同一份动作定义"""
         ip = r.ip or ""
+        banned = ip in self._banned
         return [
             ("查看详情", lambda: AccessDetailDialog(r, self).exec()),
             None,
@@ -634,21 +647,21 @@ class AccessPage(QWidget):
             ("复制 IP", lambda: self._copy(ip)),
             ("复制路径", lambda: self._copy(r.path or "/")),
             None,
+            # 已封禁的 IP 保留这一项但置灰：删掉会让人以为「回溯封禁」功能没了
             (
-                "封禁该 IP",
-                lambda: self.ask_ban.emit(ip, int(r.risk_score or 0), r.matched_str or "人工回溯"),
+                "已在封禁中" if banned else "封禁该 IP",
+                None
+                if banned
+                else (
+                    lambda: self.ask_ban.emit(
+                        ip, int(r.risk_score or 0), r.matched_str or "人工回溯"
+                    )
+                ),
             ),
         ]
 
     def _row_menu(self, r: AccessRecord, parent=None) -> QMenu:
-        menu = QMenu(parent)
-        for entry in self._menu_entries(r):
-            if entry is None:
-                menu.addSeparator()
-                continue
-            text, callback = entry
-            menu.addAction(text).triggered.connect(_menu_slot(callback))
-        return menu
+        return build_menu(self._menu_entries(r), parent)
 
     @staticmethod
     def _copy(text: str) -> None:
