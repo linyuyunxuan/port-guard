@@ -12,17 +12,11 @@ PortGuard — 日志系统（工作日志）
 - 有控制台时同时输出到 stderr（pythonw / 打包后的窗口程序没有控制台，
   此时 `sys.stdout`/`sys.stderr` 为 None，由 `ensure_std_streams()` 顶上安全空流）
 - 目录不可写时降级为 NullHandler，绝不因为日志把主流程搞崩
-- `route_uvicorn_logs()` 把 uvicorn 自己的日志并到同一个文件，避免排障时
-  要去两个地方找
 
-⚠️ 关于 `sys.stdout is None`（2026-10-16 修）：
-uvicorn 的 `DefaultFormatter.__init__` 会执行 `sys.stdout.isatty()`。窗口化运行
-（pythonw 或 PyInstaller `console=False`）时 std 流为 None，于是抛
-`AttributeError: 'NoneType' object has no attribute 'isatty'`，被
-`logging.config.dictConfig` 包成 `ValueError: Unable to configure formatter 'default'`，
-表现为「接收服务启动失败」——与端口占用、权限毫无关系。
-这里用两道独立防线堵住：① `ensure_std_streams()` 保证 std 流永不为 None；
-② 调用方给 uvicorn 传 `log_config=None`，根本不走它那套 formatter。
+⚠️ 关于 `sys.stdout is None`：窗口化运行（pythonw 或 PyInstaller
+`console=False`）时 std 流为 None，第三方库但凡调用 `sys.stdout.isatty()`
+就会抛 AttributeError 并连带功能崩溃。`ensure_std_streams()` 保证 std 流
+永不为 None（替身流可写且 isatty 为假），这条由 tests/test_logger_startup.py 守着。
 """
 
 import io
@@ -43,9 +37,6 @@ _DEFAULT_KEEP_DAYS = 30
 _FORMAT = "%(asctime)s %(levelname)-7s [%(threadName)s] %(name)s: %(message)s"
 _DATEFMT = "%Y-%m-%d %H:%M:%S"
 
-# 由 uvicorn 自己创建的 logger；它们的输出统一并入 portguard 的 handler
-_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
-
 _file_handler: Optional[logging.Handler] = None
 
 
@@ -53,8 +44,8 @@ class _NullStream(io.TextIOBase):
     """
     无控制台运行时的替身流。
 
-    `isatty()` 恒为 False —— 等价于「输出不是终端」，所以第三方库（uvicorn
-    的彩色 formatter 是典型）会走无色分支而不会崩。`fileno()` 故意抛 OSError，
+    `isatty()` 恒为 False —— 等价于「输出不是终端」，所以第三方库（彩色
+    日志 formatter 是典型）会走无色分支而不会崩。`fileno()` 故意抛 OSError，
     让「有没有真实控制台」的判断依然能得出正确结论（会走到 except 分支）。
     """
 
@@ -236,22 +227,6 @@ def setup(level: int = logging.INFO, console: bool = True) -> logging.Logger:
                 pass
 
         return logger
-
-
-def route_uvicorn_logs(level: int = logging.WARNING) -> None:
-    """
-    把 uvicorn 自己的 logger 接到 portguard 的 handler 上。
-
-    配合 `uvicorn.Config(log_config=None)` 使用：完全不执行 uvicorn 的
-    dictConfig，因此不会再碰它的 `DefaultFormatter`（那正是
-    `Unable to configure formatter 'default'` 的来源）。
-    """
-    root = logging.getLogger(_LOGGER_NAME)
-    for name in _UVICORN_LOGGERS:
-        lg = logging.getLogger(name)
-        lg.handlers = list(root.handlers)
-        lg.propagate = False
-        lg.setLevel(level)
 
 
 def get_logger(name: str = "") -> logging.Logger:

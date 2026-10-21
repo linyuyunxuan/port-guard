@@ -45,11 +45,7 @@ def _local_venvs() -> List[str]:
 
 def _check_deps(interactive: bool = True) -> bool:
     missing = []
-    for mod, label in (
-        ("fastapi", "fastapi"),
-        ("uvicorn", "uvicorn"),
-        ("ip2region", "ip2region(py)"),
-    ):
+    for mod, label in (("ip2region", "ip2region(py)"),):
         if not _importable(mod):
             missing.append(label)
 
@@ -265,7 +261,7 @@ def _enable_firewall_cli() -> int:
 def main() -> int:
     # 第一件事：窗口化运行（pythonw / 打包后 console=False）没有控制台，
     # `sys.stdout` 与 `sys.stderr` 都是 None。第三方库会直接调用
-    # `sys.stdout.isatty()`（uvicorn 的彩色 formatter 就是），一旦为 None 就抛
+    # 第三方库若调用 `sys.stdout.isatty()`，一旦为 None 就抛
     # AttributeError，把整个功能连带拖崩，且报错信息完全指错方向。
     from core.logger import ensure_std_streams
 
