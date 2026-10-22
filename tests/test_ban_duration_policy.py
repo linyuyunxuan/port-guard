@@ -304,9 +304,12 @@ def test_default_override_zero_still_yields_positive():
 
 
 def test_resolve_clamps_absurd_tier():
-    """配了个超出 365 天的档位：夹到上限，不抛错也不返回 0"""
+    """配了个天文数字的档位：夹到当前生效上限，不抛错也不返回 0。
+
+    「上限」自 S3① 起是可配的（默认 7 天），内置 365 天只是它的天花板。
+    """
     cfg.set("ban_duration_critical_sec", 10**12)
-    assert ban_service.resolve_duration(score=95) == ban_service.MAX_BAN_SECONDS
+    assert ban_service.resolve_duration(score=95) == ban_service.max_ban_seconds()
 
 
 # ═══════════════════ prepare / execute 语义 ═══════════════════
@@ -432,3 +435,59 @@ def test_auto_ban_falls_back_when_policy_raises(isolated_env, fake_fw, monkeypat
     auto_ban_record(_rec(), _result())
 
     assert database.query_bans(limit=10)[0].duration_sec == 1200
+
+
+# ═══════════════════════════════════════════════════════════
+#  最大封禁时长硬上限（S3①）
+#
+#  为什么必须钉住：Windows 防火墙规则没有到期时间，到期全靠进程内巡检删规则。
+#  程序长期不在时，一条「封 365 天」等于永久封掉一个可能无辜的地址。
+#  `_sec()` 与 `prepare()` 是仅有的两个收敛点，改坏任意一处都要红。
+# ═══════════════════════════════════════════════════════════
+
+CAP_7D = 7 * 24 * 3600
+
+
+def test_manual_duration_is_capped(isolated_env):
+    """手动封一年 → 被截到最大封禁时长（默认 7 天），且 expire_at 跟着算对"""
+    rec = ban_service.prepare("203.0.113.70", duration_sec=365 * 24 * 3600)
+
+    assert rec.duration_sec == CAP_7D
+    assert rec.expire_at is not None
+    assert rec.expire_at - now_ms() <= CAP_7D * 1000 + 1000
+
+
+def test_cap_is_configurable(isolated_env):
+    cfg.set("max_ban_duration_sec", 2 * 86400)
+
+    rec = ban_service.prepare("203.0.113.71", duration_sec=30 * 86400)
+
+    assert rec.duration_sec == 2 * 86400, "改了设置却不生效，等于上限形同虚设"
+
+
+def test_cap_cannot_be_configured_below_one_hour(isolated_env):
+    """上限配成 1 分钟等于让封禁形同虚设，必须被抬回 1 小时"""
+    cfg.set("max_ban_duration_sec", 60)
+
+    assert ban_service.max_ban_seconds() == 3600
+
+
+def test_permanent_ban_is_not_capped(isolated_env):
+    """0 = 永久（黑名单在用）。被截成有限值会让「设为黑名单」第二天自动失效"""
+    rec = ban_service.prepare("203.0.113.72", duration_sec=0)
+
+    assert rec.duration_sec is None
+    assert rec.expire_at is None
+
+
+def test_policy_duration_is_capped_and_explained(isolated_env):
+    """走策略的时长同样受限，且「为什么这么长」必须说明被截断过 —— 否则
+    界面显示的时长与实际生效值不符，运维会拿错数字去判断风险"""
+    cfg.set("default_ban_duration_sec", 30 * 86400)
+    cfg.set("ban_duration_high_sec", 0)  # 该等级不分档 → 落到默认值
+
+    d = ban_service.resolve_duration_detail(level=LEVEL_HIGH)
+
+    assert d.seconds == CAP_7D
+    assert "最大封禁时长" in d.detail
+    assert "30 天" in d.detail

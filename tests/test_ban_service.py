@@ -35,6 +35,20 @@ def failing_fw(monkeypatch):
     )
 
 
+@pytest.fixture
+def fake_unblock(monkeypatch):
+    """解封打桩：调用记录留在 `calls` 上，方便断言「列规则列了几次」"""
+    calls = []
+
+    def _unblock(ip, names=None, existing=None):
+        # 快照要拷一份：check_expired 解封成功后会把已删规则名从同一个 list 里摘掉
+        calls.append({"ip": ip, "names": list(names or []), "existing": list(existing or [])})
+        return True, "", 1
+
+    monkeypatch.setattr(firewall, "unblock_ip", _unblock)
+    return calls
+
+
 # ═══════════════════ prepare ═══════════════════
 
 
@@ -78,7 +92,7 @@ def test_prepare_clamps_and_sanitizes(isolated_env):
     init_db()
     rec = ban_service.prepare("203.0.113.10", 99999, "a" * 500, 10**12)
     assert rec.risk_score == 100
-    assert rec.duration_sec == ban_service.MAX_BAN_SECONDS
+    assert rec.duration_sec == ban_service.max_ban_seconds()
     assert len(rec.reason) <= 180
     assert "\n" not in rec.reason
 
@@ -166,7 +180,7 @@ def test_unban_success(isolated_env, admin, monkeypatch):
             source="manual",
         )
     )
-    monkeypatch.setattr(firewall, "unblock_ip", lambda ip, names=None: (True, "", 1))
+    monkeypatch.setattr(firewall, "unblock_ip", lambda ip, names=None, existing=None: (True, "", 1))
     b = find_active_ban_by_ip("203.0.113.10")
     assert b is not None
     ok, err = ban_service.unban(b)
@@ -180,24 +194,66 @@ def test_check_expired_requires_admin(isolated_env, no_admin):
     assert ban_service.check_expired() == []
 
 
-def test_check_expired_marks_expired(isolated_env, admin, monkeypatch):
-    init_db()
+def _expired_ban(ip: str, rule: str) -> None:
     from core.database import insert_ban
 
     insert_ban(
         BanRecord(
-            ip="203.0.113.10",
-            rule_name="PortGuard_Block_x_1_aa",
+            ip=ip,
+            rule_name=rule,
             status=STATUS_ACTIVE,
             source="manual",
             duration_sec=60,
-            expire_at=1,
+            expire_at=1,  # 早已过期
         )
-    )  # 早已过期
-    monkeypatch.setattr(firewall, "unblock_ip", lambda ip, names=None: (True, "", 1))
+    )
+
+
+def test_check_expired_marks_expired(isolated_env, admin, monkeypatch, fake_unblock):
+    init_db()
+    _expired_ban("203.0.113.10", "PortGuard_Block_x_1_aa")
+    monkeypatch.setattr(firewall, "list_rule_names", lambda: ["PortGuard_Block_x_1_aa"])
+
     done = ban_service.check_expired()
+
     assert len(done) == 1
     assert query_bans(limit=10)[0].status == "expired"
+    # 规则清单必须由本轮列一次后传下去，不能每条自己再列一次：
+    # 每条一次 PowerShell（200~600ms），积压几十条就把巡检拖成分钟级
+    assert fake_unblock[0]["existing"] == ["PortGuard_Block_x_1_aa"]
+
+
+def test_check_expired_lists_rules_only_once(isolated_env, admin, monkeypatch, fake_unblock):
+    """5 条到期 → list_rule_names 只准调 1 次"""
+    init_db()
+    for i in range(5):
+        _expired_ban(f"203.0.113.{20 + i}", f"PortGuard_Block_r{i}_1_aa")
+
+    listed = []
+
+    def fake_list():
+        listed.append(1)
+        return ["PortGuard_Block_r0_1_aa"]
+
+    monkeypatch.setattr(firewall, "list_rule_names", fake_list)
+
+    assert len(ban_service.check_expired()) == 5
+    assert len(listed) == 1, f"列了 {len(listed)} 次规则，批量解封没有复用快照"
+
+
+def test_check_expired_respects_batch_limit(isolated_env, admin, monkeypatch, fake_unblock):
+    """一轮最多解 N 条：剩下的必须留在 active，下一轮继续，不能丢"""
+    init_db()
+    for i in range(3):
+        _expired_ban(f"203.0.113.{30 + i}", f"PortGuard_Block_l{i}_1_aa")
+    monkeypatch.setattr(firewall, "list_rule_names", list)
+
+    done = ban_service.check_expired(limit=2)
+
+    assert len(done) == 2
+    left = [b for b in query_bans(limit=10) if b.status == STATUS_ACTIVE]
+    assert len(left) == 1
+    assert ban_service.expired_backlog() == 1
 
 
 def test_reconcile_fixes_stale_records(isolated_env, admin):

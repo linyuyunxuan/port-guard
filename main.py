@@ -315,6 +315,24 @@ def main() -> int:
 
     # 无人值守初始化：安全启用防火墙 + 对齐封禁，然后退出（不起界面）
     if "--enable-firewall" in sys.argv:
+        # 单实例互斥必须在**改防火墙之前**拿到。
+        # 原来这条分支在 `acquire()` 之前就 return 了，于是 CLI 与界面可以同时
+        # 改防火墙与封禁记录 —— 进程内的 `firewall._exec_lock` 挡不住跨进程，
+        # 两个 netsh 同时删同一批规则会互相把对方的规则名读成「已不存在」。
+        # 短暂等 3 秒是为了覆盖「安装脚本和开机自启几乎同时启动」这种正常竞态；
+        # 等不到就明确报错退出，而不是硬着头皮改。
+        try:
+            from core.single_instance import acquire as _acquire
+
+            if not _acquire(wait_sec=3.0):
+                print(
+                    "PortGuard 已在运行，本次不执行 --enable-firewall。"
+                    "请先从托盘退出程序，或直接用界面里的「启用防火墙」。"
+                )
+                return 2
+        except Exception:
+            # 互斥体不可用（非 Windows / 极端权限问题）不该挡住初始化
+            pass
         return _enable_firewall_cli()
 
     # Qt 导入必须单独兜住：这是「拷到别的电脑就跑不起来」的唯一现场。

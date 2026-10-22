@@ -23,9 +23,8 @@ from app import audit
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
 from core.config import LEVEL_LABEL, LEVEL_ORDER
 from core.database import (
-    active_ban_ip_map,
     delete_risk_events,
-    query_risk_events,
+    risk_events_page,
     set_risk_handled_batch,
 )
 from core.logger import get_logger
@@ -343,6 +342,10 @@ class EventsPage(QWidget):
         self._banned: Dict[str, Any] = {}
         #: 自动刷新是否被暂停（事件激增 / 单次渲染过慢时由主窗口置位）
         self.auto_paused = False
+        #: 是否已被自动降到更小的条数档位（只影响计数行文案，不改用户选择）
+        self.auto_downgraded = False
+        #: 自动降档时落到的那一档条数（用于判断提示是否还成立）
+        self._downgraded_to = 0
         self.sort = TableSort(SORT_SPECS)
         self._build()
         self.refresh()
@@ -396,17 +399,17 @@ class EventsPage(QWidget):
         self.search.setPlaceholderText("搜索 IP / 摘要…")
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(260)
-        self.search.textChanged.connect(self.refresh)
+        self.search.textChanged.connect(self._on_filter_changed)
 
         self.level = QComboBox()
         self.level.addItems(["全部等级", "严重", "高", "中", "低"])
         self.level.setFixedWidth(118)
-        self.level.currentIndexChanged.connect(self.refresh)
+        self.level.currentIndexChanged.connect(self._on_filter_changed)
 
         self.handled = QComboBox()
         self.handled.addItems(["全部状态", "未处理", "已确认", "已忽略"])
         self.handled.setFixedWidth(122)
-        self.handled.currentIndexChanged.connect(self.refresh)
+        self.handled.currentIndexChanged.connect(self._on_filter_changed)
 
         self.range = QComboBox()
         self.range.addItems(RANGE_CHOICES)
@@ -418,7 +421,7 @@ class EventsPage(QWidget):
         self.dt_from.setDisplayFormat("yyyy-MM-dd")
         self.dt_from.setFixedWidth(128)
         self.dt_from.setDate(QDate.currentDate().addDays(-6))
-        self.dt_from.dateChanged.connect(self.refresh)
+        self.dt_from.dateChanged.connect(self._on_filter_changed)
 
         self.lbl_to = QLabel("至")
         self.lbl_to.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
@@ -428,7 +431,7 @@ class EventsPage(QWidget):
         self.dt_to.setDisplayFormat("yyyy-MM-dd")
         self.dt_to.setFixedWidth(128)
         self.dt_to.setDate(QDate.currentDate())
-        self.dt_to.dateChanged.connect(self.refresh)
+        self.dt_to.dateChanged.connect(self._on_filter_changed)
 
         for widget in (self.dt_from, self.lbl_to, self.dt_to):
             widget.setVisible(False)
@@ -436,7 +439,7 @@ class EventsPage(QWidget):
         self.limit = QComboBox()
         self.limit.addItems(["最近 200 条", "最近 500 条", "最近 2000 条"])
         self.limit.setFixedWidth(140)
-        self.limit.currentIndexChanged.connect(self.refresh)
+        self.limit.currentIndexChanged.connect(self._on_filter_changed)
 
         self.merge = QCheckBox("同类合并")
         self.merge.setChecked(True)
@@ -637,6 +640,16 @@ class EventsPage(QWidget):
             or self.range.currentText() != RANGE_ALL
         )
 
+    def _on_filter_changed(self, *_args: Any) -> None:
+        """筛选控件（搜索框 / 下拉 / 日期 / 条数）改动后的刷新入口。
+
+        为什么不让它们直接连 `refresh`：这些信号都带参数（`textChanged(str)`、
+        `currentIndexChanged(int)`、`dateChanged(QDate)`），Qt 会把参数当位置参数
+        传给 `refresh(auto)` —— 于是「用户改了筛选」被当成「事件泵自动刷新」：
+        暂停期间改条件会被静默忽略，改条数也不解除暂停。必须走这个零参数槽。
+        """
+        self.refresh()
+
     def refresh(self, auto: bool = False) -> None:
         """重新加载列表。
 
@@ -655,6 +668,40 @@ class EventsPage(QWidget):
             return
         with self._refresh:
             self._load()
+
+    def downgrade_rows(self) -> bool:
+        """攻击期把显示条数降一档（2000 → 500 → 200），降了返回 True。
+
+        为什么不直接暂停自动刷新：事件激增正是最需要盯着列表的时刻，停刷等于把
+        最该看的东西藏起来。实测（离屏，1 秒灌 200 条）2000 行档位单次刷新要
+        1.37 秒 —— 界面每秒只有不到一半时间是活的；而 200 行档位只要约 80ms，
+        降档后仍然可以每秒刷一次，界面对点击的响应（心跳 P95 18ms）不受影响。
+
+        ⚠️ 已经是最小档位时返回 False，由调用方退化成「暂停自动刷新」。
+        """
+        idx = self.limit.currentIndex()
+        lower = [i for i in (1, 0) if i < idx]
+        if not lower:
+            return False
+        self.limit.blockSignals(True)  # 别触发 _on_filter_changed（那会把标记清掉）
+        self.limit.setCurrentIndex(lower[0])
+        self.limit.blockSignals(False)
+        self.auto_downgraded = True
+        self._downgraded_to = self._limit_value()
+        return True
+
+    def _info_text(self, total: int, merged_groups: int) -> str:
+        """计数行文案。降档状态要写在这里 —— 否则「列表怎么只剩 200 条」= bug
+
+        判据里带 `_downgraded_to` 是为了自愈：用户自己把条数改回更大档位后，
+        「已临时降到 N 条」这句话自动消失，不需要额外的清理状态。
+        """
+        info = f"共 {total} 条事件"
+        if merged_groups:
+            info += f"（同类合并为 {merged_groups} 组）"
+        if self.auto_downgraded and self._limit_value() == self._downgraded_to:
+            info += f" · 事件激增，已临时降到最近 {self._downgraded_to} 条"
+        return info
 
     def set_auto_paused(self, paused: bool) -> None:
         """暂停 / 恢复自动刷新，并在计数行明说原因（否则「列表不动了」= bug）
@@ -683,7 +730,9 @@ class EventsPage(QWidget):
 
     def _load(self) -> None:
         since, until = self._range_ms()
-        rows = query_risk_events(
+        # 事件列表与「行内按钮的封禁态」共用一条连接：省一次建连（15~20ms/次），
+        # 也让两者是同一时刻的快照（否则按钮说已封禁、列表里还看不到那条封禁）
+        rows, banned = risk_events_page(
             limit=self._limit_value(),
             level=self._level_filter(),
             handled=self._handled_filter(),
@@ -695,11 +744,7 @@ class EventsPage(QWidget):
         self._rows_src = rows
         # 行内按钮要知道「这个 IP 是不是已经封了」：一次查询给整张表用。
         # 逐行查在 200 行的表上就是 200 次建连，渲染直接掉到秒级。
-        try:
-            self._banned = active_ban_ip_map()
-        except Exception:
-            log.exception("加载生效中的封禁失败（行内按钮将按「未封禁」渲染）")
-            self._banned = {}
+        self._banned = banned
         # 同类合并：同一「IP+端口+路径+等级+评分+规则+状态」折叠成一行（×N）。
         # 合并的是展示层，_rows_src 始终是后端原序原条数，导出/审计走 flatten 还原。
         merged = self.merge.isChecked()
@@ -707,10 +752,9 @@ class EventsPage(QWidget):
         self._src = src
         self._rows = self.sort.apply(src)
         self._render(self._rows)
-        info = f"共 {len(rows)} 条事件"
-        if merged and len(src) < len(rows):
-            info += f"（同类合并为 {len(src)} 组）"
-        self.lbl_info.setText(info)
+        # 只有真的折叠掉了行才提「合并为 N 组」，否则是废话
+        groups = len(src) if (merged and len(src) < len(rows)) else 0
+        self.lbl_info.setText(self._info_text(len(rows), groups))
         self.btn_export.setToolTip(f"导出当前筛选结果（{len(rows)} 条事件）")
 
     def _render(self, rows: List[Dict]) -> None:

@@ -220,6 +220,10 @@ DEFAULT_ESCALATION_FACTOR = 2
 #: 否则 prepare() 里的 clamp_int 会静默截断 → 界面显示值与实际生效值不符
 DEFAULT_ESCALATION_MAX_SEC = 7 * 24 * 3600
 
+#: 最大封禁时长（秒）的出厂值：7 天。
+#: 见 DEFAULT_SETTINGS["max_ban_duration_sec"] 的说明；界面按天展示。
+MAX_BAN_DURATION_DEFAULT_SEC = 7 * 24 * 3600
+
 
 # ═══════════════════════════════════════════════════════════
 #  保留期（定期清理）
@@ -256,6 +260,12 @@ DEFAULT_SETTINGS = {
     "ban_escalation_enabled": "0",  # 1=同一 IP 再次被封时按倍数加长
     "ban_escalation_factor": str(DEFAULT_ESCALATION_FACTOR),  # 每次递增的倍数
     "ban_escalation_max_sec": str(DEFAULT_ESCALATION_MAX_SEC),  # 递增封顶（秒）
+    # ── 最大封禁时长（硬上限，秒）──
+    # 防火墙规则本身没有到期时间，到期完全靠程序内巡检删规则。程序长期不在时，
+    # 「封一年」就等于永久封掉一个可能无辜的地址。所以所有**有限时长**都会被截断到
+    # 这个值以内（app.ban_service.max_ban_seconds 是唯一读取点）。
+    # ⚠️ 永久封禁（default_ban_duration_sec=0 / 黑名单）**不受此限**。
+    "max_ban_duration_sec": str(MAX_BAN_DURATION_DEFAULT_SEC),
     # 告警
     "alert_sound": "1",
     "alert_popup_level": LEVEL_CRITICAL,

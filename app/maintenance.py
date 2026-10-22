@@ -550,3 +550,29 @@ def run_all() -> Tuple[int, int, int, int, int, int, int]:
             ),
         )
     return rows, risk, bans, audits, files, backups, downloads
+
+
+def run_daily() -> Tuple[Tuple[int, int, int, int, int, int, int], bool, str]:
+    """
+    每日维护（供定时器调用）：先清理过期数据，**再打一份数据库备份**。
+
+    返回 (run_all 的计数元组, 备份是否成功, 备份路径或失败原因)。
+
+    为什么备份要挂在这里：`run_all` 只负责删，而备份一直是「用户想起来才点」
+    （报告 F3 / S8）。一个每天自动删数据的工具必须有自动退路 —— 磁盘故障、
+    误恢复、升级失败都需要一份能回退的完整快照。
+
+    顺序不可反：**先清理再备份**。备份在清理之后才是一份「小而完整」的快照；
+    反过来就等于每天白拷一遍马上要被删掉的历史数据（访问流水 30 天可能几百 MB）。
+
+    备份失败不影响清理结果：清理已经提交，把失败原样报出去由上层记日志 / 提示；
+    这里**不重试** —— 磁盘满时重试只是再失败一次，还会拖住下一轮定时器。
+    """
+    counts = run_all()
+    ok, detail = backup_db()
+    if ok:
+        cleanup_db_backups()
+        log.info("每日自动备份完成：%s", os.path.basename(detail))
+    else:
+        log.error("每日自动备份失败：%s", detail)
+    return counts, ok, detail

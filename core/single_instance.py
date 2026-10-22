@@ -19,7 +19,8 @@ import contextlib
 import ctypes
 import sys
 import threading
-from typing import Any, Optional
+import time
+from typing import Any, Optional, Tuple
 
 # 命名互斥体名。不带 Global\ 前缀 = 会话级（Local），
 # 带 Global\ 需要 SeCreateGlobalPrivilege（管理员），对单机工具没必要。
@@ -48,19 +49,37 @@ def _close(handle: int) -> None:
         _kernel32().CloseHandle(handle)
 
 
-def acquire(name: str = DEFAULT_MUTEX_NAME) -> bool:
-    """尝试成为唯一实例。True = 本进程是唯一实例。"""
-    global _handle
+def acquire(name: str = DEFAULT_MUTEX_NAME, wait_sec: float = 0.0) -> bool:
+    """尝试成为唯一实例。True = 本进程是唯一实例。
 
+    `wait_sec`：名字已被占用时最多再等多久（秒）。为什么需要它 —— 命令行入口
+    （`--enable-firewall`）可能和界面几乎同时启动（开机脚本 / 安装器），
+    这时候「对方还活着」和「对方刚好退出」看起来是一样的；短暂等一等再判失败，
+    比直接放弃更符合预期。界面路径保持 0 秒（重复启动就该立刻提示）。
+    """
     if sys.platform != "win32":  # pragma: no cover —— 本项目只跑 Windows
         return True
     if _should_allow_multi():
         return True
 
+    deadline = time.monotonic() + max(0.0, wait_sec)
+    while True:
+        won, retryable = _try_acquire(name)
+        if won:
+            return True
+        if not retryable or time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def _try_acquire(name: str) -> Tuple[bool, bool]:
+    """(是否拿到, 是否值得重试)。名字被别的进程占着才值得重试"""
+    global _handle
+
     with _lock:
         if _handle is not None:
             # 本进程已经获取过，说明是重复调用而非「另一个实例」
-            return False
+            return False, False
 
         k32 = _kernel32()
         k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
@@ -74,11 +93,11 @@ def acquire(name: str = DEFAULT_MUTEX_NAME) -> bool:
             # 名字已存在 = 已有实例在跑。注意必须关掉这次拿到的句柄，
             # 否则会凭空多留一个引用，导致对方退出后本进程仍「占着」名字。
             _close(handle)
-            return False
+            return False, True
 
         _handle = int(handle)
         atexit.register(release)
-        return True
+        return True, False
 
 
 def release() -> None:

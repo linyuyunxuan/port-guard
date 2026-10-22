@@ -48,7 +48,7 @@ def fake_fw(monkeypatch):
         "block_ip",
         lambda ip, duration=None, note="": (True, f"PortGuard_Block_{ip}_1_aa", ""),
     )
-    monkeypatch.setattr(firewall, "unblock_ip", lambda ip, names=None: (True, "", 1))
+    monkeypatch.setattr(firewall, "unblock_ip", lambda ip, names=None, existing=None: (True, "", 1))
     monkeypatch.setattr(firewall, "unblock_all", lambda: (True, 1, ""))
 
 

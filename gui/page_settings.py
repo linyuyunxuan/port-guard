@@ -33,6 +33,7 @@ from core.config import (
     LEVEL_LABEL,
     LEVEL_LOW,
     LEVEL_MEDIUM,
+    MAX_BAN_DURATION_DEFAULT_SEC,
     XDB_UPSTREAM,
     db_path,
     user_data_dir,
@@ -487,6 +488,16 @@ class SettingsPage(QWidget):
         self.sp_esc_max.setSuffix(" 小时")
         self.sp_esc_max.setFixedWidth(160)
 
+        # ── 最大封禁时长（硬上限）──
+        # 防火墙规则本身没有到期时间，到期完全靠程序内巡检删规则。程序长期不在
+        # （关机 / 卸载 / 崩溃没人管）时，一条「封 365 天」就等于永久封掉一个可能
+        # 无辜的地址。上限按天展示，永久封禁（0 分钟）不受它影响。
+        self.sp_max_ban = QSpinBox()
+        self.sp_max_ban.setRange(1, 365)
+        self.sp_max_ban.setValue(MAX_BAN_DURATION_DEFAULT_SEC // 86400)
+        self.sp_max_ban.setSuffix(" 天")
+        self.sp_max_ban.setFixedWidth(120)
+
         ban.add("自动封禁最低评分", self.sp_threshold)
         ban.add("默认封禁时长", self.sp_duration)
         ban.add("严重档时长", self.sp_dur_critical)
@@ -496,12 +507,16 @@ class SettingsPage(QWidget):
         ban.add("重复封禁递增", _row_widget(self.tg_escalation, spacing=10))
         ban.add("递增倍数", self.sp_esc_factor)
         ban.add("递增封顶", self.sp_esc_max)
+        ban.add("最大封禁时长", self.sp_max_ban)
 
         hint_strategy = QLabel(
             "时长优先级：规则指定 > 重复封禁递增 > 风险等级分档 > 默认封禁时长。"
             "「不分档」表示该等级沿用默认封禁时长；递增以等级档位为基准，"
             "同一 IP 每多一次历史封禁记录就乘一次倍数，直到封顶值。"
             "手动封禁对话框仍以「默认封禁时长」为初始值，可随时改。"
+            "「最大封禁时长」是硬上限：任何有限时长都会被截断到它以内"
+            "（防火墙规则不会自己到期，程序长期不在时没人会解，所以别设太长）；"
+            "「永久封禁」（时长填 0）不受这个上限影响。"
         )
         hint_strategy.setObjectName("hint")
         hint_strategy.setWordWrap(True)
@@ -1264,6 +1279,13 @@ class SettingsPage(QWidget):
         self.sp_esc_max.setValue(
             (cfg.get_int("ban_escalation_max_sec", DEFAULT_ESCALATION_MAX_SEC) + 3599) // 3600
         )
+        # 最大封禁时长按天展示；老库没有这个键时用内置 7 天
+        self.sp_max_ban.setValue(
+            max(
+                1,
+                cfg.get_int("max_ban_duration_sec", MAX_BAN_DURATION_DEFAULT_SEC) // 86400,
+            )
+        )
         self._on_escalation_toggle(self.tg_escalation.isChecked())
 
         # 告警
@@ -1331,6 +1353,8 @@ class SettingsPage(QWidget):
                 # 上限 365 天 = app.ban_service.MAX_BAN_SECONDS，别改大：
                 # 超出部分会被 prepare() 里的 clamp_int 静默截断
                 "ban_escalation_max_sec": self.sp_esc_max.value() * 3600,
+                # 硬上限：所有有限时长都会被截断到它以内（0=永久的黑名单不受限）
+                "max_ban_duration_sec": self.sp_max_ban.value() * 86400,
                 "alert_sound": "1" if self.tg_sound.isChecked() else "0",
                 "alert_popup_level": (
                     "none"

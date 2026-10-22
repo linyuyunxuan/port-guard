@@ -178,12 +178,10 @@ def test_events_page_row_action_and_menu_follow_state(qapp, fresh_db, monkeypatc
     from gui import page_events
 
     database.init_db()
-    monkeypatch.setattr(
-        page_events,
-        "active_ban_ip_map",
-        lambda: {"203.0.113.10": SimpleNamespace(id=7, expire_at=None)},
-    )
     page = page_events.EventsPage()
+    # 封禁态由 `_load` 从 `database.risk_events_page()` 一次性取回并挂在 `_banned` 上，
+    # 行内按钮只认这个映射（不再每次 refresh 单独查一次全表）
+    page._banned = {"203.0.113.10": SimpleNamespace(id=7, expire_at=None)}
 
     banned_row = {"ip": "203.0.113.10", "risk_score": 92, "summary": "x", "handled": 0}
     fresh_row = {"ip": "198.51.100.7", "risk_score": 92, "summary": "x", "handled": 0}

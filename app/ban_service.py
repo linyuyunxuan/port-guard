@@ -25,6 +25,7 @@ from core.config import (
     LEVEL_LABEL,
     LEVEL_LOW,
     LEVEL_MEDIUM,
+    MAX_BAN_DURATION_DEFAULT_SEC,
 )
 from core.database import (
     count_bans_by_ip,
@@ -56,6 +57,16 @@ log = get_logger(__name__)
 
 MAX_BAN_SECONDS = 365 * 24 * 3600
 MAX_IP_LEN = 64
+
+#: 最大封禁时长（秒）的内置默认值：7 天（值在 core.config，界面也用同一个）。
+#:
+#: 为什么需要这个「硬上限」：Windows 防火墙规则**没有到期时间**（见 core/firewall.py
+#: 关于「规则无时长」的注释），到期完全靠进程内 60 秒巡检去删规则。程序一旦长期
+#: 不在（关机、卸载、崩溃后没人管），「封 365 天」就等于永久封掉一个可能无辜的
+#: 地址，而没有任何东西会把它解掉。7 天是「够打击 / 不会变事故」的折中，可在
+#: 设置页「封禁策略」里调整，上限本身最高到 365 天。
+#: 上限本身不允许低于 1 小时：配成 5 分钟等于让封禁形同虚设
+_MIN_MAX_BAN_SEC = 3600
 
 
 # ═══════════════════════════════════════════════════════════
@@ -105,9 +116,23 @@ class DurationDecision(NamedTuple):
         return SOURCE_LABEL.get(self.source, self.source)
 
 
+def max_ban_seconds() -> int:
+    """
+    当前生效的封禁时长硬上限（秒）。
+
+    取设置 `max_ban_duration_sec` 与内置 365 天兜底的较小者；非法值退回 7 天。
+
+    ⚠️ **永久封禁（`duration_sec=0`，黑名单）不受此限**：0 是用户显式选择的
+    「永久拦截」语义，把它截成一个有限值会让「设为黑名单」第二天自动失效。
+    这里限制的是「有限时长到底能多长」。
+    """
+    configured = cfg.get_int("max_ban_duration_sec", MAX_BAN_DURATION_DEFAULT_SEC)
+    return clamp_int(configured, _MIN_MAX_BAN_SEC, MAX_BAN_SECONDS, MAX_BAN_DURATION_DEFAULT_SEC)
+
+
 def _sec(value: Any, fallback: Optional[int] = None) -> int:
     """
-    把任意外部值收敛成合法封禁时长：`1 <= v <= MAX_BAN_SECONDS`。
+    把任意外部值收敛成合法封禁时长：`1 <= v <= 当前最大封禁时长`。
 
     非法 / 非正 / 超出上限时退回 fallback（再退 DEFAULT_BAN_DURATION_SEC）。
     这是「策略绝不返回 0」的唯一出口，别在别处绕过它。
@@ -117,14 +142,20 @@ def _sec(value: Any, fallback: Optional[int] = None) -> int:
         v = clamp_int(fallback, 0, MAX_BAN_SECONDS, 0)
     if v <= 0:
         v = DEFAULT_BAN_DURATION_SEC
-    return max(_MIN_POLICY_SEC, min(v, MAX_BAN_SECONDS))
+    cap = max_ban_seconds()
+    return max(_MIN_POLICY_SEC, min(v, cap))
+
+
+def _default_raw(override: Optional[int] = None) -> int:
+    """兜底时长的**原始配置值**（未经 `_sec` 收敛），只用于给出诚实的说明文字"""
+    if override is not None:
+        return int(override)
+    return cfg.get_int("default_ban_duration_sec", DEFAULT_BAN_DURATION_SEC)
 
 
 def _default_sec(override: Optional[int] = None) -> int:
     """兜底时长：优先用调用方给的 default，其次读设置，最后用内置默认"""
-    if override is not None:
-        return _sec(override)
-    return _sec(cfg.get_int("default_ban_duration_sec", DEFAULT_BAN_DURATION_SEC))
+    return _sec(_default_raw(override))
 
 
 def tier_sec_for_level(level: Optional[str]) -> int:
@@ -237,6 +268,13 @@ def resolve_duration_detail(
     会把本次自己数进去，第一次封禁就翻倍（core.database.count_bans_by_ip 亦同）。
     """
     base = _default_sec(default)
+    cap = max_ban_seconds()
+
+    def _cut(requested: int) -> str:
+        """被最大封禁时长截断时补一句说明，别让「为什么这么长」与实际生效值不符"""
+        if requested > cap:
+            return f"（受最大封禁时长 {format_duration(cap)} 限制，已截断）"
+        return ""
 
     # 1. 规则级：最狠 = 最长
     hits = [(rid, _rule_duration_sec(rid)) for rid in (rule_ids or []) if rid]
@@ -244,7 +282,9 @@ def resolve_duration_detail(
     if hits:
         rid, sec = max(hits, key=lambda kv: kv[1])
         return DurationDecision(
-            _sec(sec, base), SOURCE_RULE, f"规则「{rule_label(rid)}」指定 {format_duration(sec)}"
+            _sec(sec, base),
+            SOURCE_RULE,
+            f"规则「{rule_label(rid)}」指定 {format_duration(sec)}{_cut(sec)}",
         )
 
     lv = level or (RuleEngine.level_of(int(score)) if score is not None else None)
@@ -257,11 +297,13 @@ def resolve_duration_detail(
         prior = _prior_ban_count(ip) if factor > 1 else 0
         if prior > 0:
             start = _sec(tier or base, base)
-            sec = _sec(escalation_sec(start, prior), start)
+            raw = escalation_sec(start, prior)
+            sec = _sec(raw, start)
             return DurationDecision(
                 sec,
                 SOURCE_ESCALATION,
-                f"{ip} 历史已封禁 {prior} 次，基准 {format_duration(start)} × {factor}^{prior} → {format_duration(sec)}",
+                f"{ip} 历史已封禁 {prior} 次，基准 {format_duration(start)} × {factor}^{prior} → "
+                f"{format_duration(sec)}{_cut(raw)}",
             )
 
     # 3. 等级级
@@ -269,12 +311,16 @@ def resolve_duration_detail(
         return DurationDecision(
             _sec(tier, base),
             SOURCE_LEVEL,
-            f"风险等级「{LEVEL_LABEL.get(lv or '', lv or '未定')}」对应 {format_duration(tier)}",
+            f"风险等级「{LEVEL_LABEL.get(lv or '', lv or '未定')}」对应 "
+            f"{format_duration(tier)}{_cut(tier)}",
         )
 
     # 4. 默认
+    raw_default = _default_raw(default)
     return DurationDecision(
-        base, SOURCE_DEFAULT, f"未命中分档 / 递增，使用默认 {format_duration(base)}"
+        base,
+        SOURCE_DEFAULT,
+        f"未命中分档 / 递增，使用默认 {format_duration(raw_default)}{_cut(raw_default)}",
     )
 
 
@@ -317,7 +363,7 @@ def prepare(
     `duration_sec` 三种传法，语义必须分清：
     · `None`（默认）—— 走封禁时长策略：规则级 > 递增级 > 等级级 > 默认；
     · `0`            —— **永久封禁**（duration_sec/expire_at 都是 None）；
-    · `>0`           —— 调用方指定的秒数（超出上限会被夹到 365 天）。
+    · `>0`           —— 调用方指定的秒数（超出「最大封禁时长」会被截断）。
     策略分支永远拿不到 0：`resolve_duration_detail()` 的下限硬钉在 1 秒。
     """
     try:
@@ -341,6 +387,19 @@ def prepare(
         )
     else:
         duration = clamp_int(duration_sec, 0, MAX_BAN_SECONDS, 0)
+        # 0 = 永久封禁（黑名单在用），是用户显式选择的语义，不受上限影响。
+        # 有限时长一律按「最大封禁时长」截断 —— 这是防「误封一年」的最后一道闸：
+        # 防火墙规则没有到期时间，程序长期不在时没人会把它解掉。
+        if duration > 0:
+            cap = max_ban_seconds()
+            if duration > cap:
+                log.warning(
+                    "封禁时长 %s 超过最大封禁时长 %s，已截断（ip=%s）",
+                    format_duration(duration),
+                    format_duration(cap),
+                    safe_ip,
+                )
+                duration = cap
 
     expire = None if not duration else int(time.time() * 1000) + duration * 1000
     return BanRecord(
@@ -632,10 +691,23 @@ def _warn_expire_without_admin() -> None:
     )
 
 
-def check_expired(now: Optional[int] = None) -> List[BanRecord]:
+#: 到期巡检「一轮最多解几条」。
+#:
+#: 为什么需要限速：一次解封 = 至少一次 netsh/PowerShell 删除（实测 100~400ms），
+#: 再加一条审计写入。积压 300 条时一轮要跑两分钟以上，而巡检定时器是 60 秒一次 ——
+#: 会一直处在「上一轮没跑完」的状态。分轮次处理既能让界面尽快看到进展，也不会
+#: 让审计表在瞬间被灌满。剩下的不会丢：下一轮（60 秒后）继续，`expired_backlog()`
+#: 会把真实积压数显示在权限条上。
+EXPIRE_BATCH_LIMIT = 50
+
+
+def check_expired(now: Optional[int] = None, limit: int = EXPIRE_BATCH_LIMIT) -> List[BanRecord]:
     """
     到期解封巡检：把已到期但仍 active 的封禁真正解掉。
     返回本次成功解封的记录列表。
+
+    `limit`：本轮最多解多少条（默认 `EXPIRE_BATCH_LIMIT`）。传 0 或负数表示不限，
+    仅供测试与手工修复使用。
 
     ⚠️ 非管理员时返回空列表，但**不再静默**：会记一条限流告警（见
     `_warn_expire_without_admin`），界面侧还有 `expired_backlog()` 可用。
@@ -650,9 +722,31 @@ def check_expired(now: Optional[int] = None) -> List[BanRecord]:
         log.exception("查询到期封禁失败")
         return []
 
+    if limit and limit > 0 and len(expired) > limit:
+        log.warning(
+            "到期封禁积压 %d 条，本轮先解 %d 条，其余留待下一轮",
+            len(expired),
+            limit,
+        )
+        expired = expired[:limit]
+
+    # 整轮只列一次规则清单。
+    # unblock_ip 内部要按 IP 清理「同 IP 的历史规则」，不传快照就每条都自己列一次
+    # （一次 PowerShell 200~600ms）—— 50 条就是 10~30 秒的纯列举开销，巡检会越拖越慢。
+    try:
+        existing: List[str] = list(firewall.list_rule_names())
+    except Exception:
+        log.exception("列举防火墙规则失败，本轮按逐条反解处理（会慢一些）")
+        existing = []
+
     for b in expired:
-        ok, err, _n = firewall.unblock_ip(b.ip, [b.rule_name] if b.rule_name else [])
+        ok, err, _n = firewall.unblock_ip(b.ip, [b.rule_name] if b.rule_name else [], existing)
         if ok:
+            if b.rule_name:
+                # 快照是「本轮开始时」的，已经删掉的规则名要摘掉，
+                # 否则后面的 IP 会重复尝试删除一个已不存在的规则并记一条失败
+                with contextlib.suppress(ValueError):
+                    existing.remove(b.rule_name)
             try:
                 mark_ban_unbanned(b.id, STATUS_EXPIRED, unblocked_by=audit.ACTOR_SYSTEM)
             except Exception:
@@ -681,6 +775,75 @@ def check_expired(now: Optional[int] = None) -> List[BanRecord]:
                 detail=err or "",
             )
     return done
+
+
+#: 残留 pending 的判定阈值（秒）。`execute()` 写 pending → 调防火墙 → 回填结果
+#: 之间被杀，记录会永远停在 pending；给一段宽限期再动手，避免把「正在封禁中」误收。
+PENDING_STALE_SEC = 600
+
+
+def recover_stale_pending(timeout_sec: int = PENDING_STALE_SEC) -> int:
+    """
+    启动时收敛「插了 pending 记录但进程中途被杀」的残留，返回处理条数。
+
+    为什么必须做：`execute()` 的顺序是 写 pending → 调防火墙 → 回填结果。
+    中间被杀（关机、崩溃、用户强杀）会留下一条永远 pending 的记录，而它有两种
+    截然不同的真实状态，界面上却长得一模一样：
+      · 防火墙里规则**已建**：其实拦住了，但因为不是 active，到期巡检永远不管它
+        → 规则永久生效，误封变事故；
+      · 防火墙里规则**没建**：其实没拦住，界面上却写着「封禁中」
+        → 用户以为拦住了，最坏的一种假成功。
+    所以启动时必须按「规则是否真实存在」回填，而不是按时间一刀切。
+
+    ⚠️ 判定只依据防火墙规则清单，**绝不因为「超时了」就判失败**；非管理员读不到
+    清单时一条都不动（宁可不收敛，也不凭空改状态）。
+    """
+    if not firewall.is_admin():
+        return 0
+
+    cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - max(60, timeout_sec)))
+    try:
+        # created_at 是本地时间字符串（YYYY-MM-DD HH:MM:SS），同格式可直接比大小
+        rows = [
+            b
+            for b in query_bans(status=STATUS_PENDING, limit=2000)
+            if b.created_at and b.created_at <= cutoff
+        ]
+    except Exception:
+        log.exception("查询残留 pending 记录失败")
+        return 0
+    if not rows:
+        return 0
+
+    try:
+        existing = set(firewall.list_rule_names())
+    except Exception:
+        log.exception("读取防火墙规则失败，本次不收敛残留 pending（避免误判）")
+        return 0
+
+    fixed = 0
+    for b in rows:
+        alive = bool(b.rule_name) and b.rule_name in existing
+        status = STATUS_ACTIVE if alive else STATUS_FAILED
+        msg = "" if alive else "进程在封禁过程中退出，防火墙规则未建立"
+        try:
+            update_ban(b.id, status=status, error_msg=msg)
+        except Exception:
+            log.exception("收敛残留 pending 失败 ban_id=%s", b.id)
+            continue
+        fixed += 1
+        log.warning("残留 pending 已收敛：ip=%s（记录 #%s）→ %s", b.ip, b.id, status)
+        audit.record(
+            audit.ACTION_BAN_RECOVER,
+            actor=audit.ACTOR_SYSTEM,
+            target_type="ban",
+            target_id=b.id,
+            summary=f"{b.ip} 上次封禁未收尾，启动时按防火墙实际状态回填为「{status}」",
+            before={"status": STATUS_PENDING, "rule_name": b.rule_name},
+            after={"status": status},
+            detail=msg,
+        )
+    return fixed
 
 
 def reconcile(rule_names: List[str]) -> int:

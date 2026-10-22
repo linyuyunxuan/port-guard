@@ -42,7 +42,12 @@ _initialized = False
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(db_path(), timeout=10.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # `journal_mode` 是**持久化在库文件里**的属性，不是连接级设置：已经是 WAL 时
+    # 再设一次不会带来任何收益，却要拿一次库级锁并回读 header —— 实测每次 4~6ms。
+    # 界面每次刷新至少开两条短连接（列表查询 + 生效封禁），200 行刷新里纯连接
+    # 开销就占 20ms 以上。先读一次（微秒级）再决定要不要写。
+    if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
@@ -716,7 +721,8 @@ def insert_risk_event(
         conn.close()
 
 
-def query_risk_events(
+def _query_risk_rows(
+    conn: sqlite3.Connection,
     limit: int = 500,
     offset: int = 0,
     level: str = "",
@@ -725,13 +731,7 @@ def query_risk_events(
     since_ts: Optional[int] = None,
     until_ts: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """按条件取风险事件。
-
-    `since_ts` / `until_ts` 是 epoch 毫秒的**左闭右开**区间
-    （`event_ts >= since_ts AND event_ts < until_ts`）。右端取开区间是为了让
-    「结束日期」能直接传「次日零点」——否则选到 10-19 这一天时，
-    10-19 23:59:59.999 的事件会漏掉，而毫秒精度下手写 +86399999 很容易算错。
-    """
+    """在给定连接上执行风险事件查询（纯执行版本，供单连接组合查询复用）"""
     sql = "SELECT * FROM risk_event WHERE 1=1"
     args: List[Any] = []
     if level:
@@ -751,18 +751,37 @@ def query_risk_events(
         args.append(int(until_ts))
     sql += " ORDER BY event_ts DESC, id DESC LIMIT ? OFFSET ?"
     args += [limit, offset]
+    out = []
+    for r in conn.execute(sql, args):
+        d = dict(r)
+        try:
+            d["matched_rules"] = json.loads(d["matched_rules"]) if d["matched_rules"] else []
+        except Exception:
+            d["matched_rules"] = []
+        d["geo"] = GeoInfo.from_json(d.get("geo"))
+        out.append(d)
+    return out
+
+
+def query_risk_events(
+    limit: int = 500,
+    offset: int = 0,
+    level: str = "",
+    handled: Optional[int] = None,
+    keyword: str = "",
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """按条件取风险事件。
+
+    `since_ts` / `until_ts` 是 epoch 毫秒的**左闭右开**区间
+    （`event_ts >= since_ts AND event_ts < until_ts`）。右端取开区间是为了让
+    「结束日期」能直接传「次日零点」——否则选到 10-19 这一天时，
+    10-19 23:59:59.999 的事件会漏掉，而毫秒精度下手写 +86399999 很容易算错。
+    """
     conn = _connect()
     try:
-        out = []
-        for r in conn.execute(sql, args):
-            d = dict(r)
-            try:
-                d["matched_rules"] = json.loads(d["matched_rules"]) if d["matched_rules"] else []
-            except Exception:
-                d["matched_rules"] = []
-            d["geo"] = GeoInfo.from_json(d.get("geo"))
-            out.append(d)
-        return out
+        return _query_risk_rows(conn, limit, offset, level, handled, keyword, since_ts, until_ts)
     finally:
         conn.close()
 
@@ -1024,13 +1043,60 @@ def list_all_active_bans() -> List[BanRecord]:
     return query_bans(status=STATUS_ACTIVE, limit=100000)
 
 
+def _active_ban_map(conn: sqlite3.Connection) -> Dict[str, BanRecord]:
+    rows = conn.execute("SELECT * FROM ban_list WHERE status = ?", (STATUS_ACTIVE,))
+    return {b.ip: b for b in (_row_to_ban(r) for r in rows)}
+
+
 def active_ban_ip_map() -> Dict[str, BanRecord]:
     """当前生效中的封禁，按 IP 索引 —— 界面行内按钮据此显示「已封禁」。
 
     页面在 refresh 里查**一次**给整张表用：逐行调 `find_active_ban_by_ip`
     在 200 行的表上就是 200 次建连 + 200 次查询，直接把渲染拖成秒级。
     """
-    return {b.ip: b for b in list_all_active_bans()}
+    conn = _connect()
+    try:
+        return _active_ban_map(conn)
+    finally:
+        conn.close()
+
+
+def risk_events_page(
+    limit: int = 200,
+    level: str = "",
+    handled: Optional[int] = None,
+    keyword: str = "",
+    since_ts: Optional[int] = None,
+    until_ts: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, BanRecord]]:
+    """事件页刷新的组合查询：(事件列表, 生效封禁映射) **共用一条连接**。
+
+    为什么值得单开一个函数：一次 `sqlite3.connect` + 首个语句实测 15~20ms
+    （WAL 索引要读、杀软要过一遍）。事件页每次刷新要「事件列表 + 行内按钮的
+    封禁态」两份数据，各开一条连接就是白付两遍；200 行档位下这部分能占整次
+    刷新的三成。两者又必须是**同一时刻**的快照，否则会出现「按钮说已封禁、
+    列表里还没出现这条封禁」的错位。
+    """
+    conn = _connect()
+    try:
+        rows = _query_risk_rows(
+            conn,
+            limit=limit,
+            level=level,
+            handled=handled,
+            keyword=keyword,
+            since_ts=since_ts,
+            until_ts=until_ts,
+        )
+        try:
+            banned = _active_ban_map(conn)
+        except Exception:
+            # 封禁态查不出来只是按钮显示不准确，不该连列表一起不给看
+            log.exception("加载生效中的封禁失败（行内按钮将按「未封禁」渲染）")
+            banned = {}
+        return rows, banned
+    finally:
+        conn.close()
 
 
 def list_expired_bans(now: Optional[int] = None) -> List[BanRecord]:

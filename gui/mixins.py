@@ -14,7 +14,7 @@ PortGuard — 主窗口的行为 Mixin
 import contextlib
 import threading
 import time
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from app import ban_service, maintenance
 from app.xdb_service import get_service as get_xdb_service
@@ -67,11 +67,18 @@ CLEANUP_TICK_MS = 10 * 60_000
 # 开头的实测），而事件泵 150ms 一拍；攻击时风险事件成批到达，刷新会一轮压一轮，
 # 界面越刷越滞后 —— 正好在最需要看列表的时候最卡。
 # 所以：合并成一拍一刷、两次之间至少隔 EVENTS_REFRESH_MIN_SEC，并按上次渲染
-# 耗时自适应退避；单次渲染超过 EVENTS_SLOW_RENDER_SEC 就暂停自动刷新并明示，
-# 让用户自己决定什么时候看（手动点「刷新」始终有效）。
+# 耗时自适应退避；单次渲染超过 EVENTS_SLOW_RENDER_SEC 先**自动降档**（2000 →
+# 500 → 200 行，攻击期最需要盯列表，不能停刷），降到最小档仍慢才暂停自动刷新
+# 并在计数行明示（手动点「刷新」始终有效）。
 EVENTS_REFRESH_MIN_SEC = 1.0
 EVENTS_REFRESH_MAX_SEC = 5.0
 EVENTS_SLOW_RENDER_SEC = 0.8
+# 单拍（150ms）内新到的风险事件条数达到这个量，就认定「正在被攻击」，在刷新
+# **之前**先降档。为什么不只靠「上次渲染太慢」：那样攻击期必然要先把最大档位
+# 完整渲染一遍（实测 2000 行单次 1.66 秒，其中含一次 Python 全量 GC），这 1.6
+# 秒的卡顿就发生在攻击刚起来的时刻，正是用户第一次要看列表的时候。
+# 20 条/150ms ≈ 130 条/秒，正常业务流量（个位数/秒）差着一个数量级，不会误伤。
+EVENTS_BURST_HINT = 20
 
 
 class EventPumpMixin(_HostBase):
@@ -101,7 +108,10 @@ class EventPumpMixin(_HostBase):
     _events_interval: float
     _events_ready_at: float
     _events_paused: bool
+    # 本拍新到的风险事件条数（见 EVENTS_BURST_HINT）
+    _events_burst: int
     _expire_busy: BusyGuard
+    _maint_busy: BusyGuard
 
     # 这两个方法由 MainWindow 实现（MainWindow 自身的定义优先于 Mixin），
     # 在此声明仅为让类型检查器知道它们存在；单独使用本 Mixin 会直接报错，
@@ -132,8 +142,12 @@ class EventPumpMixin(_HostBase):
         self._events_interval = EVENTS_REFRESH_MIN_SEC
         self._events_ready_at = 0.0
         self._events_paused = False
+        self._events_burst = 0
         # 到期巡检在后台线程跑，用忙标记挡住「上一轮还没完下一轮又起」
         self._expire_busy = BusyGuard()
+        # 每日维护（清理 + 自动备份）也走后台：清理要删几十万行，备份要拷库文件，
+        # 放界面线程里跑就是「凌晨三点界面突然卡住几十秒」，被人当成崩了
+        self._maint_busy = BusyGuard()
 
         # 主事件泵：批量把后台队列里的记录搬到界面
         self.pump = QTimer(self)
@@ -154,6 +168,11 @@ class EventPumpMixin(_HostBase):
         # 启动补检：定时器第一次触发在 60 秒后，而程序关了一整晚再打开时，
         # 这 60 秒里所有本该解封的 IP 仍然被封着。启动后立刻补跑一次。
         QTimer.singleShot(1500, self._check_expired)
+
+        # 残留 pending 收敛：上次封禁「写完记录但没回填结果」的，要按防火墙实际
+        # 状态补一个结论 —— 否则界面上它永远显示「封禁中」，而实际可能两头都不对。
+        # 放在黑名单补封之前：它会改记录状态，后面的补封才看得到准确的 active 集合。
+        QTimer.singleShot(2500, self._recover_pending)
 
         # 黑名单补封：普通权限下加入的黑名单只落了文件（当时已明确提示「未拦截」），
         # 之后以管理员身份启动必须补上，否则「名单里有、实际没拦」会一直存在。
@@ -185,6 +204,9 @@ class EventPumpMixin(_HostBase):
 
         # 2) 风险事件
         risks = bus.drain_risk(200)
+        # 本拍数量单独记：`_flush_events_refresh` 用它判断「是不是正在被攻击」，
+        # 从而在渲染之前就降档（见 EVENTS_BURST_HINT）。每拍重算，不累积。
+        self._events_burst = len(risks)
         if risks:
             last = risks[-1]
             rec, res = last.get("record"), last.get("result")
@@ -251,13 +273,31 @@ class EventPumpMixin(_HostBase):
             return
 
         self._events_dirty = False
+        # 攻击信号：单拍新到的事件条数已经达到「几百条/秒」的量级，就在这一次
+        # 渲染**之前**把条数档位降下来。否则第一屏必然要完整渲染最大档位，
+        # 用户第一次看列表时正好卡住（实测量到 1.66 秒）。
+        burst, self._events_burst = self._events_burst, 0
+        if burst >= EVENTS_BURST_HINT and self.page_events.downgrade_rows():
+            log.info("单拍新增 %d 条风险事件，攻击期先降档再看列表", burst)
+
         started = time.monotonic()
         self.page_events.refresh(auto=True)
         cost = time.monotonic() - started
 
         if cost >= EVENTS_SLOW_RENDER_SEC:
-            # 单次刷新已经长到用户能明确感到卡顿：停掉自动刷新，把决定权交回用户。
-            # 继续刷下去只会让界面长期处于「一直在重建」的状态。
+            # 先降档，别急着停刷：事件激增正是最需要盯着列表的时刻，停刷等于把
+            # 最该看的东西藏起来（实测旧逻辑在 60 秒攻击压测里只刷了 1 次就永久
+            # 暂停，而 CPU 才 7.9% —— 卡的是渲染行数，不是资源）。
+            # 2000 行单次 1.37s → 500 行约 0.36s → 200 行约 80ms，降两档后仍能
+            # 每秒刷一次，点击响应（心跳 P95 18ms）不受影响。
+            if self.page_events.downgrade_rows():
+                log.info("事件页单次刷新 %.0fms，已临时降低显示条数", cost * 1000)
+                self._events_interval = EVENTS_REFRESH_MIN_SEC
+                self._events_ready_at = time.monotonic() + self._events_interval
+                self._events_dirty = True  # 降档后的新条数还没渲染，下一拍补上
+                return
+            # 已经是最小档还慢：这时候再刷只会让界面长期处于「一直在重建」，
+            # 停掉自动刷新、把决定权交回用户（手动「刷新」始终有效）。
             self._events_paused = True
             self._events_interval = EVENTS_REFRESH_MAX_SEC
             self._events_ready_at = time.monotonic() + EVENTS_REFRESH_MAX_SEC
@@ -396,6 +436,35 @@ class EventPumpMixin(_HostBase):
         log.error("到期解封巡检失败：%s", err)
         self._set_status("到期解封巡检失败，详情见运行日志", C.danger)
 
+    def _recover_pending(self) -> None:
+        """启动时收敛残留 pending 封禁记录（后台线程）
+
+        判定逻辑全在 `ban_service.recover_stale_pending`：按防火墙里规则是否
+        真的存在回填 active / failed。这里只负责别占界面线程、并在有结果时
+        让用户看得见（否则「记录状态自己变了」会让人以为出了灵异事件）。
+        """
+        if not self._is_admin():
+            return
+        run_in_background(
+            self,
+            ban_service.recover_stale_pending,
+            self._on_pending_recovered,
+            self._on_pending_recover_failed,
+            name="recover-pending",
+        )
+
+    def _on_pending_recovered(self, n: Any) -> None:
+        if not n:
+            return
+        log.warning("启动已收敛 %d 条上次未收尾的封禁记录", n)
+        self._set_status(f"已收敛 {n} 条上次未完成的封禁记录，详情见审计页", C.warning)
+        if self.stack.currentWidget() is self.page_bans:
+            self.page_bans.refresh()
+        self._refresh_stats(force=True)
+
+    def _on_pending_recover_failed(self, err: str) -> None:
+        log.error("收敛残留封禁记录失败：%s", err)
+
     def _enforce_blacklist(self) -> None:
         """黑名单补封（后台线程）：只处理「名单里有、但没有活动封禁」的条目。
 
@@ -463,34 +532,59 @@ class EventPumpMixin(_HostBase):
 
     def _cleanup_logs(self) -> None:
         """
-        定期清理：四张表 + 日志文件 + 备份 + 下载残留（每天到点跑一次）。
+        每日维护：清理四张表 + 日志文件 + 备份 + 下载残留，**然后自动备份数据库**
+        （每天到点跑一次，见 `maintenance.run_daily`）。
 
         四张表各有各的保留期（`run_all` 内部按 `*_retention_days` 分别读），
         这里只负责编排与日志，不再逐个调 cleanup_* —— 少一个就漏一张表，
         而漏掉的表是没有别的机制兜底的。
+
+        为什么整段搬后台：清理要删几十万行（`DELETE` + WAL 增长），备份要逐页拷库，
+        两者都是秒级到分钟级的磁盘活。放在界面线程里，表现就是「凌晨三点界面突然
+        卡死一分钟」，而没人会想到是维护任务干的。
         """
         if not maintenance.due_today():
             return
-        try:
-            rows, risk, bans, audits, n_files, n_bak, n_tmp = maintenance.run_all()
-            log.info(
-                "定期清理完成：访问 %d 条（保留 %d 天）、风险事件 %d 条（%d 天）、"
-                "终态封禁 %d 条（%d 天）、审计 %d 条（%d 天）、"
-                "日志文件 %d 个、备份 %d 个、下载残留 %d 个",
-                rows,
-                cfg.get_int("log_retention_days", 30),
-                risk,
-                cfg.get_int("risk_retention_days", DEFAULT_RISK_RETENTION_DAYS),
-                bans,
-                cfg.get_int("ban_retention_days", DEFAULT_BAN_RETENTION_DAYS),
-                audits,
-                cfg.get_int("audit_retention_days", DEFAULT_AUDIT_RETENTION_DAYS),
-                n_files,
-                n_bak,
-                n_tmp,
-            )
-        except Exception:
-            log.exception("定期清理失败")
+        if not self._maint_busy.enter("maintenance"):
+            return
+        run_in_background(
+            self,
+            maintenance.run_daily,
+            self._on_maintenance_done,
+            self._on_maintenance_failed,
+            name="maintenance",
+        )
+
+    def _on_maintenance_done(self, payload: Any) -> None:
+        self._maint_busy.leave("maintenance")
+        counts, backup_ok, backup_detail = payload
+        rows, risk, bans, audits, n_files, n_bak, n_tmp = counts
+        log.info(
+            "定期清理完成：访问 %d 条（保留 %d 天）、风险事件 %d 条（%d 天）、"
+            "终态封禁 %d 条（%d 天）、审计 %d 条（%d 天）、"
+            "日志文件 %d 个、备份 %d 个、下载残留 %d 个",
+            rows,
+            cfg.get_int("log_retention_days", 30),
+            risk,
+            cfg.get_int("risk_retention_days", DEFAULT_RISK_RETENTION_DAYS),
+            bans,
+            cfg.get_int("ban_retention_days", DEFAULT_BAN_RETENTION_DAYS),
+            audits,
+            cfg.get_int("audit_retention_days", DEFAULT_AUDIT_RETENTION_DAYS),
+            n_files,
+            n_bak,
+            n_tmp,
+        )
+        if backup_ok:
+            self._set_status("每日维护完成，已自动备份数据库", C.success)
+        else:
+            # 「备份失败」必须说出来：安静地失败三次，等于用户以为有退路其实没有
+            self._set_status(f"每日备份失败：{backup_detail}", C.warning)
+
+    def _on_maintenance_failed(self, err: str) -> None:
+        self._maint_busy.leave("maintenance")
+        log.error("定期维护失败：%s", err)
+        self._set_status("定期维护失败，详情见运行日志", C.danger)
 
     # ── 离线库同步 ──
     def _maybe_sync_xdb(self, first_run: bool = False) -> None:

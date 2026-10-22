@@ -34,7 +34,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from core.logger import get_logger
 from core.validators import (
@@ -444,10 +444,19 @@ def unblock_by_name(name: str) -> Tuple[bool, str]:
         return _remove_rule_locked(safe_name)
 
 
-def unblock_ip(ip: str, names: Optional[List[str]] = None) -> Tuple[bool, str, int]:
+def unblock_ip(
+    ip: str,
+    names: Optional[List[str]] = None,
+    existing: Optional[Iterable[str]] = None,
+) -> Tuple[bool, str, int]:
     """
     按 IP 解封：先删指定规则名，再兜底按 RemoteAddress 精确匹配删除。
     返回 (成功, 错误, 删除数量)
+
+    `existing`：调用方已经列举好的规则名快照。不传就自己列一次。
+    **批量解封必须传**：`list_active_rules()` 每次是一次 PowerShell（实测
+    200~600ms）或一次 netsh，到期巡检一轮几十个 IP 就是几十次全量列举，
+    巡检会从秒级涨到分钟级 —— 而它跑在 60 秒的定时器上，会越拖越积压。
     """
     if not is_admin():
         return False, "需要管理员权限才能修改 Windows 防火墙", 0
@@ -475,13 +484,13 @@ def unblock_ip(ip: str, names: Optional[List[str]] = None) -> Tuple[bool, str, i
     # 其余规则继续生效 —— 真机上同一个 IP 堆了十几条，用户点了「解封」照样连不上。
     # 规则名能反解出 IP，这里按名字清干净，不依赖 PowerShell（2008 R2 也能跑）。
     target = ip_token(safe_ip)
-    try:
-        same_ip = [
-            n for n in list_rule_names() if n not in done and parse_ip_from_rule_name(n) == target
-        ]
-    except Exception:
-        log.exception("列举规则失败，跳过同 IP 清理 ip=%s", safe_ip)
-        same_ip = []
+    if existing is None:
+        try:
+            existing = list_rule_names()
+        except Exception:
+            log.exception("列举规则失败，跳过同 IP 清理 ip=%s", safe_ip)
+            existing = []
+    same_ip = [n for n in existing if n not in done and parse_ip_from_rule_name(n) == target]
     for n in same_ip:
         ok, err = unblock_by_name(n)
         if ok:
