@@ -403,12 +403,27 @@ def run(app_dir: Optional[str] = None, *, deep: bool = True) -> Tuple[int, str, 
 
 def write_report(report: str) -> str:
     """把报告落盘到 %APPDATA%/PortGuard/logs/diag-*.txt，返回文件路径。"""
+    return _write_text("diag", report)
+
+
+def write_crash(detail: str) -> str:
+    """把启动期致命错误落盘成 logs/crash-*.txt，返回文件路径（写不了返回 ""）。
+
+    单独一个前缀是为了让现场一眼分清两件事：
+    · diag-*.txt 是「主动体检」的输出；
+    · crash-*.txt 是「这次真的没起来」的堆栈。
+    两者混在一个命名空间里，客服问「有没有崩溃日志」时只能靠时间猜。
+    """
+    return _write_text("crash", detail)
+
+
+def _write_text(prefix: str, body: str) -> str:
     directory = _logs_dir()
     try:
         os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, f"diag-{time.strftime('%Y%m%d-%H%M%S')}.txt")
+        path = os.path.join(directory, f"{prefix}-{time.strftime('%Y%m%d-%H%M%S')}.txt")
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(report)
+            fh.write(body)
         return path
     except OSError:
         return ""

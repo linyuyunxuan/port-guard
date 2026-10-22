@@ -706,6 +706,8 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.page_monitor.ask_ban.connect(self.request_ban)
         self.page_events.ask_ban.connect(self.request_ban)
         self.page_events.ask_ban_many.connect(self.request_ban_many)
+        # 手动刷新过 = 解除「事件激增时暂停自动刷新」（见 gui/mixins.py）
+        self.page_events.refreshed_manually.connect(self._resume_events_auto_refresh)
         self.page_access.ask_ban.connect(self.request_ban)
         self.page_access.ask_lookup.connect(self._goto_lookup)
         self.page_bans.ask_ban.connect(self.request_ban)

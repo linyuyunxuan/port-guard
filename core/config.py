@@ -260,6 +260,16 @@ DEFAULT_SETTINGS = {
     "alert_sound": "1",
     "alert_popup_level": LEVEL_CRITICAL,
     "alert_merge_sec": "60",  # 同 IP 告警合并窗口
+    # ── 外部告警推送（Webhook，默认关闭）──
+    # 地址里通常带机器人 key，日志只记录 scheme://host（见 core/alert_webhook.py）
+    "alert_webhook_enabled": "0",
+    "alert_webhook_url": "",
+    "alert_webhook_level": "critical",
+    # 运行与守护
+    # 开机自启：封禁时长只靠本程序的到点巡检兑现（防火墙规则没有到期时间），
+    # 所以进程没了 = 到期的封禁永远不解除。默认关闭是因为本程序要管理员权限，
+    # 开启后每次登录都会弹一次 UAC，得由用户自己权衡（7×24 服务器通常要开）。
+    "autostart_enabled": "0",
     # 数据
     "log_retention_days": str(DEFAULT_LOG_RETENTION_DAYS),  # 访问记录 + 日志文件的保留天数
     # ── 其余三张表各自的保留期（见 DEFAULT_*_RETENTION_DAYS 说明）──

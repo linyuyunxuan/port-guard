@@ -135,6 +135,18 @@ def _init_backend() -> None:
             "/".join(_PATCHED_STREAMS),
         )
 
+    # 开机自启：让注册表与设置项一致（补写缺失 / 修正换过路径的旧登记 / 删掉多余项）。
+    # 不做这件事的后果：用户勾了「开机自动启动」、程序却因为换目录没生效，
+    # 而重启后没人跑到期巡检 —— 到期封禁会一直生效，且界面上没有任何痕迹。
+    with contextlib.suppress(Exception):
+        from core import autostart
+
+        ok, why = autostart.sync()
+        if not ok:
+            log.warning("开机自启同步失败：%s", why)
+        else:
+            log.info("开机自启：%s", "已登记" if autostart.is_enabled() else "未开启")
+
 
 def _run_diag() -> int:
     """`--diag`：把「为什么这台电脑跑不起来」查清楚并落盘。
@@ -279,10 +291,24 @@ def main() -> int:
         _init_backend()
     except Exception:
         err = traceback.format_exc()
+        # 兜底链刻意不用 tkinter：打包时 tkinter 被 spec 的 excludes 排除了
+        # （_smoke.spec / port_guard.spec），窗口化运行又没有 stderr ——
+        # 原来的写法会让「初始化失败」表现为「双击没反应，日志里也没有堆栈」。
+        # 现在：先落盘完整堆栈，再用 ctypes 弹原生框把文件路径告诉用户。
+        path = ""
         try:
-            import tkinter.messagebox as mb
+            from core import diag
 
-            mb.showerror("PortGuard 启动失败", f"初始化后端失败：\n\n{err[:2000]}")
+            path = diag.write_crash("PortGuard 初始化后端失败\n\n" + err)
+        except Exception:
+            pass
+        msg = f"初始化后端失败，程序无法启动。\n\n{err[:1500]}"
+        if path:
+            msg += f"\n\n完整堆栈已写入：\n{path}"
+        try:
+            from core.diag import show_message
+
+            show_message("PortGuard 启动失败", msg, error=True)
         except Exception:
             print(err, file=sys.stderr)
         return 1

@@ -45,8 +45,8 @@ from gui.components import (
     PageHeader,
     build_menu,
     export_table_csv,
-    row_menu_button,
 )
+from gui.row_action import RowAction, RowActionDelegate
 from gui.theme import C
 from gui.widgets import (
     EmptyState,
@@ -388,6 +388,15 @@ class AccessPage(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.setItemDelegateForColumn(COL_LEVEL, RiskBadgeDelegate(self.table))
+        # 操作列只有「⋯」：原来每行一个 QToolButton，翻页时整页重建同样要几百毫秒
+        self._action_delegate = RowActionDelegate(
+            self.table,
+            COL_ACTION,
+            self._action_spec,
+            None,
+            self._on_row_menu,
+        )
+        self.table.setItemDelegateForColumn(COL_ACTION, self._action_delegate)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._ctx_menu)
 
@@ -592,43 +601,55 @@ class AccessPage(QWidget):
 
         self.table.setRowCount(0)
         self.table.setRowCount(len(rows))
-        for i, r in enumerate(rows):
-            geo = r.geo
-            time_str = datetime.datetime.fromtimestamp(r.event_ts / 1000).strftime("%m-%d %H:%M:%S")
-            ip_text = str(r.ip or "")
-            path_text = str(r.path or "/")
-            ua_text = str(r.user_agent or "")
+        self._action_delegate.reset_hover()
+        # 渲染期间关重绘（同 gui/page_events.py 的理由：逐格 setItem 每次都调度重绘）
+        self.table.setUpdatesEnabled(False)
+        try:
+            for i, r in enumerate(rows):
+                geo = r.geo
+                time_str = datetime.datetime.fromtimestamp(r.event_ts / 1000).strftime(
+                    "%m-%d %H:%M:%S"
+                )
+                ip_text = str(r.ip or "")
+                path_text = str(r.path or "/")
+                ua_text = str(r.user_agent or "")
 
-            self.table.setItem(i, COL_TIME, make_item(time_str, mono=True, tip=r.time_str))
-            self.table.setItem(i, COL_LEVEL, badge_item(r.risk_level))
-            self.table.setItem(i, COL_IP, make_item(ip_text, C.text_link, tip=ip_text))
-            self.table.setItem(
-                i,
-                COL_GEO,
-                make_item(geo.region_short if geo else "未知", tip=geo.display if geo else "未知"),
-            )
-            self.table.setItem(
-                i,
-                COL_PORT,
-                make_item(r.local_port or "-", align=Qt.AlignmentFlag.AlignCenter, mono=True),
-            )
-            self.table.setItem(i, COL_PATH, make_item(path_text, tip=path_text))
-            self.table.setItem(
-                i,
-                COL_STATUS,
-                make_item(
-                    r.status_code if r.status_code is not None else "-",
-                    align=Qt.AlignmentFlag.AlignCenter,
-                    mono=True,
-                ),
-            )
-            self.table.setItem(i, COL_UA, make_item(ua_text or "-", tip=ua_text))
-            self.table.setItem(
-                i,
-                COL_SCORE,
-                make_item(r.risk_score, align=Qt.AlignmentFlag.AlignCenter, bold=True, mono=True),
-            )
-            self.table.setCellWidget(i, COL_ACTION, self._row_actions(r))
+                self.table.setItem(i, COL_TIME, make_item(time_str, mono=True, tip=r.time_str))
+                self.table.setItem(i, COL_LEVEL, badge_item(r.risk_level))
+                self.table.setItem(i, COL_IP, make_item(ip_text, C.text_link, tip=ip_text))
+                self.table.setItem(
+                    i,
+                    COL_GEO,
+                    make_item(
+                        geo.region_short if geo else "未知", tip=geo.display if geo else "未知"
+                    ),
+                )
+                self.table.setItem(
+                    i,
+                    COL_PORT,
+                    make_item(r.local_port or "-", align=Qt.AlignmentFlag.AlignCenter, mono=True),
+                )
+                self.table.setItem(i, COL_PATH, make_item(path_text, tip=path_text))
+                self.table.setItem(
+                    i,
+                    COL_STATUS,
+                    make_item(
+                        r.status_code if r.status_code is not None else "-",
+                        align=Qt.AlignmentFlag.AlignCenter,
+                        mono=True,
+                    ),
+                )
+                self.table.setItem(i, COL_UA, make_item(ua_text or "-", tip=ua_text))
+                self.table.setItem(
+                    i,
+                    COL_SCORE,
+                    make_item(
+                        r.risk_score, align=Qt.AlignmentFlag.AlignCenter, bold=True, mono=True
+                    ),
+                )
+                # 操作列由 RowActionDelegate 自绘，这里不再建控件
+        finally:
+            self.table.setUpdatesEnabled(True)
 
     # ── 导出 ──
     def _export_csv(self) -> None:
@@ -783,15 +804,17 @@ class AccessPage(QWidget):
             QMessageBox.information(self, title, text)
 
     # ── 行内操作 ──
-    def _row_actions(self, r: AccessRecord) -> QWidget:
-        w = QWidget()
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(2, 2, 2, 2)
-        lay.setSpacing(2)
-        more = row_menu_button(self._menu_entries(r))
-        lay.addWidget(more)
-        lay.addStretch(1)
-        return w
+    def _action_spec(self, row: int) -> Optional[RowAction]:
+        """操作列只有「⋯」：本页没有任何「一条记录一个动作」的操作，
+        封禁入口在菜单里（见 `_menu_entries`）。返回空文字即只画点。"""
+        if not 0 <= row < len(self._rows):
+            return None
+        return RowAction("", "danger", True, "更多操作")
+
+    def _on_row_menu(self, row: int, global_pos) -> None:
+        if not 0 <= row < len(self._rows):
+            return
+        self._row_menu(self._rows[row], parent=self).exec(global_pos)
 
     def _menu_entries(self, r: AccessRecord) -> List[Optional[MenuEntry]]:
         """行内「⋯」与右键菜单共用同一份动作定义"""

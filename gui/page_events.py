@@ -46,12 +46,11 @@ from core.rules_meta import rule_label
 from gui.components import (
     MenuEntry,
     PageHeader,
-    ban_button,
     build_menu,
     export_table_csv,
-    row_menu_button,
 )
 from gui.event_group import flatten_rows, merge_rows
+from gui.row_action import RowAction, RowActionDelegate
 from gui.table_select import CheckColumn
 from gui.table_sort import KIND_MS, KIND_NUM, KIND_TEXT, ColumnSpec, SortSpec, TableSort
 from gui.theme import C, small_button_style
@@ -328,6 +327,8 @@ class EventsPage(QWidget):
     ask_ban_many = Signal(list)
     ask_lookup = Signal(str)
     ask_settings = Signal()
+    #: 用户手动刷新过（主窗口据此解除「自动刷新暂停」，见 gui/mixins.py）
+    refreshed_manually = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -340,6 +341,8 @@ class EventsPage(QWidget):
         # 生效中的封禁（IP → BanRecord），刷新时整体换一次；行内按钮据此
         # 显示「已封禁」并置灰，避免用户对着同一条记录反复点
         self._banned: Dict[str, Any] = {}
+        #: 自动刷新是否被暂停（事件激增 / 单次渲染过慢时由主窗口置位）
+        self.auto_paused = False
         self.sort = TableSort(SORT_SPECS)
         self._build()
         self.refresh()
@@ -353,7 +356,7 @@ class EventsPage(QWidget):
         head = PageHeader("风险事件", "命中风险规则才会进入本列表")
         self.btn_refresh = QPushButton("刷新")
         self.btn_refresh.setObjectName("btn_outline")
-        self.btn_refresh.clicked.connect(self.refresh)
+        self.btn_refresh.clicked.connect(self._on_refresh_clicked)
         head.add_action(self.btn_refresh)
         root.addWidget(head)
 
@@ -550,6 +553,17 @@ class EventsPage(QWidget):
         self._check_delegate = CheckMarkDelegate(self.table)
         self.table.setItemDelegateForColumn(COL_CHECK, self._check_delegate)
 
+        # 操作列自绘：2000 行档位下 setCellWidget 每行两个控件，实测单次重建 3.4 秒，
+        # 而事件泵节拍是 150ms（见 gui/row_action.py 开头的实测数据）
+        self._action_delegate = RowActionDelegate(
+            self.table,
+            COL_ACTION,
+            self._action_spec,
+            self._on_row_ban,
+            self._on_row_menu,
+        )
+        self.table.setItemDelegateForColumn(COL_ACTION, self._action_delegate)
+
         hh = self.table.horizontalHeader()
         for i, w in enumerate(COL_WIDTHS):
             hh.resizeSection(i, w)
@@ -623,12 +637,49 @@ class EventsPage(QWidget):
             or self.range.currentText() != RANGE_ALL
         )
 
-    def refresh(self) -> None:
+    def refresh(self, auto: bool = False) -> None:
+        """重新加载列表。
+
+        `auto=True` 表示由事件泵自动触发（见 `gui/mixins._flush_events_refresh`）。
+        自动刷新在暂停期间直接返回，把「什么时候看」的决定权留给用户；手动刷新
+        （按钮 / 改筛选 / 批量操作后）永远有效，并顺手解除暂停。
+        """
+        if auto:
+            if self.auto_paused:
+                return
+        elif self.auto_paused:
+            self.set_auto_paused(False)
+            self.refreshed_manually.emit()
         # 重入会叠两次查询 + 两次重排；守卫同时也负责「正在刷新…」这行提示
         if self._refresh.busy:
             return
         with self._refresh:
             self._load()
+
+    def set_auto_paused(self, paused: bool) -> None:
+        """暂停 / 恢复自动刷新，并在计数行明说原因（否则「列表不动了」= bug）
+
+        文案刻意写在计数行：它是这张表上唯一常驻的一行小字，用户看条数时
+        必然会扫到。暂停不是错误状态，所以用次要色，不用红色。
+        """
+        paused = bool(paused)
+        if paused == self.auto_paused:
+            return
+        self.auto_paused = paused
+        if paused:
+            self.lbl_info.setText("事件激增，已暂停自动刷新 · 点右上「刷新」看最新")
+            self.lbl_info.setToolTip(
+                "单次刷新耗时超过 0.8 秒时会自动停刷，避免界面一直在重建。\n"
+                "手动「刷新」不受影响；改筛选条件也会立即重新加载。"
+            )
+            self.lbl_info.setStyleSheet(f"color:{C.warning};font-size:12.5px;")
+        else:
+            self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
+            self.lbl_info.setToolTip("")
+
+    def _on_refresh_clicked(self) -> None:
+        """「刷新」按钮：不带参数，避免 clicked(bool) 的 checked 落到 auto 上"""
+        self.refresh()
 
     def _load(self) -> None:
         since, until = self._range_ms()
@@ -676,6 +727,10 @@ class EventsPage(QWidget):
         self.table.setVisible(bool(rows))
 
         self.sel.begin_render()
+        self._action_delegate.reset_hover()
+        # 渲染期间关重绘：逐格 setItem 每次都会调度一遍重绘，2000 行 × 10 列
+        # 就是两万次调度，而中间态一秒都看不到。
+        self.table.setUpdatesEnabled(False)
         try:
             self.table.setRowCount(0)
             self.table.setRowCount(len(rows))
@@ -745,9 +800,10 @@ class EventsPage(QWidget):
                     COL_DISPOSITION,
                     make_item(disp_text, disp_color, Qt.AlignmentFlag.AlignCenter, tip=disp_tip),
                 )
-                self.table.setCellWidget(i, COL_ACTION, self._row_actions(r))
+                # 操作列由 RowActionDelegate 自绘，这里不再建控件
         finally:
             self.sel.end_render()
+            self.table.setUpdatesEnabled(True)
 
     # ── 勾选 ──
     def _on_sel_changed(self, n: int) -> None:
@@ -911,30 +967,35 @@ class EventsPage(QWidget):
         )
 
     # ── 行内操作 ──
-    def _row_actions(self, r: Dict) -> QWidget:
-        """一个主操作 + 一个「⋯」菜单：一屏几十行时红色必须稀缺"""
-        w = QWidget()
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(2, 2, 2, 2)
-        lay.setSpacing(4)
+    def _action_spec(self, row: int) -> Optional[RowAction]:
+        """操作列的按钮状态（自绘 delegate 的回调，返回 None 表示不画）
 
-        ip = r.get("ip", "")
-        score = r.get("risk_score", 0)
-        reason = r.get("summary") or "命中风险规则"
-        ban = self._banned.get(str(ip))
+        「已封禁」必须置灰：不这么做的话，用户对着同一行再点一次只会弹一句
+        「已处于封禁状态」，看上去跟「上次没生效」一模一样。
+        """
+        if not 0 <= row < len(self._rows):
+            return None
+        r = self._rows[row]
+        ban = self._banned.get(str(r.get("ip") or ""))
+        if ban is not None:
+            # 置灰态下 tooltip 是唯一能看到「为什么点不动、什么时候到期」的地方
+            return RowAction("已封禁", "danger", False, _ban_tip(ban))
+        return RowAction("封禁", "danger", True, "封禁该 IP（弹窗里确认时长）")
 
-        b_ban = ban_button(
-            lambda: self.ask_ban.emit(ip, score, reason),
-            banned=ban is not None,
-            tip=_ban_tip(ban),
+    def _on_row_ban(self, row: int) -> None:
+        if not 0 <= row < len(self._rows):
+            return
+        r = self._rows[row]
+        self.ask_ban.emit(
+            str(r.get("ip") or ""),
+            int(r.get("risk_score") or 0),
+            r.get("summary") or "命中风险规则",
         )
 
-        more = row_menu_button(self._menu_entries(r))
-
-        lay.addWidget(b_ban)
-        lay.addWidget(more)
-        lay.addStretch(1)
-        return w
+    def _on_row_menu(self, row: int, global_pos) -> None:
+        if not 0 <= row < len(self._rows):
+            return
+        self._row_menu(self._rows[row], parent=self).exec(global_pos)
 
     def _menu_entries(self, r: Dict) -> List[Optional[MenuEntry]]:
         """行内「⋯」与右键菜单共用同一份动作定义（P1-10 三表一致）

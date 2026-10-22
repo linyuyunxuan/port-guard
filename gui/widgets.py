@@ -6,6 +6,7 @@
 - 自绘控件用 QPainter，不依赖 QSS 做不到的阴影/过渡。
 """
 
+import functools
 import time
 from typing import Callable, ClassVar, Optional, Union
 
@@ -41,9 +42,14 @@ from qtcompat import (
 )
 
 
+@functools.lru_cache(maxsize=8)
 def number_font(pixel_size: int = 12, bold: bool = False) -> QFont:
     """数字字体：Consolas 自带且等宽（Vista/2008 R2 起可用），
-    保证端口、评分、时间在表格里竖向对齐。"""
+    保证端口、评分、时间在表格里竖向对齐。
+
+    带缓存：2000 行 × 5 个数字列 = 一万次 QFont 构造，在 `_render` 里是实打实的
+    几十毫秒。返回值按「只读」对待 —— 想改字号请另建一个，不要改这里返回的对象。
+    """
     f = QFont("Consolas")
     f.setStyleHint(QFont.StyleHint.Monospace)
     f.setPixelSize(pixel_size)

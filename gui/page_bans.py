@@ -2,6 +2,7 @@
 
 import datetime
 import threading
+import time
 from typing import Any, Dict, Optional
 
 from app import audit, ban_service
@@ -28,7 +29,9 @@ from core.models import (
     ms_to_str,
 )
 from core.validators import InvalidIP, normalize_ip
-from gui.components import PageHeader, ban_button, export_table_csv, row_menu_button
+from gui.background import BusyGuard, run_in_background
+from gui.components import PageHeader, build_menu, export_table_csv, row_menu_button
+from gui.row_action import RowAction, RowActionDelegate
 from gui.table_select import CheckColumn
 from gui.table_sort import (
     KIND_DATETIME,
@@ -104,13 +107,19 @@ SUG_HEADERS = ["", "时间", "等级", "IP", "归属地", "端口", "评分", "�
 # 原因列拿到 268，常见原因全放得下。
 # 来源列 58：「自动 / 手动 / 黑名单」三个两字词，50 时「自动」被截成「自…」
 # （QFontMetrics 量出来够，实际渲染还差了省略号的位置）。
+#: 防火墙开关状态的刷新间隔（秒）。netsh 一次 100~300ms，只在后台探测，
+#: 缓存期间页面刷新直接复用上一次结论（见 _probe_fw_state）
+FW_PROBE_SEC = 20.0
+
 BAN_WIDTHS = [37, 51, 140, 207, 58, 48, 66, 66, 131, 131, 101]
 SUG_WIDTHS = [37, 138, 69, 150, 122, 64, 53, 184, 129]
 COL_SUG_CHECK = 0
 COL_SUG_LEVEL = 2
 COL_SUG_REASON = 7
+COL_SUG_ACTION = 8
 COL_BAN_CHECK = 0
 COL_BAN_REASON = 3
+COL_BAN_ACTION = 10
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 两张表各一套：都不给勾选列（点了是全选）与操作列（无值）建规则。
@@ -249,6 +258,13 @@ class BansPage(QWidget):
         self.ban_sort = TableSort(BAN_SORT_SPECS)
         # 到期但解不掉的条数（普通权限下由主窗口巡检回报），供权限条展示
         self._expired_backlog = 0
+        # 会起 netsh 进程的动作一律后台跑，用忙标记避免重复点击起第二个进程
+        self._busy = BusyGuard()
+        # 防火墙开关状态的缓存：netsh 要 100~300ms，不能每次刷新页面都问一次。
+        # None = 还没探测过（**读不出就当未知，绝不判成「已关闭」**）。
+        self._fw_enabled: Optional[bool] = None
+        self._fw_profiles: Optional[Dict[str, bool]] = None
+        self._fw_probe_at = 0.0
         self._build()
         self.batch_unban_done.connect(self._on_batch_unban_done)
         self.firewall_ready.connect(self._on_firewall_ready)
@@ -379,24 +395,60 @@ class BansPage(QWidget):
         界面却照样显示「已封禁」—— 用户以为封住了，实际一个包都没挡住。真机复现过：
         规则 Enabled / Inbound / Block / RemoteAddress 全对，创建 24 分钟后攻击者
         仍然能建连。所以这条提示是「已封禁」三个字成立的前提，不能藏起来。
+
+        **状态值走缓存，探测放后台**：`netsh advfirewall show allprofiles state`
+        要 100~300ms，而本页每次刷新（封禁事件、批量操作后）都会调用到这里 ——
+        放在界面线程里就是每刷一次卡一下。缓存过期后由后台线程补一次探测，
+        回来再重画；探测失败保持原值，绝不当成「已关闭」。
         """
         if not firewall.is_admin():
             self.fw_banner.setVisible(False)
             return
-        enabled = firewall.firewall_enabled()
+        self._probe_fw_state()
+        self._render_fw_banner()
+
+    def _render_fw_banner(self) -> None:
+        enabled = self._fw_enabled
         if enabled is not False:
             # True = 开着；None = 读不出来。读不出来不能当成关闭去吓人。
             self.fw_banner.setVisible(False)
             return
-        state = firewall.profiles_state()
         self.fw_banner.set_text(
             "Windows 防火墙处于关闭状态（"
-            + firewall.format_profiles(state)
+            + firewall.format_profiles(self._fw_profiles)
             + "）：规则写得再对也不会拦截任何流量，当前所有封禁都未生效。"
             "点右侧按钮会先为「此刻正在监听」的端口建放行规则、再开启防火墙，"
             "避免把正在用的服务挡在外面。"
         )
         self.fw_banner.setVisible(True)
+
+    def _probe_fw_state(self) -> None:
+        """后台探测防火墙开关（节流 FW_PROBE_SEC），结果回主线程重画横幅"""
+        if not self._busy.enter("fw-probe"):
+            return
+        if time.monotonic() - self._fw_probe_at < FW_PROBE_SEC:
+            self._busy.leave("fw-probe")
+            return
+        self._fw_probe_at = time.monotonic()
+
+        def work() -> Dict[str, Any]:
+            # force=True：用户可能刚点了「启用防火墙」，5 秒缓存会让他看到旧结论
+            state = firewall.profiles_state(force=True)
+            return {"enabled": None if state is None else any(state.values()), "profiles": state}
+
+        run_in_background(
+            self, work, self._on_fw_state, self._on_fw_state_failed, name="fw-banner-probe"
+        )
+
+    def _on_fw_state(self, res: Dict[str, Any]) -> None:
+        self._busy.leave("fw-probe")
+        self._fw_enabled = res.get("enabled")
+        self._fw_profiles = res.get("profiles")
+        self._render_fw_banner()
+
+    def _on_fw_state_failed(self, err: str) -> None:
+        self._busy.leave("fw-probe")
+        log.debug("读取防火墙开关状态失败（保持上一次结论）：%s", err)
 
     def _enable_firewall(self) -> None:
         """安全启用防火墙：先放行现有监听端口，再开总开关，最后对齐封禁（后台线程）"""
@@ -537,6 +589,16 @@ class BansPage(QWidget):
         self.sug_sel.bind(self._on_sug_sel_changed)
         self._sug_check_delegate = CheckMarkDelegate(self.sug_table)
         self.sug_table.setItemDelegateForColumn(COL_SUG_CHECK, self._sug_check_delegate)
+        # 操作列自绘（见 gui/row_action.py）：建议表刷新频率不低，
+        # 每行两个控件的老做法在批量刷新时会连界面一起拖慢
+        self._sug_action_delegate = RowActionDelegate(
+            self.sug_table,
+            COL_SUG_ACTION,
+            self._sug_spec,
+            self._on_sug_ban,
+            self._on_sug_menu,
+        )
+        self.sug_table.setItemDelegateForColumn(COL_SUG_ACTION, self._sug_action_delegate)
         sh = self.sug_table.horizontalHeader()
         for i, width in enumerate(SUG_WIDTHS):
             sh.resizeSection(i, width)
@@ -667,6 +729,14 @@ class BansPage(QWidget):
         self.ban_sel.bind(self._on_ban_sel_changed)
         self._ban_check_delegate = CheckMarkDelegate(self.table)
         self.table.setItemDelegateForColumn(COL_BAN_CHECK, self._ban_check_delegate)
+        self._ban_action_delegate = RowActionDelegate(
+            self.table,
+            COL_BAN_ACTION,
+            self._ban_spec,
+            self._on_ban_unban,
+            self._on_ban_menu,
+        )
+        self.table.setItemDelegateForColumn(COL_BAN_ACTION, self._ban_action_delegate)
         h = self.table.horizontalHeader()
         for i, width in enumerate(BAN_WIDTHS):
             h.resizeSection(i, width)
@@ -744,6 +814,8 @@ class BansPage(QWidget):
             self.sug_panel.setMaximumHeight(366)
 
         self.sug_sel.begin_render()
+        self._sug_action_delegate.reset_hover()
+        self.sug_table.setUpdatesEnabled(False)
         try:
             self.sug_table.setRowCount(0)
             self.sug_table.setRowCount(len(rows))
@@ -787,36 +859,41 @@ class BansPage(QWidget):
                     ),
                 )
                 self.sug_table.setItem(i, COL_SUG_REASON, make_item(reason, tip=reason))
-                self.sug_table.setCellWidget(i, 8, self._sug_actions(r, reason))
         finally:
             self.sug_sel.end_render()
+            self.sug_table.setUpdatesEnabled(True)
 
-    def _sug_actions(self, r, reason: str) -> QWidget:
-        w = QWidget()
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(2, 2, 2, 2)
-        lay.setSpacing(4)
-        ip = r.get("ip", "")
-        score = r.get("risk_score", 0)
-        ban = self._banned.get(str(ip))
+    def _sug_spec(self, row: int) -> Optional[RowAction]:
+        """建议表操作列：主按钮「确认封禁」+ ⋯"""
+        if not 0 <= row < len(self._sug_rows):
+            return None
+        r = self._sug_rows[row]
+        if self._banned.get(str(r.get("ip") or "")) is not None:
+            return RowAction("已封禁", "danger", False, "该 IP 已在封禁中")
+        return RowAction("确认封禁", "danger", True, "按封禁策略封禁该 IP（弹窗里确认时长）")
 
-        b_ban = ban_button(
-            lambda: self.ask_ban.emit(ip, score, reason),
-            banned=ban is not None,
-            text="确认封禁",
+    def _on_sug_ban(self, row: int) -> None:
+        if not 0 <= row < len(self._sug_rows):
+            return
+        r = self._sug_rows[row]
+        self.ask_ban.emit(
+            str(r.get("ip") or ""),
+            int(r.get("risk_score") or 0),
+            r.get("summary") or "命中风险规则",
         )
 
-        more = row_menu_button(
+    def _on_sug_menu(self, row: int, global_pos) -> None:
+        if not 0 <= row < len(self._sug_rows):
+            return
+        r = self._sug_rows[row]
+        ip = str(r.get("ip") or "")
+        build_menu(
             [
                 ("忽略该建议", lambda: self._ignore(r)),
                 ("查询该 IP 归属地", lambda: self.ask_lookup.emit(ip)),
-            ]
-        )
-
-        lay.addWidget(b_ban)
-        lay.addWidget(more)
-        lay.addStretch(1)
-        return w
+            ],
+            self,
+        ).exec(global_pos)
 
     def _ignore(self, r) -> None:
         try:
@@ -1046,6 +1123,8 @@ class BansPage(QWidget):
         self.ban_title.setText(f"封禁记录（{len(rows)}）")
 
         self.ban_sel.begin_render()
+        self._ban_action_delegate.reset_hover()
+        self.table.setUpdatesEnabled(False)
         try:
             self.table.setRowCount(0)
             self.table.setRowCount(len(rows))
@@ -1085,39 +1164,42 @@ class BansPage(QWidget):
                 self.table.setItem(
                     i, 9, make_item(b.created_min, align=Qt.AlignmentFlag.AlignCenter, mono=True)
                 )
-
-                self.table.setCellWidget(i, 10, self._ban_actions(b))
         finally:
             self.ban_sel.end_render()
+            self.table.setUpdatesEnabled(True)
 
         self.lbl_info.setText(f"共 {len(rows)} 条 · 当前生效 {count_active_bans()} 条")
 
-    def _ban_actions(self, b) -> QWidget:
-        w = QWidget()
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(2, 2, 2, 2)
-        lay.setSpacing(4)
+    def _ban_spec(self, row: int) -> Optional[RowAction]:
+        """封禁记录表操作列：「解封」只在生效中的记录上可点"""
+        if not 0 <= row < len(self._ban_rows):
+            return None
+        b = self._ban_rows[row]
+        if b.ip in self._busy:
+            return RowAction("解封中", "success", False, "正在删除防火墙规则，请稍候…")
+        if b.status != STATUS_ACTIVE:
+            return RowAction(
+                "解封", "success", False, f"该记录状态为「{b.status_label}」，无需解封"
+            )
+        return RowAction("解封", "success", True, "删除这条记录对应的防火墙规则")
 
-        b_unban = QPushButton("解封")
-        b_unban.setFixedHeight(30)
-        b_unban.setStyleSheet(small_button_style("success"))
-        b_unban.setCursor(Qt.CursorShape.PointingHandCursor)
-        b_unban.setEnabled(b.status == STATUS_ACTIVE)
-        b_unban.clicked.connect(lambda: self._unban(b))
+    def _on_ban_unban(self, row: int) -> None:
+        if 0 <= row < len(self._ban_rows):
+            self._unban(self._ban_rows[row])
 
-        more = row_menu_button(
+    def _on_ban_menu(self, row: int, global_pos) -> None:
+        if not 0 <= row < len(self._ban_rows):
+            return
+        b = self._ban_rows[row]
+        build_menu(
             [
                 ("查询该 IP 归属地", lambda: self.ask_lookup.emit(b.ip)),
                 ("复制 IP", lambda: self._copy(b.ip)),
                 None,
                 ("删除记录…", lambda: self._delete(b)),
-            ]
-        )
-
-        lay.addWidget(b_unban)
-        lay.addWidget(more)
-        lay.addStretch(1)
-        return w
+            ],
+            self,
+        ).exec(global_pos)
 
     @staticmethod
     def _copy(text: str) -> None:
@@ -1126,12 +1208,41 @@ class BansPage(QWidget):
         QApplication.clipboard().setText(text or "")
 
     def _unban(self, b) -> None:
-        ok, err = ban_service.unban(b)
+        """单条解封（后台线程）：`unban` 要起 netsh 删规则，还会逐条列出全量规则
+
+        放界面线程里跑的表现是「点了没反应」，几秒后才跳结果；用户在这几秒里
+        再点一次就会起第二个进程。所以用忙标记挡住重复点击，按钮当场变「解封中」。
+        """
+        key = b.ip
+        if not self._busy.enter(key):
+            return
+        self._render_bans()  # 让按钮立刻变「解封中」
+
+        def work():
+            return ban_service.unban(b)
+
+        def on_done(res):
+            self._on_unban_done(key, res)
+
+        run_in_background(self, work, on_done, self._on_unban_failed, name="unban")
+
+    def _on_unban_done(self, key: str, res) -> None:
+        self._busy.leave(key)
+        ok, err = res if isinstance(res, tuple) else (False, "解封返回格式异常")
         if ok:
             self.refresh()
             self.request_refresh_stats.emit()
-        else:
-            QMessageBox.warning(self, "解封失败", err or "未知错误")
+            return
+        self._render_bans()
+        QMessageBox.warning(self, "解封失败", err or "未知错误")
+
+    def _on_unban_failed(self, err: str) -> None:
+        # 异常文本里没有 IP（线程是被逐个点击起的），这里整体刷新即可：
+        # 失败的那条记录状态没变，按钮会回到「解封」
+        log.error("解封失败：%s", err)
+        self._busy.clear()
+        self.refresh()
+        QMessageBox.warning(self, "解封失败", "解封时发生异常，详情见运行日志。")
 
     def _delete(self, b) -> None:
         from core.database import delete_ban_record
@@ -1166,16 +1277,40 @@ class BansPage(QWidget):
             != QMessageBox.StandardButton.Yes
         ):
             return
-        ok, n, err = ban_service.unban_all()
+        if not self._busy.enter("unban-all"):
+            return
+        self.lbl_info.setText("正在解封全部规则…")
+
+        def work():
+            return ban_service.unban_all()
+
+        run_in_background(
+            self, work, self._on_unban_all_done, self._on_unban_all_failed, name="unban-all"
+        )
+
+    def _on_unban_all_done(self, res) -> None:
+        self._busy.leave("unban-all")
+        ok, n, err = res if isinstance(res, tuple) else (False, 0, "解封返回格式异常")
         if not ok:
+            self.refresh()
             QMessageBox.warning(self, "解封失败", err or "未知错误")
             return
         self.refresh()
         self.request_refresh_stats.emit()
         QMessageBox.information(self, "完成", f"已解封 {n} 条防火墙规则。")
 
+    def _on_unban_all_failed(self, err: str) -> None:
+        self._busy.leave("unban-all")
+        log.error("一键全部解封失败：%s", err)
+        self.refresh()
+        QMessageBox.warning(self, "解封失败", "解封时发生异常，详情见运行日志。")
+
     def _sync(self) -> None:
-        """与防火墙对账：把已不存在的规则对应的记录标记为已解封"""
+        """与防火墙对账：把已不存在的规则对应的记录标记为已解封
+
+        读规则要起 netsh 列全量（几百条规则时能到几百毫秒），所以先放后台读，
+        读回来再在主线程弹确认框、跑对账。
+        """
         if not firewall.is_admin():
             QMessageBox.information(
                 self,
@@ -1183,12 +1318,19 @@ class BansPage(QWidget):
                 "对账需要查询防火墙规则，请以管理员身份运行以获取完整信息。\n"
                 "普通权限下仍会尝试按规则名核对。",
             )
-        try:
-            existing = firewall.list_rule_names()
-        except Exception as e:
-            log.exception("读取防火墙规则失败")
-            QMessageBox.warning(self, "对账失败", str(e))
+        if not self._busy.enter("sync"):
             return
+
+        run_in_background(
+            self,
+            firewall.list_rule_names,
+            self._on_sync_rules,
+            self._on_sync_failed,
+            name="fw-sync",
+        )
+
+    def _on_sync_rules(self, existing) -> None:
+        self._busy.leave("sync")
         # 「读到空列表」有两种含义：规则真的都不在了，或者压根没读到
         # （netsh-only 环境 / 权限不足）。reconcile 只会按前者处理 —— 它会把库里
         # 所有 active 记录标成已解封，而防火墙规则还在系统里，从此无人巡检解封。
@@ -1221,6 +1363,11 @@ class BansPage(QWidget):
             "对账完成",
             f"防火墙中现存 PortGuard 规则：{len(existing)} 条\n已修正 {fixed} 条失效记录。",
         )
+
+    def _on_sync_failed(self, err: str) -> None:
+        self._busy.leave("sync")
+        log.error("读取防火墙规则失败：%s", err)
+        QMessageBox.warning(self, "对账失败", "读取防火墙规则失败，详情见运行日志。")
 
     def _restart_as_admin(self) -> None:
         if (

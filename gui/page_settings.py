@@ -40,6 +40,7 @@ from core.config import (
 from core.database import clear_all_logs, count_audit, db_size, query_audit
 from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
+from gui.background import run_in_background
 from gui.components import PageHeader
 from gui.theme import C
 from gui.widgets import CONTENT_MAX_W, ToggleSwitch, WarnBanner, align_headers, make_item
@@ -349,8 +350,77 @@ class SettingsPage(QWidget):
         watch.add_block(hint, span=False)
 
         page_layout.addWidget(watch)
+        page_layout.addWidget(self._build_runtime_panel())
         page_layout.addStretch(1)
         return page
+
+    def _build_runtime_panel(self) -> _Panel:
+        """「运行与守护」：开机自启 + 当前守护状态
+
+        这一块回答的是「程序没在跑的时候，封禁会发生什么」。答案是：什么都不会
+        发生 —— 防火墙规则没有到期时间，只有本程序的 60 秒巡检会去删。所以
+        重启后能不能自动接上，直接决定「封禁会不会变成永久」。
+        """
+        run = _Panel("运行与守护")
+        self.tg_autostart = ToggleSwitch(False)
+        self.tg_autostart.toggled.connect(self._on_autostart_toggle)
+
+        self.lbl_autostart = QLabel("读取中…")
+        self.lbl_autostart.setObjectName("form_hint")
+        self.lbl_autostart.setWordWrap(True)
+
+        run.add("开机自动启动", self.tg_autostart)
+        # 状态行**整行铺开**而不是走「标签 + 字段」两列：自动换行的 QLabel 放进
+        # 字段列时只拿最小宽度（实测被压到 44px，一句话竖排成一长条，把卡片撑到
+        # 800px 高）；给它 setMinimumWidth 又会让 QGridLayout 把余量塞给标签列，
+        # 标签被推到列中间、和「离线库」那块的左缘对不齐。整行块没有这个问题。
+        run.add_block(self.lbl_autostart, span=True)
+
+        hint = QLabel(
+            "封禁时长只记在本程序里，防火墙规则本身没有「到期时间」——"
+            "程序没运行，到期的封禁就不会被解除。开启后每次登录会自动启动"
+            "（会请求一次管理员权限），启动 1.5 秒内补跑到期巡检与黑名单补封。"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        # 同样整行铺开：放进字段列会被压成一条竖排文字（见上面状态行的注释）
+        run.add_block(hint, span=True)
+        return run
+
+    def _on_autostart_toggle(self, on: bool) -> None:
+        self._refresh_autostart_state(preview=on)
+
+    def _refresh_autostart_state(self, preview: Optional[bool] = None) -> None:
+        """把注册表里的真实状态写进说明行（读不到就说读不到，不猜）"""
+        try:
+            from core import autostart
+        except Exception:
+            self.lbl_autostart.setText("读不到当前状态（模块加载失败）")
+            return
+        if not autostart.supported():
+            self.lbl_autostart.setText("当前系统不支持开机自启（仅 Windows）")
+            self.tg_autostart.setEnabled(False)
+            return
+        if preview is not None:
+            if preview:
+                self.lbl_autostart.setText("保存后写入登录启动项：登录时自动启动并请求管理员权限")
+            else:
+                self.lbl_autostart.setText("保存后移除登录启动项：重启后需要手动启动")
+            return
+
+        enabled = autostart.is_enabled()
+        if enabled is None:
+            self.lbl_autostart.setText("读不到当前状态（注册表被策略限制），保存时会重试")
+            return
+        if not enabled:
+            self.lbl_autostart.setText("未开启 —— 重启后需要手动启动，到期封禁不会自动解除")
+            return
+        if autostart.is_current_target() is False:
+            self.lbl_autostart.setText(
+                "已开启，但登记的是旧路径（程序换过目录或版本），保存后会指向当前程序"
+            )
+            return
+        self.lbl_autostart.setText("已开启 —— 登录后自动启动，并立即补跑到期巡检")
 
     # ── Tab 2：防护与告警 ──
     def _tab_guard(self) -> QWidget:
@@ -460,11 +530,45 @@ class SettingsPage(QWidget):
         alert.add("声音提示", self.tg_sound)
         alert.add("弹窗级别", self.cb_popup)
         alert.add("同 IP 合并窗口", self.sp_merge)
+
+        # ── 外部推送（Webhook）：无人值守时唯一能「送到人手上」的通道 ──
+        self.tg_webhook = ToggleSwitch(False)
+        self.tg_webhook.toggled.connect(self._on_webhook_toggle)
+        self.cb_webhook_level = QComboBox()
+        self.cb_webhook_level.addItems(LEVEL_LABELS)
+        self.cb_webhook_level.setCurrentIndex(len(LEVEL_LABELS) - 1)  # 默认只推「严重」
+        self.cb_webhook_level.setFixedWidth(110)
+
+        self.ed_webhook = QLineEdit()
+        self.ed_webhook.setPlaceholderText("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…")
+        self.ed_webhook.setMinimumWidth(320)
+        self.ed_webhook.setMaximumWidth(560)
+        self.ed_webhook.setToolTip(
+            "企业微信 / 钉钉群机器人地址，或任意接受 "
+            '{"msgtype":"text","text":{"content":"..."}} 的告警网关。\n'
+            "只允许 http/https，且不允许指向本机 / 内网地址（防 SSRF）。\n"
+            "地址里通常带密钥：日志与错误提示只会显示 scheme://host。"
+        )
+        self.btn_webhook_test = QPushButton("发送测试消息")
+        self.btn_webhook_test.setObjectName("btn_outline")
+        self.btn_webhook_test.clicked.connect(self._test_webhook)
+
+        alert.add(
+            "推送级别",
+            _row_widget(
+                self.tg_webhook,
+                self._sw_label("启用外部推送"),
+                self.cb_webhook_level,
+                spacing=8,
+            ),
+        )
+        alert.add("推送地址", _row_widget(self.ed_webhook, self.btn_webhook_test))
         alert.add("", b_test)
         lay.addWidget(alert)
 
         note = QLabel(
             "弹窗级别选「不弹窗」时只写日志与发送托盘通知；同 IP 在合并窗口内的多次命中只提醒一次。"
+            "外部推送用于无人值守场景（企业微信 / 钉钉群机器人），默认关闭。"
         )
         note.setObjectName("hint")
         note.setWordWrap(True)
@@ -1173,6 +1277,15 @@ class SettingsPage(QWidget):
         self.cb_popup.setCurrentIndex(max(0, min(idx, self.cb_popup.count() - 1)))
         self.sp_merge.setValue(cfg.get_int("alert_merge_sec", 60))
 
+        # 外部推送（Webhook）
+        self.tg_webhook.setChecked(cfg.get_bool("alert_webhook_enabled", False))
+        self.ed_webhook.setText(cfg.get("alert_webhook_url", ""))
+        hook_level = cfg.get("alert_webhook_level", LEVEL_CRITICAL)
+        self.cb_webhook_level.setCurrentIndex(
+            LEVEL_ITEMS.index(hook_level) if hook_level in LEVEL_ITEMS else len(LEVEL_ITEMS) - 1
+        )
+        self._on_webhook_toggle(self.tg_webhook.isChecked())
+
         # 数据（四张表各自的保留期）
         self.sp_retention.setValue(cfg.get_int("log_retention_days", DEFAULT_LOG_RETENTION_DAYS))
         self.sp_risk_retention.setValue(
@@ -1194,6 +1307,10 @@ class SettingsPage(QWidget):
         # 本机端口访问观察
         self._watch_load()
         self._refresh_watch_state()
+
+        # 运行与守护（开机自启读的是注册表，不是数据库）
+        self.tg_autostart.setChecked(cfg.get_bool("autostart_enabled", False))
+        self._refresh_autostart_state()
 
         # 操作审计：下拉框 + 首屏数据
         self._refresh_audit_actors()
@@ -1221,6 +1338,13 @@ class SettingsPage(QWidget):
                     else LEVEL_ITEMS[self.cb_popup.currentIndex() - 1]
                 ),
                 "alert_merge_sec": self.sp_merge.value(),
+                "alert_webhook_enabled": "1" if self.tg_webhook.isChecked() else "0",
+                "alert_webhook_url": self.ed_webhook.text().strip(),
+                "alert_webhook_level": (
+                    LEVEL_ITEMS[
+                        max(0, min(self.cb_webhook_level.currentIndex(), len(LEVEL_ITEMS) - 1))
+                    ]
+                ),
                 "log_retention_days": self.sp_retention.value(),
                 # 另外三张表各自的保留期（语义见 core.config.DEFAULT_*_RETENTION_DAYS）
                 "risk_retention_days": self.sp_risk_retention.value(),
@@ -1235,6 +1359,8 @@ class SettingsPage(QWidget):
                 "xdb_auto_download": "1" if self.tg_xdb_download.isChecked() else "0",
                 "xdb_source": "",  # 1.1.0 的单条字段：迁到 xdb_sources 后清空，避免两处打架
                 "xdb_sources": json.dumps(self._xdb_sources(), ensure_ascii=False),
+                # 开机自启：设置项只是「用户意愿」，真实状态在注册表里（见 core/autostart.py）
+                "autostart_enabled": "1" if self.tg_autostart.isChecked() else "0",
             }
         )
 
@@ -1264,6 +1390,20 @@ class SettingsPage(QWidget):
             set_retention(self.sp_retention.value())
         except Exception:
             log.exception("应用日志保留天数失败")
+
+        # 开机自启：写完设置立刻落到注册表，并回读真实状态（写失败必须让用户看见，
+        # 否则他会以为「开了」而实际上重启后什么都没发生）
+        try:
+            from core import autostart
+
+            ok, why = autostart.sync(self.tg_autostart.isChecked())
+            if not ok:
+                QMessageBox.warning(
+                    self, "开机自启未生效", f"{why}\n\n设置已保存，但登录启动项没有写成功。"
+                )
+        except Exception:
+            log.exception("应用开机自启失败")
+        self._refresh_autostart_state()
 
         # 审计：只记「改了哪些键」，不记值 —— 把配置值抄进审计表等于
         # 把一份快照存到明文可查的地方，将来改了配置反而对不上。
@@ -1925,6 +2065,81 @@ class SettingsPage(QWidget):
                 "local_port": 8080,
             }
         )
+
+    # ── 外部推送（Webhook）──
+    def _on_webhook_toggle(self, on: bool) -> None:
+        self.ed_webhook.setEnabled(on)
+        self.cb_webhook_level.setEnabled(on)
+        self.btn_webhook_test.setEnabled(on)
+
+    def _test_webhook(self) -> None:
+        """用**输入框里的地址**立即发一条测试消息（不必先保存）
+
+        发送在后台线程：地址不可达时 urllib 会一直等到超时，界面线程里等就是假死。
+        """
+        from core import alert_webhook
+
+        url = self.ed_webhook.text().strip()
+        ok, why = alert_webhook.validate_url(url)
+        if not ok:
+            QMessageBox.warning(self, "推送地址不可用", why)
+            return
+        if getattr(self, "_webhook_testing", False):
+            return
+        self._webhook_testing = True
+        self.btn_webhook_test.setEnabled(False)
+        self.btn_webhook_test.setText("发送中…")
+
+        level = LEVEL_ITEMS[max(0, min(self.cb_webhook_level.currentIndex(), len(LEVEL_ITEMS) - 1))]
+        alert = {
+            "ip": "203.0.113.10",
+            "level": level,
+            "score": 95,
+            "reason": "这是一条测试消息（由用户在设置页手动触发）",
+            "local_port": 3389,
+            "disposition": "alert",
+        }
+        payload = alert_webhook.build_payload(alert)
+
+        def work():
+            return alert_webhook.post(url, payload)
+
+        run_in_background(
+            self,
+            work,
+            self._on_webhook_test_done,
+            self._on_webhook_test_failed,
+            name="webhook-test",
+        )
+
+    def _on_webhook_test_done(self, res) -> None:
+        self._reset_webhook_test_button()
+        ok, err = res if isinstance(res, tuple) else (False, "返回格式异常")
+        from core import alert_webhook
+
+        if ok:
+            QMessageBox.information(
+                self,
+                "推送成功",
+                f"测试消息已送达：\n{alert_webhook.mask_url(self.ed_webhook.text().strip())}",
+            )
+            return
+        QMessageBox.warning(
+            self,
+            "推送失败",
+            f"地址：{alert_webhook.mask_url(self.ed_webhook.text().strip())}\n原因：{err}\n\n"
+            "常见原因：地址填错、机器人已停用、本机访问不了外网。",
+        )
+
+    def _on_webhook_test_failed(self, err: str) -> None:
+        self._reset_webhook_test_button()
+        log.error("Webhook 测试推送异常：%s", err)
+        QMessageBox.warning(self, "推送失败", "发送时发生异常，详情见运行日志。")
+
+    def _reset_webhook_test_button(self) -> None:
+        self._webhook_testing = False
+        self.btn_webhook_test.setText("发送测试消息")
+        self.btn_webhook_test.setEnabled(self.tg_webhook.isChecked())
 
     def _clean_logs(self) -> None:
         """

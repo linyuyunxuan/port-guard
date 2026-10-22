@@ -13,6 +13,7 @@ PortGuard — 主窗口的行为 Mixin
 
 import contextlib
 import threading
+import time
 from typing import TYPE_CHECKING, Dict, Optional
 
 from app import ban_service, maintenance
@@ -27,6 +28,7 @@ from core.config import (
 from core.database import count_active_bans, count_risk_unhandled, count_today
 from core.event_bus import bus
 from core.logger import get_logger
+from gui.background import BusyGuard, run_in_background
 from gui.theme import C
 from qtcompat import QTimer
 
@@ -60,6 +62,17 @@ EXPIRE_INTERVAL_MS = 60_000
 # 维护巡检节拍：只负责「看一眼今天到点没有」，真正的清理每天最多跑一次
 CLEANUP_TICK_MS = 10 * 60_000
 
+# ── 风险事件页的自动刷新节流（秒）──
+# 为什么不能「来一条刷一次」：整表重建的耗时随行数线性增长（见 gui/row_action.py
+# 开头的实测），而事件泵 150ms 一拍；攻击时风险事件成批到达，刷新会一轮压一轮，
+# 界面越刷越滞后 —— 正好在最需要看列表的时候最卡。
+# 所以：合并成一拍一刷、两次之间至少隔 EVENTS_REFRESH_MIN_SEC，并按上次渲染
+# 耗时自适应退避；单次渲染超过 EVENTS_SLOW_RENDER_SEC 就暂停自动刷新并明示，
+# 让用户自己决定什么时候看（手动点「刷新」始终有效）。
+EVENTS_REFRESH_MIN_SEC = 1.0
+EVENTS_REFRESH_MAX_SEC = 5.0
+EVENTS_SLOW_RENDER_SEC = 0.8
+
 
 class EventPumpMixin(_HostBase):
     """
@@ -83,6 +96,12 @@ class EventPumpMixin(_HostBase):
     lbl_geo: "QLabel"
     lbl_xdb: "QLabel | None"
     _last_stats: float
+    # 事件页自动刷新的节流状态（见文件头的 EVENTS_* 常量）
+    _events_dirty: bool
+    _events_interval: float
+    _events_ready_at: float
+    _events_paused: bool
+    _expire_busy: BusyGuard
 
     # 这两个方法由 MainWindow 实现（MainWindow 自身的定义优先于 Mixin），
     # 在此声明仅为让类型检查器知道它们存在；单独使用本 Mixin 会直接报错，
@@ -108,6 +127,14 @@ class EventPumpMixin(_HostBase):
         raise NotImplementedError
 
     def _setup_timers(self) -> None:
+        # 事件页自动刷新：脏标记由事件泵置位，刷新本身按最小间隔节流
+        self._events_dirty = False
+        self._events_interval = EVENTS_REFRESH_MIN_SEC
+        self._events_ready_at = 0.0
+        self._events_paused = False
+        # 到期巡检在后台线程跑，用忙标记挡住「上一轮还没完下一轮又起」
+        self._expire_busy = BusyGuard()
+
         # 主事件泵：批量把后台队列里的记录搬到界面
         self.pump = QTimer(self)
         self.pump.setInterval(PUMP_INTERVAL_MS)
@@ -170,8 +197,7 @@ class EventPumpMixin(_HostBase):
             # 页面不可见时不刷新（原实现每次事件都重载整表）。
             # 判据用「当前页是不是这个页面对象」而不是下标常量：导航顺序会变
             # （P2-4 在事件页与封禁页之间插了「历史访问」），写死下标就会静默刷错页。
-            if self.stack.currentWidget() is self.page_events:
-                self.page_events.refresh()
+            self._events_dirty = True
 
         # 3) 告警（只走程序内弹窗与托盘气泡）
         for a in bus.drain_alert(50):
@@ -190,7 +216,8 @@ class EventPumpMixin(_HostBase):
             # 「封了但什么都没变」的观感就是这么来的。
             cur = self.stack.currentWidget()
             if cur is self.page_events:
-                self.page_events.refresh()
+                # 走同一个节流入口：批量封禁会连着来几十条结果，逐条刷等于自锁
+                self._events_dirty = True
             elif cur is self.page_bans and self.page_bans.isVisible():
                 self.page_bans.refresh()
             self._refresh_stats(force=True)
@@ -198,6 +225,56 @@ class EventPumpMixin(_HostBase):
         # 5) 离线库同步事件
         for ev in bus.drain_xdb(100):
             self._on_xdb_event(ev)
+
+        # 6) 事件页合并刷新（必须放在本拍最后：本拍攒到的脏标记一次刷完）
+        self._flush_events_refresh()
+
+    def _flush_events_refresh(self) -> None:
+        """把本拍攒下的「事件页需要刷新」落到界面上（节流 + 自适应退避）
+
+        脏标记只有「当前页就是事件页」时才消费；停在别的页时一直攒着，
+        切回来时由导航处的 refresh 统一处理，不会漏也不会白刷。
+        """
+        if not self._events_dirty:
+            return
+        if self.stack.currentWidget() is not self.page_events:
+            return
+
+        if self._events_paused:
+            # 暂停期间不再刷：脏标记留着（用户点「刷新」时会重新加载），
+            # 但每拍都调用一次 set_auto_paused 只会重复写同一行字，这里直接跳过
+            self._events_dirty = False
+            return
+
+        now = time.monotonic()
+        if now < self._events_ready_at:
+            return
+
+        self._events_dirty = False
+        started = time.monotonic()
+        self.page_events.refresh(auto=True)
+        cost = time.monotonic() - started
+
+        if cost >= EVENTS_SLOW_RENDER_SEC:
+            # 单次刷新已经长到用户能明确感到卡顿：停掉自动刷新，把决定权交回用户。
+            # 继续刷下去只会让界面长期处于「一直在重建」的状态。
+            self._events_paused = True
+            self._events_interval = EVENTS_REFRESH_MAX_SEC
+            self._events_ready_at = time.monotonic() + EVENTS_REFRESH_MAX_SEC
+            self.page_events.set_auto_paused(True)
+            log.info("事件页单次刷新 %.0fms，已暂停自动刷新", cost * 1000)
+            return
+
+        # 退避系数 3：渲染 300ms → 间隔 900ms，仍留 2/3 的时间给用户操作
+        self._events_interval = min(EVENTS_REFRESH_MAX_SEC, max(EVENTS_REFRESH_MIN_SEC, cost * 3))
+        self._events_ready_at = time.monotonic() + self._events_interval
+
+    def _resume_events_auto_refresh(self) -> None:
+        """用户手动刷新过事件页：解除暂停并重置节流窗口"""
+        self._events_paused = False
+        self._events_interval = EVENTS_REFRESH_MIN_SEC
+        self._events_ready_at = 0.0
+        self._events_dirty = False
 
     def _on_xdb_event(self, ev: Dict) -> None:
         """离线库同步进度 → 状态栏 + 设置页进度条"""
@@ -278,24 +355,46 @@ class EventPumpMixin(_HostBase):
 
     # ── 到期巡检 / 清理 ──
     def _check_expired(self) -> None:
+        """到期自动解封（后台线程）
+
+        为什么必须后台：`check_expired` 每条到期记录都要起一次 netsh 删规则，
+        30 条就是几十秒。放界面线程里跑，用户看到的是「点了没反应」，而且
+        Windows 会把窗口标成「未响应」，绝大多数人到这里就会强杀进程 ——
+        强杀后规则还在系统里，库里却已经记了「解封中」，两边从此对不上。
+        """
         if not self._is_admin():
             self._report_expired_backlog()
             return
-        try:
-            done = ban_service.check_expired()
-        except Exception:
-            log.exception("到期解封巡检失败")
+        if not self._expire_busy.enter("expire"):
             return
+
+        def work() -> Dict:
+            done = ban_service.check_expired()
+            # 积压数与解封结果一起回主线程：分两次查会读到两个时刻的状态，
+            # 界面上就会出现「已解封 3 个」但「另有 2 条已到期」的错位
+            return {"done": done, "backlog": ban_service.expired_backlog()}
+
+        run_in_background(self, work, self._on_expired_done, self._on_expired_failed, name="expire")
+
+    def _on_expired_done(self, payload: Dict) -> None:
+        self._expire_busy.leave("expire")
+        done = payload.get("done") or []
         # 无论这次有没有解封到东西，都把积压数同步给封禁页：
         # 权限条上那句「另有 N 条已到期」必须跟着真实状态走，
         # 否则解封完了界面还在说「解不掉」。
         with contextlib.suppress(Exception):
-            self.page_bans.set_expired_backlog(ban_service.expired_backlog())
-        if done:
-            self._set_status(f"已自动解封 {len(done)} 个到期 IP", C.success)
-            if self.stack.currentWidget() is self.page_bans:
-                self.page_bans.refresh()
-            self._refresh_stats(force=True)
+            self.page_bans.set_expired_backlog(int(payload.get("backlog") or 0))
+        if not done:
+            return
+        self._set_status(f"已自动解封 {len(done)} 个到期 IP", C.success)
+        if self.stack.currentWidget() is self.page_bans:
+            self.page_bans.refresh()
+        self._refresh_stats(force=True)
+
+    def _on_expired_failed(self, err: str) -> None:
+        self._expire_busy.leave("expire")
+        log.error("到期解封巡检失败：%s", err)
+        self._set_status("到期解封巡检失败，详情见运行日志", C.danger)
 
     def _enforce_blacklist(self) -> None:
         """黑名单补封（后台线程）：只处理「名单里有、但没有活动封禁」的条目。

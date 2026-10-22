@@ -32,6 +32,16 @@ def main() -> int:
     from gui.main_window import MainWindow
     from gui.theme import GLOBAL_STYLE
 
+    # 离屏渲染默认没有字体库，中文会画成方框：显式注册系统字体后再设应用字体。
+    # （Qt5/Qt6 的 offscreen 平台插件都不做系统字体枚举，只有真窗口才枚举。）
+    from qtcompat import QFont, QtGui
+
+    for _font_file in ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"):
+        if os.path.exists(_font_file):
+            QtGui.QFontDatabase.addApplicationFont(_font_file)
+            break
+    app.setFont(QFont("Microsoft YaHei UI", 10))
+
     app.setStyleSheet(GLOBAL_STYLE)
     win = MainWindow()
     win.resize(1360, 860)

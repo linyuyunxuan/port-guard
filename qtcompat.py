@@ -66,11 +66,14 @@ def exec_app(app: Any) -> int:
 
 Qt = QtCore.Qt
 Signal = QtCore.Signal
+QObject = QtCore.QObject
 Property = QtCore.Property
 QTimer = QtCore.QTimer
 QSize = QtCore.QSize
 QRect = QtCore.QRect
 QDate = QtCore.QDate
+QEvent = QtCore.QEvent
+QPoint = QtCore.QPoint
 QPointF = QtCore.QPointF
 QModelIndex = QtCore.QModelIndex
 QPersistentModelIndex = QtCore.QPersistentModelIndex
@@ -89,6 +92,7 @@ QColor = QtGui.QColor
 QFont = QtGui.QFont
 QFontMetrics = QtGui.QFontMetrics
 QIcon = QtGui.QIcon
+QMouseEvent = QtGui.QMouseEvent
 QPainter = QtGui.QPainter
 QPen = QtGui.QPen
 QPixmap = QtGui.QPixmap
@@ -138,6 +142,7 @@ QTableWidget = QtWidgets.QTableWidget
 QTableWidgetItem = QtWidgets.QTableWidgetItem
 QTextEdit = QtWidgets.QTextEdit
 QToolButton = QtWidgets.QToolButton
+QToolTip = QtWidgets.QToolTip
 QVBoxLayout = QtWidgets.QVBoxLayout
 QWidget = QtWidgets.QWidget
 QKeySequence = QtGui.QKeySequence
@@ -183,3 +188,18 @@ def _inject_exec_aliases() -> List[str]:
 
 # 注入结果，供 --diag / 自检打印（Qt6 下恒为空）
 EXEC_ALIASES: List[str] = [] if IS_QT6 else _inject_exec_aliases()
+
+
+# ═══════════════════════════════════════════════════════════
+#  Qt6 弃用：QMouseEvent.pos() → position()
+# ═══════════════════════════════════════════════════════════
+# Qt6 把 pos() 标成 deprecated（推荐 position()，返回 QPointF），而 Qt5 **只有**
+# pos()（position() 是 Qt6 新增的）。业务代码若直接写 pos()，在 Qt6 下每次点表
+# 格都刷一条 DeprecationWarning；写 position() 又会在老系统上 AttributeError。
+def mouse_pos(event: Any) -> Any:
+    """取鼠标事件的单元格内坐标，两代绑定都可用（返回 QPoint）"""
+    fn = getattr(event, "position", None)
+    if callable(fn):
+        p = fn()
+        return QPoint(int(p.x()), int(p.y()))
+    return event.pos()

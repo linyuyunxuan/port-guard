@@ -100,7 +100,21 @@ class Alerter:
         if popup_level and popup_level != "none" and self._rank(level) >= self._rank(popup_level):
             self._popup(title, body, disposition)
 
+        # 外部推送（可选）：气泡 + 声音 + 弹窗都要求「有人正看着这台机器」，
+        # 而最需要告警的无人值守场景恰恰没人看。默认关闭，见 core/alert_webhook.py
+        self._notify_webhook(alert)
+
         return True
+
+    @staticmethod
+    def _notify_webhook(alert: Dict) -> None:
+        try:
+            from core import alert_webhook
+
+            alert_webhook.send_async(alert)
+        except Exception:
+            # 推送失败绝不能影响本地告警：它只是「额外一条路」
+            log.exception("Webhook 推送调度失败")
 
     def _popup(self, title: str, body: str, disposition: str = "") -> None:
         if self.parent is None:

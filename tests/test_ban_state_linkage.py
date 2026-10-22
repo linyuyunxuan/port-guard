@@ -187,16 +187,19 @@ def test_events_page_row_action_and_menu_follow_state(qapp, fresh_db, monkeypatc
 
     banned_row = {"ip": "203.0.113.10", "risk_score": 92, "summary": "x", "handled": 0}
     fresh_row = {"ip": "198.51.100.7", "risk_score": 92, "summary": "x", "handled": 0}
+    page._rows = [banned_row, fresh_row]
 
-    # 容器必须留在局部变量里：`_row_actions` 返回的 QWidget 没有父对象，
-    # 一旦被回收，子按钮的 C++ 对象跟着销毁（再取 text() 就是 shiboken 报错）
-    w_banned = page._row_actions(banned_row)
-    w_fresh = page._row_actions(fresh_row)
-    btn_banned = w_banned.findChildren(page_events.QPushButton)[0]
-    btn_fresh = w_fresh.findChildren(page_events.QPushButton)[0]
-    assert btn_banned.text() == "已封禁" and not btn_banned.isEnabled()
-    assert btn_fresh.text() == "封禁" and btn_fresh.isEnabled()
-    assert "永久" in btn_banned.toolTip()
+    # 操作列由自绘 delegate 渲染（gui/row_action.py），状态改从 spec 上取：
+    # 「已封禁」必须置灰且 tooltip 说清为什么点不动，未封禁的必须可点。
+    banned_spec = page._action_spec(0)
+    fresh_spec = page._action_spec(1)
+    assert banned_spec is not None
+    assert fresh_spec is not None
+    assert banned_spec.text == "已封禁" and not banned_spec.enabled
+    assert fresh_spec.text == "封禁" and fresh_spec.enabled
+    assert "永久" in banned_spec.tip
+    # 行号越界（渲染与重排之间）不能抛，也不能画出按钮
+    assert page._action_spec(2) is None and page._action_spec(-1) is None
 
     # 未处理：两个动作都可点（过滤掉分隔线 None，mypy 才能按下标取）
     entries = [e for e in page._menu_entries(fresh_row) if e is not None]
