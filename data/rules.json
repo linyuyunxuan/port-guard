@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "description": "PortGuard 风险规则配置。enabled=是否启用，score=命中加分，level=风险等级，action=suggest_ban|alert。geo_sensitive_port.geo_scope 是管理端口规则的归属地范围：china(仅限境内) | overseas(仅限境外) | both(境内+境外)。region_rules 是「区域访问白名单」规则，每条自选动作：allow(放行) | whitelist(白名单放行：仅限命中来源通行，同端口其余来源直接拦截) | watch(仅关注) | downgrade(降级) | suggest_ban(判定风险)。target_ports 留空表示对所有端口生效（whitelist 除外：留空只豁免、不拦截）。",
+  "description": "PortGuard 风险规则配置。enabled=是否启用，score=命中加分，level=风险等级，action=suggest_ban|alert。geo_sensitive_port.geo_scope 是管理端口规则的归属地范围：china(仅限境内) | overseas(仅限境外) | both(境内+境外)。region_rules 是「区域访问」规则，每条自选动作：allow(放行：命中区域豁免，其他区域不受影响) | whitelist(白名单放行：仅限所选区域通行，其他区域访问所选端口直接拦截) | watch(仅关注) | downgrade(降级) | suggest_ban(判定风险：仅针对所选区域拦截，其他区域不受影响)。target_ports 留空表示对所有端口生效（whitelist 除外：必须填端口）。",
   "rules": {
     "blacklist": {
       "enabled": true,
