@@ -277,6 +277,10 @@ class RiskResult:
     matched_rules: List[str] = field(default_factory=list)
     suggest_ban: bool = False
     whitelisted: bool = False
+    #: 端口白名单规则的「未命中即拦截」：pipeline 见到该标记就**不等
+    #: auto_mode 开关**直接走自动封禁（管理员在规则里显式写了「其余拦截」，
+    #: 就该按规则办事）。内网 / 本机保护（is_never_ban）依然生效。
+    force_block: bool = False
     reason: str = ""
     #: 处置结论。引擎先填基础值，pipeline 在**知道封禁状态之后**可能改写为「已拦截」。
     disposition: str = ""

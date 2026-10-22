@@ -106,6 +106,10 @@ def rule_label(rule_id: str) -> str:
 #   「河南区、山西区的 IP 可访问某端口」就是一条 action=allow 的区域规则
 REGION_ACTIONS = [
     ("allow", "放行（完全豁免，不计风险、不建议封禁）"),
+    (
+        "whitelist",
+        "白名单放行（仅限命中来源通行，同端口其余来源直接拦截）",
+    ),
     ("watch", "仅关注（不影响评分，只打标签留痕）"),
     ("downgrade", "降级（把已累计的风险分打到很低，仍留记录）"),
     ("suggest_ban", "判定风险（按分值加分，可生成封禁建议）"),

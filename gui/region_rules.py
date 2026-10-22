@@ -227,6 +227,13 @@ class RegionRuleDialog(QDialog):
         a = self._action()
         if a == "allow":
             text = "放行：命中即完全豁免 —— 不计风险分、不生成封禁建议，也不会被自动封禁。"
+        elif a == "whitelist":
+            text = (
+                "白名单放行：命中条件的来源完全豁免；其余来源访问「生效端口」时"
+                "直接判为严重风险并立即写入防火墙拦截（无需开启自动封禁）。"
+                "归属地未知的来源同样会被拦截；内网 / 本机地址不受影响。"
+                "此动作必须填写生效端口。"
+            )
         elif a == "watch":
             text = "仅关注：不影响风险评分，只在事件与日志里打上「区域关注」标签，便于事后审计。"
         elif a == "downgrade":
@@ -251,6 +258,14 @@ class RegionRuleDialog(QDialog):
                 "无法保存",
                 "至少要填一个有效的匹配条件（省份 / 城市 / 国家 / 运营商 / IP 网段 / "
                 "IP 前缀 / 仅限境内），否则这条规则会匹配所有地址。",
+            )
+            return
+        if self._action() == "whitelist" and not self.values()["target_ports"]:
+            QMessageBox.warning(
+                self,
+                "无法保存",
+                "「白名单放行」必须填写生效端口：不限定端口的白名单会拦截"
+                "所有未命中的来源，等于把整机访问都关掉。请明确写出要保护的端口。",
             )
             return
         self.accept()

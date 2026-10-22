@@ -216,6 +216,46 @@ def test_auto_ban_result_is_reported_as_block(engine, sink, no_ban, monkeypatch)
         cfg.set("auto_mode", False)
 
 
+def test_force_block_bans_even_without_auto_mode(engine, sink, no_ban, monkeypatch):
+    """端口白名单未命中（force_block）：不开「自动封禁」也要直接拦。
+
+    管理员在规则里逐条写了「其余来源直接拦截」，这就是显式授权 ——
+    不该再被全局 auto_mode 开关拦住。内网 / 本机保护在 auto_ban_record
+    里仍然生效（另有用例钉住）。
+    """
+    from core import settings as cfg
+
+    cfg.set("auto_mode", False)  # 全局自动封禁明确关闭
+    calls = []
+
+    def fake_auto_ban(rec, result, actor=None, existing=None):
+        calls.append(rec.ip)
+        return True
+
+    monkeypatch.setattr(pipeline, "auto_ban_record", fake_auto_ban)
+    # 给引擎挂一条「仅限河南访问 62213」的白名单规则；来源归属地未知 → 未命中
+    engine._cfg["region_rules"] = [
+        {
+            "id": "r-wl",
+            "name": "仅限河南访问 62213",
+            "enabled": True,
+            "action": "whitelist",
+            "target_ports": [62213],
+            "match": {"provinces": ["河南省"]},
+        }
+    ]
+    engine._compile()
+    try:
+        result = pipeline.process_record(_rec(local_port=62213))
+    finally:
+        engine._cfg["region_rules"] = []
+        engine._compile()
+
+    assert calls == [IP]
+    assert result.disposition == DISPOSITION_BLOCK
+    assert result.force_block is True
+
+
 def test_disposition_is_decided_before_alert_is_queued(engine, sink, no_ban, monkeypatch):
     """先定结论、后投递：封禁动作发生时会话里应该还一条告警都没有。
 

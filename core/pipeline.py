@@ -262,12 +262,25 @@ def process_record(
         # 或者本次触发了自动封禁并且真的写进了防火墙。
         # 写成一条 `or` 是为了让「结论只有一个赋值点」—— 分成两个分支各自赋值
         # 的话，以后加第三种拦截来源必然只改一处。
-        if existing is not None or (
+        # 自动封禁的两个入口：
+        #   常规 —— 设置页开了「自动封禁」且分数达标（默认关闭）；
+        #   规则强制 —— 端口白名单规则写了「其余来源直接拦截」（force_block）。
+        #   后者是管理员在规则里逐条显式授权过的动作，不再看 auto_mode 开关；
+        #   内网 / 本机保护（is_never_ban）在 auto_ban_record 里仍然生效。
+        auto_gate = (
             allow_auto_ban
             and result.suggest_ban
-            and cfg.get_bool("auto_mode", False)
-            and result.score >= cfg.get_int("auto_ban_threshold", 90)
-            # 自动封禁默认关闭，条件全满足才会走到调用；and 短路保证了顺序
+            and (
+                result.force_block
+                or (
+                    cfg.get_bool("auto_mode", False)
+                    and result.score >= cfg.get_int("auto_ban_threshold", 90)
+                )
+            )
+        )
+        if existing is not None or (
+            auto_gate
+            # 条件全满足才会走到调用；and 短路保证了顺序
             and auto_ban_record(rec, result, actor=actor, existing=existing)
         ):
             result.disposition = DISPOSITION_BLOCK

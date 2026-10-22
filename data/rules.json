@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "description": "PortGuard 风险规则配置。enabled=是否启用，score=命中加分，level=风险等级，action=suggest_ban|alert。geo_sensitive_port.geo_scope 是管理端口规则的归属地范围：china(仅限境内) | overseas(仅限境外) | both(境内+境外)。region_rules 是「区域访问白名单」规则，每条自选动作：allow(放行) | watch(仅关注) | downgrade(降级) | suggest_ban(判定风险)。target_ports 留空表示对所有端口生效。",
+  "description": "PortGuard 风险规则配置。enabled=是否启用，score=命中加分，level=风险等级，action=suggest_ban|alert。geo_sensitive_port.geo_scope 是管理端口规则的归属地范围：china(仅限境内) | overseas(仅限境外) | both(境内+境外)。region_rules 是「区域访问白名单」规则，每条自选动作：allow(放行) | whitelist(白名单放行：仅限命中来源通行，同端口其余来源直接拦截) | watch(仅关注) | downgrade(降级) | suggest_ban(判定风险)。target_ports 留空表示对所有端口生效（whitelist 除外：留空只豁免、不拦截）。",
   "rules": {
     "blacklist": {
       "enabled": true,
@@ -114,6 +114,25 @@
         "only_china": false
       },
       "note": "示例：山西来源不做放行、也不加分，只在事件与日志里打上「区域关注」标签，便于事后审计。"
+    },
+    {
+      "id": "r-demo-whitelist",
+      "name": "仅限河南来源访问 62213",
+      "enabled": false,
+      "action": "whitelist",
+      "target_ports": [62213],
+      "score": 100,
+      "factor": 0.3,
+      "match": {
+        "provinces": ["河南省"],
+        "cities": [],
+        "countries": [],
+        "isp": [],
+        "cidrs": [],
+        "ip_keywords": [],
+        "only_china": false
+      },
+      "note": "示例：端口白名单 —— 62213 只放行河南省来源，其余来源（含归属地未知）访问该端口时直接写入防火墙拦截。默认关闭，启用前请确认规则条件圈得准。"
     }
   ]
 }
