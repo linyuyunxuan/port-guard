@@ -325,6 +325,10 @@ class RuleEngine:
             if action not in REGION_ACTION_KEYS:
                 log.warning("区域规则 %s 的动作 %r 不合法，按 watch 处理", rid, action)
                 action = "watch"
+            # 「白名单放行」已合并进「放行」(allow)，旧名称向后兼容：
+            # 引擎内部统一按 allow 处理，matched_rules 也只记 allow
+            if action == "whitelist":
+                action = "allow"
 
             ports: List[int] = []
             for p in r.get("target_ports") or []:
@@ -364,12 +368,12 @@ class RuleEngine:
                     ),
                 }
             )
-        # whitelist 规则必须圈定端口才能「未命中即拦截」：
+        # 放行（allow）规则必须圈定端口才能「未命中即拦截」：
         # 端口留空（=全部端口）时只保留豁免半边，否则一次误配就把整机访问全掐了
         for r in out:
-            if r["action"] == "whitelist" and not r["ports"]:
+            if r["action"] == "allow" and not r["ports"]:
                 log.warning(
-                    "区域白名单规则 %s 未限定生效端口，按「仅豁免、不拦截」处理；"
+                    "区域放行规则 %s 未限定生效端口，按「仅豁免、不拦截」处理；"
                     "要启用「其余来源直接拦截」请填写生效端口",
                     r["id"],
                 )
@@ -522,45 +526,45 @@ class RuleEngine:
                 disposition=DISPOSITION_ALLOW,
             )
 
-        # ── 区域规则：action=allow / whitelist 优先级最高，命中即豁免 ──
+        # ── 区域规则：action=allow（含旧名 whitelist）优先级最高，命中即豁免 ──
         # 「河南/山西的 IP 可以访问某端口」就是靠这条短路实现的。
         region_hits = self._match_region_rules(rec, geo)
         for r in region_hits:
-            if r["action"] in ("allow", "whitelist"):
+            if r["action"] == "allow":
                 return RiskResult(
                     score=0,
                     level=LEVEL_NORMAL,
-                    matched_rules=[region_rule_key(r["action"], r["id"])],
+                    matched_rules=[region_rule_key("allow", r["id"])],
                     suggest_ban=False,
                     whitelisted=True,
                     reason=f"命中区域放行规则「{r['name']}」，已豁免",
                     disposition=DISPOSITION_ALLOW,
                 )
 
-        # ── 端口白名单的「默认拒绝」半边 ──
-        # whitelist 规则命中 = 豁免（上面已短路）；没命中、但访问的端口
-        # 落在某条启用的 whitelist 规则范围内 = 管理员说了「这个端口只放行
+        # ── 「放行」规则的「默认拒绝」半边 ──
+        # 放行规则命中 = 豁免（上面已短路）；没命中、但访问的端口
+        # 落在某条启用的放行规则范围内 = 管理员说了「这个端口只放行
         # 我圈出来的来源」—— 其余来源不评分、不观望，直接判拦截级风险。
         # 归属地未知的来源同样算未命中（默认拒绝，这才叫「仅限本区域通行」）；
         # 内网 / 本机地址由 pipeline 的 is_never_ban 兜底，不会误伤自己人。
-        # 没限定端口的 whitelist 规则只豁免、不拦截（编译期已告警）：
+        # 没限定端口的放行规则只豁免、不拦截（编译期已告警）：
         # 「未限定端口还敢拦所有未命中来源」等于把整机访问都掐了，太危险。
-        if not any(r["action"] in ("allow", "whitelist") for r in region_hits):
+        if not any(r["action"] == "allow" for r in region_hits):
             for r in self._region_rules:
                 if (
                     r["enabled"]
-                    and r["action"] == "whitelist"
+                    and r["action"] == "allow"
                     and r["ports"]
                     and rec.local_port in r["ports"]
                 ):
                     return RiskResult(
                         score=100,
                         level=LEVEL_CRITICAL,
-                        matched_rules=[region_rule_key("whitelist", r["id"])],
+                        matched_rules=[region_rule_key("allow", r["id"])],
                         suggest_ban=True,
                         force_block=True,
                         reason=(
-                            f"未命中端口白名单规则「{r['name']}」，"
+                            f"未命中端口放行规则「{r['name']}」，"
                             f"端口 {rec.local_port} 仅限规则圈定的来源通行，已按拦截处理"
                         ),
                         disposition=DISPOSITION_CONFIRM,

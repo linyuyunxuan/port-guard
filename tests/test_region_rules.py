@@ -118,9 +118,12 @@ def test_allow_with_empty_ports_applies_to_all(tmp_path):
     assert eng.evaluate(_rec("2.2.2.2", 22), HENAN).whitelisted is True
 
 
-def test_allow_does_not_leak_to_other_provinces(tmp_path):
+def test_allow_miss_blocks_other_province_on_same_port(tmp_path):
+    """未命中省份访问放行端口：直接拦截（这就是「仅限本区域通行」）"""
     eng = _engine(tmp_path, [ALLOW_HENAN])
-    assert eng.evaluate(_rec("3.3.3.3", 18080), SHANXI).whitelisted is False
+    r = eng.evaluate(_rec("3.3.3.3", 18080), SHANXI)
+    assert r.whitelisted is False
+    assert r.force_block is True
 
 
 def test_watch_does_not_change_score(tmp_path):
@@ -215,80 +218,80 @@ def test_allow_beats_all_other_rules(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 白名单放行（whitelist）：仅限命中来源通行，同端口其余来源直接拦截
+# 放行（allow，原 whitelist 已合并进此动作）：仅限命中来源通行，同端口其余来源直接拦截
 # 用户原话：「规则设定某端口某区域的话，仅限本区域通行，其他区域访问直接拦截」
 # --------------------------------------------------------------------------- #
-WL_HENAN = {
+ALLOW_PORT_HENAN = {
     "id": "r-wl",
     "name": "仅限河南访问 62213",
     "enabled": True,
-    "action": "whitelist",
+    "action": "allow",
     "target_ports": [62213],
     "match": {"provinces": ["河南省"]},
 }
 
 
-def test_whitelist_hit_is_exempt(tmp_path):
-    """命中白名单条件的来源：完全豁免，与 allow 一致"""
-    eng = _engine(tmp_path, [WL_HENAN])
+def test_allow_hit_is_exempt(tmp_path):
+    """命中放行条件的来源：完全豁免"""
+    eng = _engine(tmp_path, [ALLOW_PORT_HENAN])
     r = eng.evaluate(_rec("2.2.2.2", 62213), HENAN)
     assert r.score == 0
     assert r.whitelisted is True
     assert r.suggest_ban is False
     assert r.force_block is False
-    assert r.matched_rules == [region_rule_key("whitelist", "r-wl")]
+    assert r.matched_rules == [region_rule_key("allow", "r-wl")]
 
 
-def test_whitelist_miss_blocks_same_port(tmp_path):
-    """未命中来源访问白名单端口：不评分、直接判拦截级，且带 force_block"""
-    eng = _engine(tmp_path, [WL_HENAN])
+def test_allow_miss_blocks_same_port(tmp_path):
+    """未命中来源访问放行端口：不评分、直接判拦截级，且带 force_block"""
+    eng = _engine(tmp_path, [ALLOW_PORT_HENAN])
     r = eng.evaluate(_rec("3.3.3.3", 62213), SHANXI)
     assert r.score == 100
     assert r.level == "critical"
     assert r.suggest_ban is True
     assert r.force_block is True
-    assert r.matched_rules == [region_rule_key("whitelist", "r-wl")]
+    assert r.matched_rules == [region_rule_key("allow", "r-wl")]
     assert "仅限河南访问 62213" in r.reason
 
 
-def test_whitelist_miss_blocks_unknown_geo(tmp_path):
+def test_allow_miss_blocks_unknown_geo(tmp_path):
     """默认拒绝：归属地未知的来源也算未命中（「仅限本区域」的应有之义）"""
-    eng = _engine(tmp_path, [WL_HENAN])
+    eng = _engine(tmp_path, [ALLOW_PORT_HENAN])
     r = eng.evaluate(_rec("5.5.5.5", 62213), UNKNOWN)
     assert r.force_block is True
     assert r.level == "critical"
 
 
-def test_whitelist_does_not_touch_other_ports(tmp_path):
-    """白名单只管自己圈的端口，别的端口照常评分、绝不拦截"""
-    eng = _engine(tmp_path, [WL_HENAN])
+def test_allow_does_not_touch_other_ports(tmp_path):
+    """放行只管自己圈的端口，别的端口照常评分、绝不拦截"""
+    eng = _engine(tmp_path, [ALLOW_PORT_HENAN])
     r = eng.evaluate(_rec("3.3.3.3", 18080), SHANXI)
     assert r.force_block is False
     assert r.score == 0
 
 
-def test_whitelist_without_ports_exempt_only(tmp_path):
-    """没限定端口的白名单规则只豁免、不拦截（一次误配不能把整机访问全掐了）"""
-    eng = _engine(tmp_path, [{**WL_HENAN, "target_ports": []}])
+def test_allow_without_ports_exempt_only(tmp_path):
+    """没限定端口的放行规则只豁免、不拦截（一次误配不能把整机访问全掐了）"""
+    eng = _engine(tmp_path, [{**ALLOW_PORT_HENAN, "target_ports": []}])
     r = eng.evaluate(_rec("3.3.3.3", 62213), SHANXI)
     assert r.whitelisted is False
     assert r.force_block is False
     assert r.score == 0
 
 
-def test_whitelist_disabled_rule_no_enforcement(tmp_path):
-    eng = _engine(tmp_path, [{**WL_HENAN, "enabled": False}])
+def test_allow_disabled_rule_no_enforcement(tmp_path):
+    eng = _engine(tmp_path, [{**ALLOW_PORT_HENAN, "enabled": False}])
     r = eng.evaluate(_rec("3.3.3.3", 62213), SHANXI)
     assert r.force_block is False
     assert r.score == 0
 
 
-def test_allow_hit_beats_whitelist_miss(tmp_path):
-    """同端口上既有 allow 又有 whitelist：命中 allow 条件的来源照常豁免"""
+def test_allow_hit_beats_allow_miss(tmp_path):
+    """同端口上两条放行规则：命中任一条条件的来源都豁免，其余拦"""
     eng = _engine(
         tmp_path,
         [
-            WL_HENAN,
+            ALLOW_PORT_HENAN,
             {
                 "id": "r-op",
                 "name": "运维出口放行",
@@ -301,26 +304,35 @@ def test_allow_hit_beats_whitelist_miss(tmp_path):
     )
     # 山西来源不在任何放行条件里 → 拦
     assert eng.evaluate(_rec("3.3.3.3", 62213), SHANXI).force_block is True
-    # 运维 IP 在 allow 条件里（归属地不必是河南）→ 豁免
+    # 运维 IP 在放行条件里（归属地不必是河南）→ 豁免
     r = eng.evaluate(_rec("198.51.100.7", 62213), RUSSIA)
     assert r.whitelisted is True
     assert r.force_block is False
 
 
-def test_whitelist_miss_beats_normal_scoring(tmp_path):
-    """未命中白名单时不再叠加常规评分 —— 结论只有一个：拦"""
-    eng = _engine(tmp_path, [WL_HENAN])
+def test_allow_miss_beats_normal_scoring(tmp_path):
+    """未命中放行时不再叠加常规评分 —— 结论只有一个：拦"""
+    eng = _engine(tmp_path, [ALLOW_PORT_HENAN])
     r = eng.evaluate(_rec("4.4.4.4", 62213), RUSSIA)
     assert r.score == 100
-    assert r.matched_rules == [region_rule_key("whitelist", "r-wl")]
+    assert r.matched_rules == [region_rule_key("allow", "r-wl")]
 
 
-def test_whitelist_hit_still_exempt_with_risky_ua(tmp_path):
-    """命中白名单的来源就算带着扫描器 UA 也豁免（放行优先于一切评分）"""
-    eng = _engine(tmp_path, [WL_HENAN])
+def test_allow_hit_still_exempt_with_risky_ua(tmp_path):
+    """命中放行的来源就算带着扫描器 UA 也豁免（放行优先于一切评分）"""
+    eng = _engine(tmp_path, [ALLOW_PORT_HENAN])
     r = eng.evaluate(_scanner_rec("2.2.2.2", 62213), HENAN)
     assert r.whitelisted is True
     assert r.score == 0
+
+
+def test_legacy_whitelist_action_still_works(tmp_path):
+    """老 rules.json 里 action=whitelist 应被当作放行处理（向后兼容）"""
+    eng = _engine(tmp_path, [{**ALLOW_PORT_HENAN, "action": "whitelist"}])
+    assert eng.evaluate(_rec("2.2.2.2", 62213), HENAN).whitelisted is True
+    r = eng.evaluate(_rec("3.3.3.3", 62213), SHANXI)
+    assert r.force_block is True
+    assert r.matched_rules == [region_rule_key("allow", "r-wl")]
 
 
 # --------------------------------------------------------------------------- #

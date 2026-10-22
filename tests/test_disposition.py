@@ -233,7 +233,8 @@ def test_force_block_bans_even_without_auto_mode(engine, sink, no_ban, monkeypat
         return True
 
     monkeypatch.setattr(pipeline, "auto_ban_record", fake_auto_ban)
-    # 给引擎挂一条「仅限河南访问 62213」的白名单规则；来源归属地未知 → 未命中
+    # 给引擎挂一条「仅限河南访问 62213」的放行规则（action=whitelist 旧名，向后兼容）；
+    # 来源归属地未知 → 未命中 → 应触发 force_block
     engine._cfg["region_rules"] = [
         {
             "id": "r-wl",

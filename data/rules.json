@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "description": "PortGuard 风险规则配置。enabled=是否启用，score=命中加分，level=风险等级，action=suggest_ban|alert。geo_sensitive_port.geo_scope 是管理端口规则的归属地范围：china(仅限境内) | overseas(仅限境外) | both(境内+境外)。region_rules 是「区域访问」规则，每条自选动作：allow(放行：命中区域豁免，其他区域不受影响) | whitelist(白名单放行：仅限所选区域通行，其他区域访问所选端口直接拦截) | watch(仅关注) | downgrade(降级) | suggest_ban(判定风险：仅针对所选区域拦截，其他区域不受影响)。target_ports 留空表示对所有端口生效（whitelist 除外：必须填端口）。",
+  "description": "PortGuard 风险规则配置。enabled=是否启用，score=命中加分，level=风险等级，action=suggest_ban|alert。geo_sensitive_port.geo_scope 是管理端口规则的归属地范围：china(仅限境内) | overseas(仅限境外) | both(境内+境外)。region_rules 是「区域访问」规则，每条自选动作：allow(放行：仅限所选区域通行，其他区域访问所选端口直接拦截；不填端口则只豁免不拦截) | watch(仅关注) | downgrade(降级) | suggest_ban(判定风险：仅针对所选区域拦截，其他区域不受影响)。target_ports 留空表示对所有端口生效（allow 除外：必须填端口才会拦截其他来源）。",
   "rules": {
     "blacklist": {
       "enabled": true,
@@ -119,7 +119,7 @@
       "id": "r-demo-whitelist",
       "name": "仅限河南来源访问 62213",
       "enabled": false,
-      "action": "whitelist",
+      "action": "allow",
       "target_ports": [62213],
       "score": 100,
       "factor": 0.3,
@@ -132,7 +132,7 @@
         "ip_keywords": [],
         "only_china": false
       },
-      "note": "示例：端口白名单 —— 62213 只放行河南省来源，其余来源（含归属地未知）访问该端口时直接写入防火墙拦截。默认关闭，启用前请确认规则条件圈得准。"
+      "note": "示例：端口放行（仅限本区域通行）—— 62213 只放行河南省来源，其余来源（含归属地未知）访问该端口时直接写入防火墙拦截。默认关闭，启用前请确认规则条件圈得准。"
     }
   ]
 }

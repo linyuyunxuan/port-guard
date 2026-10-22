@@ -102,23 +102,23 @@ def rule_label(rule_id: str) -> str:
 #  区域访问白名单规则（用户可手工增删）
 # ═══════════════════════════════════════════════════════════
 
-# 每条规则自己挑动作 —— 这是用户明确要求的能力：
-#   「河南区、山西区的 IP 可访问某端口」就是一条 action=allow 的区域规则
+# 每条规则自己挑动作。2026-10-22 用户确认：
+#   「放行」= 仅限所选区域通行，其他区域访问所选端口直接封禁（原 whitelist 语义合并进 allow）；
+#   「判定风险」= 仅针对所选区域拦截，其他区域不受本规则影响。
 REGION_ACTIONS = [
-    ("allow", "放行（命中区域豁免，其他区域不受本规则影响）"),
-    (
-        "whitelist",
-        "白名单放行（仅限所选区域通行，其他区域访问所选端口直接拦截）",
-    ),
-    ("watch", "仅关注（不影响评分，只打标签留痕）"),
-    ("downgrade", "降级（把已累计的风险分打到很低，仍留记录）"),
+    ("allow", "放行（仅限所选区域通行，其他区域访问所选端口直接拦截）"),
     (
         "suggest_ban",
         "判定风险（仅针对所选区域拦截：命中加分可生成封禁建议，其他区域不受本规则影响）",
     ),
+    ("watch", "仅关注（不影响评分，只打标签留痕）"),
+    ("downgrade", "降级（把已累计的风险分打到很低，仍留记录）"),
 ]
+# 下拉框只展示以上四个动作。whitelist 是「放行」的旧名（已合并进 allow），
+# 仍可能在老 rules.json / 老事件里出现，必须保留为合法动作且翻译成放行，避免翻车。
 REGION_ACTION_LABEL = {k: v.split("（", 1)[0] for k, v in REGION_ACTIONS}
-REGION_ACTION_KEYS = [k for k, _ in REGION_ACTIONS]
+REGION_ACTION_LABEL["whitelist"] = "放行"
+REGION_ACTION_KEYS = ["allow", "suggest_ban", "watch", "downgrade", "whitelist"]
 
 REGION_PREFIX = "region_"
 
