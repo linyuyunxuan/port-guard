@@ -43,6 +43,7 @@ from gui.theme import C, small_button_style
 from gui.widgets import (
     CheckMarkDelegate,
     EmptyState,
+    RefreshGuard,
     RiskBadgeDelegate,
     SortHeader,
     WarnBanner,
@@ -63,10 +64,12 @@ from qtcompat import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     Qt,
     QTableWidget,
+    QTimer,
     QVBoxLayout,
     QWidget,
     Signal,
@@ -95,8 +98,13 @@ SUG_HEADERS = ["", "时间", "等级", "IP", "归属地", "端口", "评分", "�
 # IPv6 完整地址（147px）放不下，走 tooltip —— 但 IPv4 必须完整。
 # 到期 / 创建列 136：模型输出的是 `YYYY-MM-DD HH:MM`（112px），不能省年份，
 # 封禁最长 365 天会跨年。
-# 原因列是唯一的拉伸列。
-BAN_WIDTHS = [37, 55, 150, 207, 58, 53, 74, 76, 147, 147, 101]
+# 原因列是唯一的拉伸列：旧配置固定列合计 898，1360 下它只拿到 199，
+# 而「[自动] 命中规则：判定风险：1024」要 234 —— 每条记录的原因都被截成省略号。
+# 现在把 ID / IP / 评分 / 状态 / 时长 / 两个时间列各收到实测需求（共省 69），
+# 原因列拿到 268，常见原因全放得下。
+# 来源列 58：「自动 / 手动 / 黑名单」三个两字词，50 时「自动」被截成「自…」
+# （QFontMetrics 量出来够，实际渲染还差了省略号的位置）。
+BAN_WIDTHS = [37, 51, 140, 207, 58, 48, 66, 66, 131, 131, 101]
 SUG_WIDTHS = [37, 138, 69, 150, 122, 64, 53, 184, 129]
 COL_SUG_CHECK = 0
 COL_SUG_LEVEL = 2
@@ -273,8 +281,65 @@ class BansPage(QWidget):
         self.split.addWidget(self._build_records_area())
         self.split.setStretchFactor(0, 0)
         self.split.setStretchFactor(1, 1)
-        self.split.setSizes([268, 386])
+        # 初始 264 = 面板开销 94（卡头 46 + 表头 44 + 边 4）+ 5 行 × 34；
+        # 拖完再吸附到整数行（见 _snap_sug_rows），否则 268 这种高度会让表格
+        # 底部露出 4px 的下一行 —— 看起来像半行被切掉。
+        self.split.setSizes([264, 390])
+        self.split.splitterMoved.connect(lambda *_: self._snap_sug_rows())
         root.addWidget(self.split, 1)
+
+    # ══════════ 建议区高度：吸附到整数行 ══════════
+
+    def _sug_chrome(self) -> int:
+        """建议面板里除表格可视区以外的固定开销（卡头 + 表头 + 边框）。
+
+        不用写死 94：卡头高度随字体走，两栈（雅黑 9pt / PySide2 度量偏大）
+        差两三个像素就够让吸附算错。布局没完成时返回 0，调用方据此跳过。
+        """
+        lay = self.sug_panel.layout()
+        item = lay.itemAt(0) if lay is not None else None
+        head = item.geometry().height() if item is not None else 0
+        return head + self.sug_table.horizontalHeader().height() + 4
+
+    def _snap_sug_rows(self) -> None:
+        """把建议面板高度对齐到「开销 + 整数行」。
+
+        拖分隔条时用户只想要「多看几行」，结果露半行反而显得界面没对齐。
+        只在可视化状态下做（空态折叠时表格是隐藏的，行高无意义）。
+        """
+        if not self.sug_table.isVisible():
+            return
+        row = self.sug_table.verticalHeader().defaultSectionSize()
+        chrome = self._sug_chrome()
+        if row <= 0 or chrome <= row:
+            return
+        rows = max(1, round((self.sug_panel.height() - chrome) / row))
+        target = chrome + rows * row
+        sizes = self.split.sizes()
+        delta = target - self.sug_panel.height()
+        if delta == 0 or sizes[1] - delta < 120:
+            return
+        self.split.setSizes([target, sizes[1] - delta])
+
+    def _fit_sug_hint(self) -> None:
+        """卡头宽度够就显示说明，不够就收起来。
+
+        卡头一行要装「标题 + 说明 + 已选 + 4 个按钮」，sizeHint 实测 655px。
+        说明是补充信息（页头已经有一句同样的解释），按钮是操作入口 ——
+        挤的时候先牺牲说明。阈值按**页面**宽算（= 窗口宽 - 侧栏，1360 窗口下
+        约 1166），留 240px 余量给按钮在不同字体下的膨胀。
+        """
+        self.sug_hint.setVisible(self.width() >= 900)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # 首次显示时卡头还没几何，等这一轮布局跑完再吸附
+        self._fit_sug_hint()
+        QTimer.singleShot(0, self._snap_sug_rows)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_sug_hint()
 
     def _refresh_perm_banner(self) -> None:
         """
@@ -422,6 +487,11 @@ class BansPage(QWidget):
         self.sug_title.setObjectName("panel_title")
         self.sug_hint = QLabel("规则引擎建议，需人工确认")
         self.sug_hint.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
+        # 卡头一行要装「标题 + 本条说明 + 已选 + 4 个按钮」。说明是可有可无的
+        # （页头已经有一句同样的解释），所以让它做唯一可压缩项：Ignored 策略下
+        # 先压它，不会把按钮挤到换行；真的放不下时由 resizeEvent 直接收起来。
+        self.sug_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.sug_hint.setToolTip("规则引擎建议，需人工确认")
         head.addWidget(self.sug_title)
         head.addWidget(self.sug_hint)
         head.addStretch(1)
@@ -550,6 +620,8 @@ class BansPage(QWidget):
 
         self.lbl_info = QLabel("")
         self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
+        # 刷新提示与「更新于」时间戳复用这行小字（见 widgets.RefreshGuard）
+        self._refresh = RefreshGuard(self.lbl_info)
 
         bar.addWidget(self.search)
         bar.addWidget(self.status_filter)
@@ -615,10 +687,16 @@ class BansPage(QWidget):
         return m.get(self.status_filter.currentText(), "")
 
     def refresh(self) -> None:
-        self._refresh_perm_banner()
-        self._refresh_fw_banner()
-        self._load_suggestions()
-        self._load_bans()
+        # 重入会叠两次查询 + 两次重排；守卫同时负责「正在刷新…」这行提示。
+        # 注意横幅刷新放在守卫**之前**：它是纯本地判断（权限 / netsh 缓存），
+        # 不走数据库，不需要为它等一次事件循环。
+        if self._refresh.busy:
+            return
+        with self._refresh:
+            self._refresh_perm_banner()
+            self._refresh_fw_banner()
+            self._load_suggestions()
+            self._load_bans()
 
     def _load_suggestions(self) -> None:
         rows = [
@@ -660,9 +738,10 @@ class BansPage(QWidget):
             self.sug_panel.setMinimumHeight(80)
             self.sug_panel.setMaximumHeight(80)
         else:
-            # 208 / 328 = 面板开销 88 + 4 行 / 8 行，正好不露半行
-            self.sug_panel.setMinimumHeight(208)
-            self.sug_panel.setMaximumHeight(328)
+            # 196 / 366 = 面板开销 94 + 3 行 / 8 行（34px 一行）。
+            # 这两个数只是上下夹逼，精确吸附在 _snap_sug_rows 里按实际开销算。
+            self.sug_panel.setMinimumHeight(196)
+            self.sug_panel.setMaximumHeight(366)
 
         self.sug_sel.begin_render()
         try:

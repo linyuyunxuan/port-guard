@@ -28,7 +28,7 @@ from core.rules_meta import RULE_DESCS, RULE_LABELS, RULE_PARAMS
 from gui.components import PageHeader
 from gui.region_rules import RegionRulesTab
 from gui.theme import C
-from gui.widgets import ToggleSwitch
+from gui.widgets import CONTENT_MAX_W, ToggleSwitch
 from qtcompat import (
     QComboBox,
     QDoubleSpinBox,
@@ -42,6 +42,7 @@ from qtcompat import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    Qt,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -66,6 +67,9 @@ class RuleCard(QFrame):
         self.cfg = dict(cfg)
         self._fields: Dict[str, Tuple[QWidget, str]] = {}
         self.setObjectName("panel")
+        # 卡片限宽到内容列（见 gui/widgets.CONTENT_MAX_W）：规则卡最宽的一条
+        # （geo_sensitive_port）实测只需 810，铺满 1160 会在右侧空出 350px
+        self.setMaximumWidth(CONTENT_MAX_W)
         self._build()
 
     def _build(self) -> None:
@@ -293,6 +297,8 @@ class RulesPage(QWidget):
         self.rules_lay = QVBoxLayout(self.rules_host)
         self.rules_lay.setContentsMargins(0, 4, 8, 8)
         self.rules_lay.setSpacing(10)
+        # 规则卡限宽后会贴左，加这条对齐让它们落在页面中线（1045 以下宽度时看不出差别）
+        self.rules_lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.rules_lay.addStretch(1)
         self.rules_area.setWidget(self.rules_host)
         self.tabs.addTab(self.rules_area, "风险规则")

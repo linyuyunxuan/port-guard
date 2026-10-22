@@ -50,6 +50,7 @@ from gui.components import (
 from gui.theme import C
 from gui.widgets import (
     EmptyState,
+    RefreshGuard,
     RiskBadgeDelegate,
     align_headers,
     badge_item,
@@ -409,6 +410,8 @@ class AccessPage(QWidget):
 
         self.lbl_page = QLabel("共 0 条，第 1/1 页")
         self.lbl_page.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
+        # 「正在刷新…」与「更新于」复用分页信息这行（见 widgets.RefreshGuard）
+        self._refresh = RefreshGuard(self.lbl_page)
 
         bar.addWidget(self.btn_prev)
         bar.addWidget(self.btn_next)
@@ -502,6 +505,13 @@ class AccessPage(QWidget):
 
     # ── 数据 ──
     def refresh(self) -> None:
+        # 翻页也走这里：连点「下一页」会叠查询，守卫一并挡住
+        if self._refresh.busy:
+            return
+        with self._refresh:
+            self._load()
+
+    def _load(self) -> None:
         since, until = self._range_ms()
         size = self._page_size()
         try:
@@ -519,6 +529,7 @@ class AccessPage(QWidget):
             self._update_pager()
             self.empty.set_state("读取失败", str(e))
             self.empty.setVisible(True)
+            self.lbl_page.setText("读取失败")
             return
 
         pages = max(1, (total + size - 1) // size)

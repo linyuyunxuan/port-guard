@@ -12,6 +12,7 @@ from gui.widgets import EmptyState, SortHeader
 from qtcompat import (
     QAbstractItemView,
     QColor,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -86,16 +87,18 @@ class IpLookupPage(QWidget):
         root.setSpacing(12)
 
         head = PageHeader("IP 查询工具", "离线 ip2region 库（IPv4 + IPv6），10 微秒级查询")
-        self.lbl_lib = QLabel("")
-        self.lbl_lib.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
-        self.lbl_lib.setToolTip("离线库版本与缓存命中情况")
-        head.add_action(self.lbl_lib)
-
         b_sync = QPushButton("同步离线库")
         b_sync.setObjectName("btn_outline")
         b_sync.clicked.connect(lambda: self.xdb_sync_requested.emit(False))
         head.add_action(b_sync)
         root.addWidget(head)
+
+        # 库信息单独一行：原先塞在 PageHeader 的 action 区里，和标题、按钮抢同一条
+        # 横向空间，1360 下就被压成「… · 缓存 0/20000 · 命中 0 次…」的半截话。
+        self.lbl_lib = QLabel("")
+        self.lbl_lib.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
+        self.lbl_lib.setToolTip("离线库版本与缓存命中情况")
+        root.addWidget(self.lbl_lib)
 
         # 单条查询
         grp1 = QGroupBox("单条查询")
@@ -113,14 +116,7 @@ class IpLookupPage(QWidget):
         row1.addWidget(self.single, 1)
         row1.addWidget(b1)
         l1.addLayout(row1)
-
-        # 结果独立一行：长 IPv6 结果不会和输入框抢宽度
-        self.single_result = QLabel("—")
-        self.single_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.single_result.setStyleSheet(
-            f"color:{C.text_secondary};font-size:13.5px;padding:2px 0;"
-        )
-        l1.addWidget(self.single_result)
+        l1.addWidget(self._build_single_fields())
         root.addWidget(grp1)
 
         # 批量查询
@@ -190,6 +186,56 @@ class IpLookupPage(QWidget):
         root.addWidget(grp2, 1)
 
         self._update_lib_info()
+        # 初始就是「没查过」，表格要收起：否则表头 + 空态同时出现，
+        # 页面下半截白白留着一块只有表头的空表格
+        self._toggle_empty()
+
+    #: 单条查询结果的字段：(key, 标签)。四格等宽，不区分长值短值
+    SINGLE_FIELDS = (
+        ("region", "归属地"),
+        ("iso", "国家码"),
+        ("isp", "ISP"),
+        ("scope", "范围"),
+    )
+
+    def _build_single_fields(self) -> QWidget:
+        """单条查询结果：固定四格「标签 → 值」。
+
+        旧版把结果拼成一句「归属地：…　·　国家码 …　·　ISP …　·　境内」挤在一行，
+        字段边界全靠全角空格，长 IPv6 归属地一超宽就整句换行，读的时候要拿手指
+        去对位置。拆成固定四格后位置稳定，值也能单独选中复制。
+        """
+        box = QWidget()
+        grid = QGridLayout(box)
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(28)
+        grid.setVerticalSpacing(2)
+        self._single_vals: dict = {}
+        for col, (key, label) in enumerate(self.SINGLE_FIELDS):
+            lb = QLabel(label)
+            lb.setStyleSheet(f"color:{C.text_muted};font-size:12px;")
+            val = QLabel("—")
+            val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            val.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
+            grid.addWidget(lb, 0, col)
+            grid.addWidget(val, 1, col)
+            # 归属地占两份宽，其余各一份：四格等宽时「United States·California·
+            # Google LLC」这种长名会顶满整格并压到相邻字段；反过来只让归属地
+            # 拉伸、其它按 sizeHint 走，短值又会被推到最右，中间空出一条 400px 的缝
+            grid.setColumnStretch(col, 2 if key == "region" else 1)
+            self._single_vals[key] = val
+        # selftest 与本页「跳转查询」都读 single_result，指向主值（归属地）
+        self.single_result = self._single_vals["region"]
+        return box
+
+    def _set_single(self, key: str, text: str, color: str) -> None:
+        val = self._single_vals[key]
+        val.setText(text)
+        val.setStyleSheet(f"color:{color};font-size:13.5px;")
+
+    def _clear_single(self) -> None:
+        for key in self._single_vals:
+            self._set_single(key, "—", C.text_secondary)
 
     def _update_lib_info(self) -> None:
         try:
@@ -229,23 +275,23 @@ class IpLookupPage(QWidget):
         try:
             geo = get_locator().lookup(ip)
         except Exception as e:
-            self.single_result.setText(f"查询失败：{e}")
-            self.single_result.setStyleSheet(f"color:{C.danger};font-size:13.5px;padding:2px 0;")
+            self._clear_single()
+            self._set_single("region", f"查询失败：{e}", C.danger)
             return
         if geo.found:
-            scope = "境内" if geo.is_china else "境外"
-            self.single_result.setText(
-                f"归属地：{geo.display}　·　国家码 {geo.iso or '-'}　·　"
-                f"ISP {geo.isp if geo.isp and geo.isp != '0' else '-'}　·　{scope}"
+            self._set_single("region", geo.display, C.text_primary)
+            self._set_single("iso", geo.iso or "—", C.text_secondary)
+            self._set_single(
+                "isp", geo.isp if geo.isp and geo.isp != "0" else "—", C.text_secondary
             )
-            self.single_result.setStyleSheet(
-                f"color:{C.text_secondary};font-size:13.5px;padding:2px 0;"
+            self._set_single(
+                "scope",
+                "境内" if geo.is_china else "境外",
+                C.primary if geo.is_china else C.warning,
             )
         else:
-            self.single_result.setText("未命中任何数据段（可能是内网 / 保留 / 未收录地址）")
-            self.single_result.setStyleSheet(
-                f"color:{C.text_muted};font-size:13.5px;padding:2px 0;"
-            )
+            self._clear_single()
+            self._set_single("region", "未命中数据段（内网 / 保留 / 未收录）", C.text_muted)
 
     def _query_batch(self) -> None:
         lines = [x.strip() for x in self.batch_input.toPlainText().splitlines()]

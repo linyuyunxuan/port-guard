@@ -58,6 +58,7 @@ from gui.theme import C, small_button_style
 from gui.widgets import (
     CheckMarkDelegate,
     EmptyState,
+    RefreshGuard,
     RiskBadgeDelegate,
     SortHeader,
     align_headers,
@@ -126,7 +127,7 @@ COL_RULE = 8
 COL_DISPOSITION = 9
 COL_ACTION = 10
 
-COL_WIDTHS = [37, 170, 62, 142, 124, 58, 125, 52, 162, 80, 96]
+COL_WIDTHS = [37, 138, 62, 142, 124, 58, 125, 52, 178, 80, 106]
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 勾选列（点了是全选）与操作列（无值）不给规则 —— 点这两列表头不排序。
@@ -446,6 +447,8 @@ class EventsPage(QWidget):
 
         self.lbl_info = QLabel("")
         self.lbl_info.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
+        # 刷新中的提示 + 「更新于」时间戳都落在这行小字上（见 widgets.RefreshGuard）
+        self._refresh = RefreshGuard(self.lbl_info)
 
         for combo in (self.search, self.level, self.handled, self.range):
             bar.addWidget(combo)
@@ -455,7 +458,6 @@ class EventsPage(QWidget):
         bar.addWidget(self.limit)
         bar.addWidget(self.merge)
         bar.addStretch(1)
-        bar.addWidget(self.lbl_info)
         return bar
 
     def _build_batch_bar(self) -> QWidget:
@@ -502,6 +504,9 @@ class EventsPage(QWidget):
         lay.addWidget(self.btn_del)
         lay.addWidget(self.btn_export)
         lay.addStretch(1)
+        # 计数与「更新于」放批量行右端：这行左侧只有按钮，右半本来就空着；
+        # 放筛选行会被 5 个控件挤出去（实测超出卡片右边缘被裁掉）
+        lay.addWidget(self.lbl_info)
 
         self._batch_buttons = [self.btn_ban, self.btn_ok, self.btn_ignore, self.btn_del]
         for b in self._batch_buttons:
@@ -619,6 +624,13 @@ class EventsPage(QWidget):
         )
 
     def refresh(self) -> None:
+        # 重入会叠两次查询 + 两次重排；守卫同时也负责「正在刷新…」这行提示
+        if self._refresh.busy:
+            return
+        with self._refresh:
+            self._load()
+
+    def _load(self) -> None:
         since, until = self._range_ms()
         rows = query_risk_events(
             limit=self._limit_value(),

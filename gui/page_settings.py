@@ -42,7 +42,7 @@ from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.components import PageHeader
 from gui.theme import C
-from gui.widgets import ToggleSwitch, WarnBanner, align_headers, make_item
+from gui.widgets import CONTENT_MAX_W, ToggleSwitch, WarnBanner, align_headers, make_item
 from qtcompat import (
     QAbstractItemView,
     QApplication,
@@ -146,6 +146,9 @@ class _Panel(QFrame):
     def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
         self.setObjectName("panel")
+        # 内容列限宽（见 gui/widgets.CONTENT_MAX_W）：卡片不再横跨整个页面，
+        # 与 _scroll_page 里的水平居中配合，表单落在一条 900px 的阅读线上
+        self.setMaximumWidth(CONTENT_MAX_W)
         box = QVBoxLayout(self)
         box.setContentsMargins(16, 12, 16, 14)
         box.setSpacing(8)
@@ -1036,7 +1039,12 @@ class SettingsPage(QWidget):
     # ── 小工具 ──
     @staticmethod
     def _scroll_page() -> Tuple[QScrollArea, QVBoxLayout]:
-        """tab 内容容器。窗口变矮时出现滚动条，而不是把控件压扁"""
+        """tab 内容容器。窗口变矮时出现滚动条，而不是把控件压扁。
+
+        条目水平居中：面板自身限宽到 CONTENT_MAX_W（见 _Panel），
+        不加这条对齐的话受限宽的卡片会全部贴左，右侧空出一大片。
+        表格 / 横幅这类没限宽的控件仍是满宽，不受影响。
+        """
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
@@ -1048,6 +1056,7 @@ class SettingsPage(QWidget):
         lay = QVBoxLayout(host)
         lay.setContentsMargins(0, 8, 8, 8)
         lay.setSpacing(12)
+        lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         area.setWidget(host)
         return area, lay
 

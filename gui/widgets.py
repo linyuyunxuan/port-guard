@@ -6,6 +6,7 @@
 - 自绘控件用 QPainter，不依赖 QSS 做不到的阴影/过渡。
 """
 
+import time
 from typing import Callable, ClassVar, Optional, Union
 
 from gui.table_sort import SortSpec, TableSort
@@ -251,6 +252,16 @@ def _rgba(hex_color: str, alpha: float) -> str:
 #  表格内风险徽章（QSS 画不了单元格圆角底，用 delegate 自绘）
 # ═══════════════════════════════════════════════════════════
 
+#: 表单类页面（规则配置 / 设置）的内容列宽。
+#:
+#: 1360 窗口下页面可用宽约 1160，而这两页每行只有「128px 标签 + 一个字段」，
+#: 卡片铺满会把右侧空出近一半（实测规则页卡片 1101 宽，内容只用到 810）。
+#: 企业软件的通行做法是**收窄内容列居中**，而不是把输入框拉到 800px ——
+#: 那种超宽输入框既难扫读，也让「一行一个字段」的节奏断掉。
+#: 900 的依据：规则卡最小需求 810（geo_sensitive_port 带 4 个参数）、
+#: 设置面板最小需求 846（离线库在线同步），各留 50~90 余量。
+CONTENT_MAX_W = 900
+
 BADGE_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
@@ -471,9 +482,14 @@ class EmptyState(QWidget):
         self.desc = QLabel(desc)
         self.desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.desc.setWordWrap(True)
+        # 自动换行的 QLabel 在 QVBoxLayout 里只会拿到「最小宽度」，一行说明会被
+        # 折成「输入 IP 后点查询，结 / 果会显示在这里」这种断在词中间的碎句。
+        # 给个下限让它先按整句排，超过 460 再换行（空态整块是居中的）。
+        self.desc.setMinimumWidth(320)
+        self.desc.setMaximumWidth(460)
         self.desc.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;background:transparent;")
         self.desc.setVisible(bool(desc))
-        lay.addWidget(self.desc)
+        lay.addWidget(self.desc, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.btn = None
         if action_text:
@@ -678,3 +694,46 @@ class SortHeader:
         order = Qt.SortOrder.DescendingOrder if state.descending else Qt.SortOrder.AscendingOrder
         header.setSortIndicator(state.column, order)
         header.setSortIndicatorShown(True)
+
+
+class RefreshGuard:
+    """列表页刷新的「进行中」提示 + 防重入 + 更新时间戳。
+
+    为什么不做遮罩：本机 SQLite 查询通常 10~50ms，灰蒙一层只会闪一下，看起来
+    比不提示更像卡顿。用户真正缺的是「我点的那下有没有生效」—— 所以刷新期间
+    把计数行换成「正在刷新…」，结束后在结果文案后面补一句「更新于 12:04:31」。
+
+    `processEvents()` 是必需的：不跑一遍事件循环，那行字根本画不出来（查询在同
+    一个槽里同步执行）。代价是期间仍会收到点击，所以用 `busy` 挡住重入 ——
+    叠两次查询不只是浪费，列表还会被两次重排。
+
+    用法：进 refresh 先问 busy，再用 with 包住整个查询与渲染，
+    期间往同一个标签里写结果文案，退出时自动补时间戳。
+
+        if self._refresh.busy:
+            return
+        with self._refresh:
+            rows = query(...)
+            self.lbl_info.setText(f"共 {len(rows)} 条")
+    """
+
+    def __init__(self, label: QLabel, busy_text: str = "正在刷新…"):
+        self._label = label
+        self._busy_text = busy_text
+        self.busy = False
+
+    def __enter__(self) -> "RefreshGuard":
+        self.busy = True
+        self._label.setText(self._busy_text)
+        QApplication.processEvents()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        # 返回 None（而不是 False）—— 语义上「不处理异常」，mypy 也不会误以为
+        # 这里可能吞掉异常
+        self.busy = False
+        text = self._label.text()
+        if text == self._busy_text:
+            text = ""
+        stamp = time.strftime("%H:%M:%S")
+        self._label.setText(f"{text} · 更新于 {stamp}" if text else f"更新于 {stamp}")
