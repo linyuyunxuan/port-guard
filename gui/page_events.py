@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app import audit
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
-from core.config import LEVEL_LABEL, LEVEL_ORDER
+from core.config import LEVEL_ORDER
 from core.database import (
     delete_risk_events,
     risk_events_page,
@@ -48,6 +48,7 @@ from gui.components import (
     build_menu,
     export_table_csv,
 )
+from gui.event_detail import EventDetailDialog
 from gui.event_group import flatten_rows, merge_rows
 from gui.row_action import RowAction, RowActionDelegate
 from gui.table_select import CheckColumn
@@ -69,8 +70,6 @@ from qtcompat import (
     QComboBox,
     QDate,
     QDateEdit,
-    QDialog,
-    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -81,7 +80,6 @@ from qtcompat import (
     QPushButton,
     Qt,
     QTableWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
     Signal,
@@ -261,61 +259,6 @@ def _event_snapshot(rows: List[Dict]) -> List[Dict]:
         }
         for r in rows
     ]
-
-
-class EventDetailDialog(QDialog):
-    def __init__(self, row: Dict, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("风险事件详情")
-        self.setMinimumSize(560, 420)
-        lay = QVBoxLayout(self)
-        txt = QTextEdit()
-        txt.setReadOnly(True)
-        geo = row.get("geo")
-        # row 取出的值类型是 Any|None，先归一化成 str 再查表，避免把 None 当字典键
-        risk_level = str(row.get("risk_level") or "")
-        disp = disposition_of(row)
-        lines = [
-            f"事件 ID：#{row.get('id')}",
-            f"时间：{ms_to_str(row.get('event_ts'))}",
-            f"来源 IP：{row.get('ip')}",
-            f"归属地：{geo.display if geo else '未知'}",
-            f"目标端口：{row.get('local_port')}",
-            f"请求路径：{row.get('path') or '/'}",
-            f"风险评分：{row.get('risk_score')}",
-            f"风险等级：{LEVEL_LABEL.get(risk_level, risk_level)}",
-            f"命中规则：{'、'.join(rule_label(r) for r in row.get('matched_rules', [])) or '-'}",
-            # 处置放在「处理状态」之前：用户更关心「拦没拦」，再关心「人看过没有」
-            f"处置结果：{disposition_label(disp)}"
-            + (f"（{DISPOSITION_HINT[disp]}）" if DISPOSITION_HINT.get(disp) else ""),
-            f"处理状态：{HANDLED_LABEL.get(row.get('handled', 0), '-')}",
-            "",
-            "摘要：",
-            row.get("summary") or "-",
-        ]
-        if geo and geo.found:
-            lines += [
-                "",
-                "归属地明细：",
-                f"  国家：{geo.country}  省份：{geo.province}",
-                f"  城市：{geo.city}  ISP：{geo.isp}  国家码：{geo.iso}",
-            ]
-        # 同类合并的折叠行：列出组内每一次发生（成员已按时间倒序）
-        members = row.get("members") or []
-        if len(members) > 1:
-            lines += [
-                "",
-                f"同类事件：共 {len(members)} 次（每次连接的远端端口不同，故各记一条）",
-            ]
-            lines += [f"  · {ms_to_str(m.get('event_ts'))}  #{m.get('id')}" for m in members[:50]]
-            if len(members) > 50:
-                lines.append(f"  … 其余 {len(members) - 50} 次见导出的 CSV")
-        txt.setPlainText("\n".join(lines))
-        lay.addWidget(txt)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        btns.rejected.connect(self.reject)
-        btns.accepted.connect(self.accept)
-        lay.addWidget(btns)
 
 
 class EventsPage(QWidget):
@@ -780,7 +723,9 @@ class EventsPage(QWidget):
             self.table.setRowCount(len(rows))
             for i, r in enumerate(rows):
                 geo = r.get("geo")
-                level = r.get("risk_level", "normal")
+                # 合并行用组内「最高水位」渲染等级 / 评分 / 规则：一组里最危险到过
+                # 什么程度，比「最近一次恰好只是 low」有用得多。明细在详情里逐条看。
+                level = r.get("peak_level") or r.get("risk_level", "normal")
                 handled = r.get("handled", 0)
 
                 ts = r.get("event_ts")
@@ -789,7 +734,8 @@ class EventsPage(QWidget):
                     if ts
                     else "-"
                 )
-                matched = "、".join(rule_label(x) for x in r.get("matched_rules", [])) or "-"
+                rules = r.get("peak_rules") or r.get("matched_rules") or []
+                matched = "、".join(rule_label(x) for x in rules) or "-"
 
                 n = int(r.get("group_count") or 1)
                 if n > 1:
@@ -831,7 +777,7 @@ class EventsPage(QWidget):
                     i,
                     COL_SCORE,
                     make_item(
-                        r.get("risk_score", 0),
+                        r.get("peak_score", r.get("risk_score", 0)),
                         align=Qt.AlignmentFlag.AlignCenter,
                         bold=True,
                         mono=True,

@@ -509,8 +509,11 @@ def test_monitor_shows_disposition_text():
     from gui.page_monitor import COL_DISPOSITION, AccessTableModel
 
     _qapp()
+    # _cell_text / _tooltip 是实例方法（要读这一行合并了几条），必须走真实模型
+    model = AccessTableModel(capacity=5000)
     rec = AccessRecord(ip=IP, local_port=3000, disposition=DISPOSITION_ALLOW)
-    assert AccessTableModel._cell_text(rec, COL_DISPOSITION) == "已放行"
+    model.append_many([rec])
+    assert model._cell_text(rec, COL_DISPOSITION) == "已放行"
     # 没判定过的记录不能硬编「已放行」
-    assert AccessTableModel._cell_text(AccessRecord(ip=IP), COL_DISPOSITION) == "-"
-    assert "处置结果：已放行" in AccessTableModel._tooltip(rec)
+    assert model._cell_text(AccessRecord(ip=IP), COL_DISPOSITION) == "-"
+    assert "处置结果：已放行" in model._tooltip(rec)

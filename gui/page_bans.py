@@ -31,6 +31,8 @@ from core.models import (
 from core.validators import InvalidIP, normalize_ip
 from gui.background import BusyGuard, run_in_background
 from gui.components import PageHeader, build_menu, export_table_csv, row_menu_button
+from gui.event_detail import EventDetailDialog
+from gui.event_group import flatten_rows, merge_rows
 from gui.row_action import RowAction, RowActionDelegate
 from gui.table_select import CheckColumn
 from gui.table_sort import (
@@ -774,6 +776,14 @@ class BansPage(QWidget):
             for r in query_risk_events(limit=200, handled=0)
             if r.get("risk_level") in (LEVEL_HIGH, LEVEL_CRITICAL)
         ]
+        # 同 IP + 同端口 = 一件事（2026-10-22 用户反馈：一个 IP 打同一端口占了 27 行）。
+        # 27 条建议对应的其实只有一条防火墙规则，逐条列出来除了淹没别的 IP 没有任何作用。
+        # 合并后时间列标 ×N，操作列仍是「封禁该 IP」，详情里逐条看。
+        try:
+            rows = merge_rows(rows)
+        except Exception:
+            # 合并只是展示优化，失败就退回逐条展示，不能让整页刷不出来
+            log.exception("封禁建议合并失败，退回逐条展示")
         # 建议表里可能混着「已经从别的页面封过、但事件还没回填」的 IP，
         # 按钮要据此显示「已封禁」而不是让人再点一次
         try:
@@ -797,7 +807,13 @@ class BansPage(QWidget):
 
     def _render_suggestions(self) -> None:
         rows = self._sug_rows
-        self.sug_title.setText(f"待确认的封禁建议（{len(rows)}）")
+        # 合并后「27 条」变成「1 项」：标题要把两个数都说出来，否则用户会以为
+        # 建议被吞了 26 条
+        total_events = sum(int(r.get("group_count") or 1) for r in rows)
+        if total_events != len(rows):
+            self.sug_title.setText(f"待确认的封禁建议（{len(rows)} 项 / {total_events} 条事件）")
+        else:
+            self.sug_title.setText(f"待确认的封禁建议（{len(rows)}）")
 
         empty = not rows
         self.sug_empty.setVisible(empty)
@@ -826,8 +842,14 @@ class BansPage(QWidget):
                     if ts
                     else "-"
                 )
+                n = int(r.get("group_count") or 1)
+                if n > 1:
+                    # 合并行：时间列标 ×N（显示最近一次），否则「怎么只有一条建议」
+                    # 与「监控页明明 27 次」对不上
+                    time_str = f"{time_str} ×{n}"
                 geo = r.get("geo")
-                level = r.get("risk_level", "normal")
+                # 等级 / 评分取组内最高水位：一组的危险程度由最严重的那次决定
+                level = r.get("peak_level") or r.get("risk_level", "normal")
                 reason = r.get("summary") or "命中风险规则"
                 ip_text = str(r.get("ip") or "")
 
@@ -852,7 +874,7 @@ class BansPage(QWidget):
                     i,
                     6,
                     make_item(
-                        r.get("risk_score", 0),
+                        r.get("peak_score", r.get("risk_score", 0)),
                         align=Qt.AlignmentFlag.AlignCenter,
                         bold=True,
                         mono=True,
@@ -878,7 +900,8 @@ class BansPage(QWidget):
         r = self._sug_rows[row]
         self.ask_ban.emit(
             str(r.get("ip") or ""),
-            int(r.get("risk_score") or 0),
+            # 按组内最高分算时长：这组里最严重的那次决定了该封多久
+            int(r.get("peak_score", r.get("risk_score")) or 0),
             r.get("summary") or "命中风险规则",
         )
 
@@ -887,17 +910,28 @@ class BansPage(QWidget):
             return
         r = self._sug_rows[row]
         ip = str(r.get("ip") or "")
+        n = int(r.get("group_count") or 1)
         build_menu(
             [
+                (f"查看详情（{n} 条事件）" if n > 1 else "查看详情", lambda: self._sug_detail(r)),
                 ("忽略该建议", lambda: self._ignore(r)),
                 ("查询该 IP 归属地", lambda: self.ask_lookup.emit(ip)),
             ],
             self,
         ).exec(global_pos)
 
+    def _sug_detail(self, r: Dict[str, Any]) -> None:
+        EventDetailDialog(r, self).exec()
+
     def _ignore(self, r) -> None:
+        # 合并行代表一组：忽略必须落到组内每一条事件，否则「忽略」完刷新一下
+        # 剩下的 26 条又以同一条建议冒出来（用户会以为忽略根本没生效）
+        ids = [int(m["id"]) for m in (r.get("members") or [r]) if m.get("id") is not None]
         try:
-            set_risk_handled(int(r["id"]), 2)
+            if len(ids) > 1:
+                set_risk_handled_batch(ids, 2)
+            elif ids:
+                set_risk_handled(ids[0], 2)
         except Exception:
             log.exception("忽略风险事件失败 id=%s", r.get("id"))
         self.refresh()
@@ -939,14 +973,15 @@ class BansPage(QWidget):
             ip = str(r.get("ip") or "")
             if not ip:
                 continue
+            score = int(r.get("peak_score", r.get("risk_score")) or 0)
             old = uniq.get(ip)
-            if old is None or int(r.get("risk_score") or 0) > int(old.get("risk_score") or 0):
+            if old is None or score > int(old.get("peak_score", old.get("risk_score")) or 0):
                 uniq[ip] = r
         # 事件状态由 `ban_service.execute` 按 IP 统一回填（见 page_events._batch_ban）
         items = [
             {
                 "ip": ip,
-                "score": int(r.get("risk_score") or 0),
+                "score": int(r.get("peak_score", r.get("risk_score")) or 0),
                 "reason": r.get("summary") or "命中风险规则",
             }
             for ip, r in uniq.items()
@@ -958,7 +993,11 @@ class BansPage(QWidget):
         rows = self._checked_suggestions()
         if not rows:
             return
-        ids = [int(r["id"]) for r in rows]
+        # 合并行代表一组：忽略必须摊平到组内每一条，否则刷新后剩下的
+        # 26 条又会以同一条建议冒出来
+        ids = [int(m["id"]) for m in flatten_rows(rows) if m.get("id") is not None]
+        if not ids:
+            return
         try:
             n = set_risk_handled_batch(ids, 2)
         except Exception as e:
@@ -1078,15 +1117,20 @@ class BansPage(QWidget):
 
         建议表的数据源是「未处理 + 高危」的前 200 条风险事件（见
         `_load_suggestions`），所以导出的是**当前这批建议**，不是全库事件。
+        列表里合并了同 IP 同端口，但 CSV 要逐条事实 —— 走 flatten 摊平。
         """
+        flat = flatten_rows(self._sug_rows)
         export_table_csv(
             self,
-            self._sug_rows,
+            flat,
             SUG_CSV_HEADERS,
             iter_sug_rows,
             default_name="ban_suggestions.csv",
             dialog_title="导出封禁建议",
-            scope_hint=f"导出范围：当前待确认建议，共 {len(self._sug_rows)} 条。",
+            scope_hint=(
+                f"导出范围：当前待确认建议，共 {len(self._sug_rows)} 项"
+                f"（{len(flat)} 条事件，按逐条导出）。"
+            ),
         )
 
     def _export_ban_csv(self) -> None:

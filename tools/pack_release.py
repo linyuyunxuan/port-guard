@@ -11,7 +11,7 @@
   · 同名 `.sha256` 文件内容是 `<小写哈希>  <文件名>`，与 `sha256sum -c` 兼容。
 
 用法：
-    python tools/pack_release.py                       # dist/PortGuard → dist/PortGuard-v1.2.0.zip
+    python tools/pack_release.py                       # dist/PortGuard → dist/PortGuard-v1.3.0.zip
     python tools/pack_release.py --src dist/PortGuard --version 1.2.1
 """
 

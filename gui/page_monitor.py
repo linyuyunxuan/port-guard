@@ -22,6 +22,7 @@ from core.models import (
     disposition_label,
 )
 from gui.components import PageHeader
+from gui.event_detail import AccessDetailDialog
 from gui.theme import C
 from gui.widgets import (
     BADGE_ROLE,
@@ -38,6 +39,7 @@ from qtcompat import (
     QAbstractTableModel,
     QAction,
     QBrush,
+    QCheckBox,
     QColor,
     QComboBox,
     QHBoxLayout,
@@ -75,10 +77,11 @@ HEADERS = [
 # 1360 窗口下表视口 1099，请求列拿到 209，够放 `POST /api/v1/orders/search`。
 # 每个数字都由 _design/measure_cols.py 按「文字宽 + 单元格内边距 20」实测，
 # 不是按设计稿估的（改完要重跑一次，别再手调）：
-#   时间 72（装 HH:MM:SS，需 68）· 风险 52（自绘徽章，需 ≤40）
+#   时间 96（装 `14:06:06×27`：合并行要带次数后缀，需 92 —— 旧值 72 只够 HH:MM:SS，
+#           实测会被截成 `14:06:06…`，次数直接看不见）
 #   来源 IP 138（装 IPv6 `2400:3200:baba::1`，需 138 —— 一点都不能省）
-#   归属地 132（装「河南省 洛阳市」需 108；境外「加利福尼亚州 弗里蒙特」需 164，
-#              超出的靠 tooltip 看全称，比把请求列压到读不出路径划算）
+#   归属地 112（装「河南省 焦作市」需 108；境外「加利福尼亚州 弗里蒙特」需 164，
+#              超出的靠 tooltip 看全称。从 132 压到 112 是给时间列腾字数后缀）
 #   端口 58（5 位数 18080 需 55）· 协议 52（HTTPS 需 45）· 状态 52（3 位数需 41）
 #   命中规则 152（「管理端口归属地检测」需 146）
 #   处置 70（装「仅提醒 / 已拦截 / 待确认」三个三字词；56 与 62 都会被截成
@@ -86,7 +89,7 @@ HEADERS = [
 #   服务器 112（`web-prod-01` 需 108 —— 旧版 92 一直在截断）
 # 请求列宽度是这里最贵的一格：旧配置固定列合计 1151 > 视口 1099，请求列被挤到
 # 121px，`POST /admin/login` 显示成 `POST /admi…`，右键菜单之外根本看不出访问了什么。
-COL_WIDTHS = [72, 52, 138, 132, 58, 52, 209, 52, 152, 70, 112]
+COL_WIDTHS = [96, 52, 138, 112, 58, 52, 209, 52, 152, 70, 112]
 COL_REQUEST = 6
 COL_DISPOSITION = 9
 
@@ -110,14 +113,33 @@ class AccessTableModel(QAbstractTableModel):
     两层结构：
       _all  —— 环形缓冲，存放全部记录（用于切换筛选时重建）
       _view —— 当前筛选后的视图，表格只显示它
-    这样切换筛选条件不会丢失原始数据。
+
+    合并显示（2026-10-22 用户要求）：同 IP + 同端口 + 同协议的多次连接只占一行，
+    时间列标 `×N`，双击该行看组内每一次的明细。所以 _view 存的是**每组的代表**
+    （最新一条），_members[i] 是第 i 行对应的组成员（未合并时长度恒为 1）。
+    合并键不含路径 / 命中规则 —— 扫描器打同一端口会换路径，那样等于没合并。
+
+    这些结构在合并关闭时依然维护（_members 每条一行），只是 _view 变成全量列表 ——
+    这样开关来回切不需要两套代码路径。
     """
 
     def __init__(self, capacity: int = 5000, parent=None):
         super().__init__(parent)
         self._all: deque = deque(maxlen=max(500, capacity))
         self._view: List[AccessRecord] = []
+        self._members: List[List[AccessRecord]] = []
+        self._row_of: dict = {}
+        self._merge = True
         self._filters = {"keyword": "", "scope": "全部", "port": None}
+
+    @staticmethod
+    def group_key(rec: AccessRecord) -> tuple:
+        """同类判据：来源 IP + 目标端口 + 协议。
+
+        协议必须进键：同一端口的 TCP 与 UDP 是两种服务，合成一行后协议列
+        只能显示其中一个，那就是在撒谎。
+        """
+        return (rec.ip, rec.local_port, rec.protocol)
 
     # ── Qt 接口 ──
     # QModelIndex() 是 Qt 覆写方法的标准默认值（不可变、无副作用），保持签名一致
@@ -148,7 +170,7 @@ class AccessTableModel(QAbstractTableModel):
         col = index.column()
 
         if role == Qt.ItemDataRole.DisplayRole:
-            return self._cell_text(rec, col)
+            return self._cell_text(rec, col, index.row())
 
         if role == BADGE_ROLE and col == 1:
             return rec.risk_level
@@ -166,7 +188,7 @@ class AccessTableModel(QAbstractTableModel):
             return None
 
         if role == Qt.ItemDataRole.ToolTipRole:
-            return self._tooltip(rec)
+            return self._tooltip(rec, index.row())
 
         if role == Qt.ItemDataRole.UserRole:
             return rec
@@ -176,10 +198,14 @@ class AccessTableModel(QAbstractTableModel):
 
         return None
 
-    @staticmethod
-    def _cell_text(rec: AccessRecord, col: int) -> str:
+    def _cell_text(self, rec: AccessRecord, col: int, row: int = -1) -> str:
         if col == 0:
-            return datetime.datetime.fromtimestamp(rec.event_ts / 1000).strftime("%H:%M:%S")
+            text = datetime.datetime.fromtimestamp(rec.event_ts / 1000).strftime("%H:%M:%S")
+            n = self.count_at(row) if row >= 0 else 1
+            # ×N 是「这一行代表 N 次」的唯一提示，不能省 —— 否则用户会以为
+            # 攻击只发生了一次，而时间列显示的是最后一次。不带空格是为了
+            # 在 96px 的列宽里塞得下 `14:06:06×27`
+            return f"{text}×{n}" if n > 1 else text
         if col == 1:
             return ""  # 风险列由 RiskBadgeDelegate 自绘徽章
         if col == 2:
@@ -206,8 +232,7 @@ class AccessTableModel(QAbstractTableModel):
             return rec.server_name or rec.host or "-"
         return ""
 
-    @staticmethod
-    def _tooltip(rec: AccessRecord) -> str:
+    def _tooltip(self, rec: AccessRecord, row: int = -1) -> str:
         lines = [
             f"时间：{rec.time_str}",
             f"来源：{rec.ip}" + (f":{rec.remote_port}" if rec.remote_port else ""),
@@ -228,52 +253,130 @@ class AccessTableModel(QAbstractTableModel):
             )
         if rec.tags:
             lines.append(f"标签：{rec.tags}")
+        # 合并行：说清「这一行代表 N 次」，并把最近几次的时间点列出来
+        n = self.count_at(row) if row >= 0 else 1
+        if n > 1:
+            members = self._members[row]
+            first_ts = int(members[0].event_ts or 0)
+            lines += [
+                "",
+                f"共 {n} 次同类连接（同 IP + 同端口 + 同协议），此处显示最近一次：",
+                f"  首次 {datetime.datetime.fromtimestamp(first_ts / 1000):%m-%d %H:%M:%S}"
+                f"  最近 {datetime.datetime.fromtimestamp(rec.event_ts / 1000):%m-%d %H:%M:%S}",
+                "双击该行查看每一次的明细",
+            ]
         return "\n".join(lines)
 
     # ── 数据操作 ──
     def append_many(self, records: List[AccessRecord]) -> int:
-        """批量追加，返回实际显示（匹配筛选）的行数"""
+        """批量追加，返回**新增的行数**（合并模式下同组记录不新增行）"""
         if not records:
             return 0
 
-        removed = 0
-        added: List[AccessRecord] = []
         cap = self._all.maxlen
-
+        overflowed = False
+        fresh: List[AccessRecord] = []
         for r in records:
-            # 环形缓冲溢出：丢弃最旧的一条，若它正在视图中则同步移除
             if cap is not None and len(self._all) == cap:
-                old = self._all[0]
                 self._all.popleft()
-                if self._view and self._view[0] is old:
-                    removed += 1
+                overflowed = True
             self._all.append(r)
             if self._match(r):
-                added.append(r)
+                fresh.append(r)
 
-        if removed:
-            self.beginRemoveRows(QModelIndex(), 0, removed - 1)
-            del self._view[:removed]
-            self.endRemoveRows()
+        # 环形缓冲溢出时整表重建：合并模式下最旧那条可能是某个组的中间成员，
+        # 增量删除要挪行号、要修 _row_of，反而比一次性重建（几千条几毫秒）更脆。
+        # 每秒最多重建一次（一次 append_many 就是一拍）。
+        if overflowed:
+            self._reapply()
+            return len(fresh)
 
-        if added:
+        if not self._merge:
+            if not fresh:
+                return 0
             start = len(self._view)
-            self.beginInsertRows(QModelIndex(), start, start + len(added) - 1)
-            self._view.extend(added)
+            self.beginInsertRows(QModelIndex(), start, start + len(fresh) - 1)
+            for r in fresh:
+                self._view.append(r)
+                self._members.append([r])
+            self.endInsertRows()
+            return len(fresh)
+
+        # 合并模式：已在视图里的组 → 追加成员并更新代表（最后一行是这次的时间）；
+        # 新组 → 追加一行。组间顺序 = 首次出现顺序，所以已存在的组不会跳行。
+        # 同一批里也要合并（一次 append_many 常常就是同一 IP 的几十条），
+        # 所以「本批新增的组」先攒进 new_groups 再统一插行。
+        new_groups: List[List[AccessRecord]] = []
+        new_index: dict = {}
+        touched: List[int] = []
+        for r in fresh:
+            key = self.group_key(r)
+            row = self._row_of.get(key)
+            if row is not None:
+                self._members[row].append(r)
+                self._view[row] = r
+                if row not in touched:
+                    touched.append(row)
+                continue
+            gi = new_index.get(key)
+            if gi is None:
+                new_index[key] = len(new_groups)
+                new_groups.append([r])
+            else:
+                new_groups[gi].append(r)
+
+        if new_groups:
+            start = len(self._view)
+            self.beginInsertRows(QModelIndex(), start, start + len(new_groups) - 1)
+            for group in new_groups:
+                self._row_of[self.group_key(group[-1])] = len(self._view)
+                self._view.append(group[-1])
+                self._members.append(group)
             self.endInsertRows()
 
-        return len(added)
+        # 已有组刷新：×N 与时间都变了，整行重画
+        last_col = len(HEADERS) - 1
+        for row in touched:
+            if 0 <= row < len(self._view):
+                self.dataChanged.emit(self.index(row, 0), self.index(row, last_col))
+
+        return len(new_groups)
 
     def clear(self) -> None:
         self.beginResetModel()
         self._all.clear()
         self._view.clear()
+        self._members.clear()
+        self._row_of.clear()
         self.endResetModel()
 
     def record_at(self, row: int) -> Optional[AccessRecord]:
         if 0 <= row < len(self._view):
             return self._view[row]
         return None
+
+    def members_at(self, row: int) -> List[AccessRecord]:
+        """第 row 行对应的全部原始记录（未合并时就是 1 条）——详情弹窗用"""
+        if 0 <= row < len(self._members):
+            return list(self._members[row])
+        return []
+
+    def count_at(self, row: int) -> int:
+        if 0 <= row < len(self._members):
+            return len(self._members[row])
+        return 0
+
+    def set_merge(self, enabled: bool) -> None:
+        """切换合并显示。结构两边都维护，切换只是重建一次视图。"""
+        enabled = bool(enabled)
+        if enabled == self._merge:
+            return
+        self._merge = enabled
+        self._reapply()
+
+    @property
+    def merging(self) -> bool:
+        return self._merge
 
     @property
     def total(self) -> int:
@@ -283,6 +386,8 @@ class AccessTableModel(QAbstractTableModel):
         """仅清空显示，不清空缓冲"""
         self.beginResetModel()
         self._view.clear()
+        self._members.clear()
+        self._row_of.clear()
         self.endResetModel()
 
     # ── 过滤 ──
@@ -298,9 +403,31 @@ class AccessTableModel(QAbstractTableModel):
         self._reapply()
 
     def _reapply(self) -> None:
-        """按当前条件从全量缓冲重建视图（不丢失数据）"""
+        """按当前条件从全量缓冲重建视图（不丢失数据）。
+
+        合并模式下同时重建分组索引：_view[i] 是第 i 组的最新代表，
+        _members[i] 是该组全部成员（按时间升序，末尾最新）。
+        """
         self.beginResetModel()
-        self._view = [r for r in self._all if self._match(r)]
+        self._view = []
+        self._members = []
+        self._row_of = {}
+        for r in self._all:
+            if not self._match(r):
+                continue
+            if not self._merge:
+                self._view.append(r)
+                self._members.append([r])
+                continue
+            key = self.group_key(r)
+            row = self._row_of.get(key)
+            if row is None:
+                self._row_of[key] = len(self._view)
+                self._view.append(r)
+                self._members.append([r])
+            else:
+                self._members[row].append(r)
+                self._view[row] = r
         self.endResetModel()
 
     def _match(self, rec: AccessRecord) -> bool:
@@ -413,6 +540,17 @@ class MonitorPage(QWidget):
         self.btn_clear.setObjectName("btn_outline")
         self.btn_clear.clicked.connect(self._clear_view)
 
+        # 合并显示开关：同 IP + 同端口 + 同协议只占一行（时间列标 ×N）。
+        # 默认开 —— 扫描器一分钟就能把列表刷成几十行一模一样的东西，
+        # 那时用户要的是「谁在打我」，不是「打了第几十次」。
+        self.chk_merge = QCheckBox("同 IP 端口合并")
+        self.chk_merge.setChecked(True)
+        self.chk_merge.setToolTip(
+            "同一来源 IP、同一目标端口、同一协议的多条访问折叠成一行，\n"
+            "时间列显示最近一次并标 ×N；双击该行查看每一次的明细"
+        )
+        self.chk_merge.toggled.connect(self._on_merge_toggled)
+
         self.lbl_count = QLabel("共 0 条")
         self.lbl_count.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
 
@@ -420,6 +558,7 @@ class MonitorPage(QWidget):
         bar.addWidget(self.scope)
         bar.addWidget(self.port_filter)
         bar.addWidget(self.btn_clear)
+        bar.addWidget(self.chk_merge)
         bar.addStretch(1)
         bar.addWidget(self.lbl_count)
         root.addLayout(bar)
@@ -475,6 +614,10 @@ class MonitorPage(QWidget):
         self.pause_banner.setVisible(checked)
         self._update_count()
 
+    def _on_merge_toggled(self, checked: bool) -> None:
+        self.model.set_merge(bool(checked))
+        self._update_count()
+
     def _on_filter(self) -> None:
         port = self.port_filter.value() or None
         self.model.set_filters(
@@ -506,7 +649,9 @@ class MonitorPage(QWidget):
         rec = self.model.record_at(idx.row())
         if not rec:
             return
+        n = self.model.count_at(idx.row())
         menu = QMenu(self)
+        a_detail = QAction(f"查看详情（{n} 次连接）" if n > 1 else "查看详情", self)
         a_lookup = QAction("查询该 IP 归属地", self)
         a_copy = QAction("复制 IP", self)
         a_copy_ua = QAction("复制 User-Agent", self)
@@ -521,6 +666,8 @@ class MonitorPage(QWidget):
         if ban is not None:
             a_ban.setText("已在封禁中")
             a_ban.setEnabled(False)
+        menu.addAction(a_detail)
+        menu.addSeparator()
         menu.addAction(a_lookup)
         menu.addAction(a_copy)
         menu.addAction(a_copy_ua)
@@ -528,6 +675,7 @@ class MonitorPage(QWidget):
         menu.addAction(a_black)
         menu.addAction(a_ban)
 
+        a_detail.triggered.connect(lambda: self._show_detail(idx.row()))
         a_lookup.triggered.connect(lambda: self.ask_lookup.emit(rec.ip))
         a_copy.triggered.connect(lambda: self._copy(rec.ip))
         a_copy_ua.triggered.connect(lambda: self._copy(rec.user_agent or ""))
@@ -542,10 +690,15 @@ class MonitorPage(QWidget):
 
         QApplication.clipboard().setText(text or "")
 
+    def _show_detail(self, row: int) -> None:
+        """双击 / 右键「查看详情」：列出该行代表的每一次连接"""
+        recs = self.model.members_at(row)
+        if recs:
+            AccessDetailDialog(recs, self).exec()
+
     def _on_double_click(self, index) -> None:
-        rec = self.model.record_at(index.row())
-        if rec:
-            QMessageBox.information(self, "访问详情", AccessTableModel._tooltip(rec))
+        if index.isValid():
+            self._show_detail(index.row())
 
     # ── 外部驱动 ──
     def append_records(self, records: List[AccessRecord]) -> int:
@@ -599,12 +752,16 @@ class MonitorPage(QWidget):
         self.scope.blockSignals(False)
 
     def _update_count(self) -> None:
-        view, total = self.model.rowCount(), self.model.total
+        rows, total = self.model.rowCount(), self.model.total
         prefix = "已暂停 · " if self._paused else ""
-        if view == total:
+        if rows == total:
             self.lbl_count.setText(f"{prefix}共 {total} 条")
+        elif self.model.merging:
+            # 合并开着时「显示 3 行 / 共 27 条」要说明白：不然后台明明收到 27 条，
+            # 列表只有 3 行，看着像丢数据
+            self.lbl_count.setText(f"{prefix}共 {total} 条 · 合并显示 {rows} 行")
         else:
-            self.lbl_count.setText(f"{prefix}显示 {view} / 共 {total} 条")
+            self.lbl_count.setText(f"{prefix}显示 {rows} / 共 {total} 条")
         self.btn_clear.setEnabled(total > 0)
         self._update_empty()
 
