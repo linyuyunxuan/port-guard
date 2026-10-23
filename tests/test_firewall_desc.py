@@ -78,6 +78,39 @@ def test_build_description_permanent():
     assert "到期" not in d
 
 
+def test_build_description_never_depends_on_strftime(monkeypatch):
+    """
+    英文版 Windows 上「到期」必须照样写出来 —— 这条挡的是一个不会在本机复现的坑。
+
+    `strftime` 把格式串按**系统 ANSI 代码页**编码：中文 Windows 是 cp936，「到期」
+    编得进去，所以本机怎么跑都是绿的；英文 Windows（cp1252）编不进去，抛
+    UnicodeEncodeError（ValueError 子类），正好落进 build_description 的
+    `except (OverflowError, OSError, ValueError)`，于是描述静默变成「永久」。
+
+    后果不是少一行字：规则其实几小时后就到期删除，控制台里却写着「永久」，
+    管理员会以为它永久有效 —— 比不写更糟。GitHub runner 就是 en-US，这个坑当时
+    只在 CI 上暴露（2026-10-23）。
+
+    变异：把实现改回 `until.strftime("%Y-%m-%d %H:%M 到期")` → 本例变红。
+    """
+    import datetime as _dt
+
+    class _NoStrftime(_dt.datetime):
+        def strftime(self, fmt):
+            raise UnicodeEncodeError("mbcs", str(fmt), 0, 1, "模拟 cp1252 无法编码中文")
+
+    class _Frozen(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _NoStrftime(2026, 10, 23, 12, 34)
+
+    monkeypatch.setattr(_dt, "datetime", _Frozen)
+    d = firewall.build_description("203.0.113.10", 3600, "")
+    assert "到期" in d, f"非中文代码页下到期时间被吞掉了：{d!r}"
+    assert "永久" not in d
+    assert "2026-10-23 13:34" in d  # 冻结时刻 12:34 + 3600 秒
+
+
 def test_build_description_is_netsh_safe_and_bounded():
     """
     最终描述必须**真的触顶截断**：用最长的 IPv6（39 字符）+ 100 字符原因，

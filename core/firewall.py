@@ -207,7 +207,19 @@ def build_description(ip: str, duration_sec: Optional[int] = None, note: str = "
     if duration_sec and int(duration_sec) > 0:
         try:
             until = datetime.datetime.now() + datetime.timedelta(seconds=int(duration_sec))
-            parts.append(until.strftime("%Y-%m-%d %H:%M 到期"))
+            # ⚠️ 这里**不能**用 strftime，更不能用带中文的格式串。
+            # strftime 会把格式串按**系统 ANSI 代码页**编码后再交给 C 运行库：
+            # 中文 Windows 是 cp936，「到期」能编码，看着一切正常；英文 / 其他语言的
+            # Windows（cp1252 等）编码失败抛 UnicodeEncodeError（ValueError 子类），
+            # 被下面 except 接住 → 描述静默变成「永久」，而规则其实会到期删除。
+            # 结果是管理员在防火墙控制台里看到一条写着「永久」、却在几小时后自己
+            # 消失的规则 —— 比不写更糟。手工拼数字（纯 Python，与 locale 无关），
+            # 注意也别用 f"{until:%Y-%m-%d}" 这种形式 —— 那是 datetime.__format__，
+            # 底层还是 strftime，同样会踩这个坑。
+            parts.append(
+                f"{until.year:04d}-{until.month:02d}-{until.day:02d} "
+                f"{until.hour:02d}:{until.minute:02d} 到期"
+            )
         except (OverflowError, OSError, ValueError):  # 极端时长不去猜，退化成永久
             parts.append("永久")
     else:
