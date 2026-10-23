@@ -479,6 +479,22 @@ pyinstaller port_guard.spec
 > 离线 IP 库（两个 xdb 合计约 46 MB）**不入版本库**，打包脚本会自动跳过不存在的资源。
 > 新克隆的仓库在打包前请先运行一次同步，或把上游仓库 `data/` 下的 xdb 复制过来。
 
+### ⚠️ PySide2 线路要求「纯 ASCII 的 Python 环境路径」
+
+打包机上的 Python 环境目录**不能含中文**（仓库/源码目录含中文没关系，只有装 PySide2 的那个环境不行）。
+
+原因：PySide2 5.15.2.1 的 `QLibraryInfo.location(PrefixPath)` 会把非 ASCII 字符替换成 `?`
+（实测 `ip防火墙` → `ip???`）。PyInstaller 的 `hook-PySide2.py` 拿到这个残缺路径后
+`pathlib.Path(...).resolve()` 直接抛：
+
+```
+OSError: [WinError 123] 文件名、目录名或卷标语法不正确。: '...\ip???-2region-3.18.0\...\PySide2'
+```
+
+用目录联接（junction）指过去**无效** —— Qt 从 `Qt5Core.dll` 的真实加载路径推导，
+Windows 的 `GetModuleFileName` 会把联接解开，拿到的还是中文真实路径。只能把环境真的放在
+ASCII 路径下（例如 `C:\pg\venv38`），源目录可以是中文/联接。PySide6 线路没有这个问题。
+
 ### 运行环境要求（实测结论，不要凭感觉）
 
 同一套代码，**两条 Qt 线路**，由 `qtcompat.py` 在导入期自动选择：
