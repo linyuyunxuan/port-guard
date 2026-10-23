@@ -21,7 +21,7 @@ from core.database import find_active_ban_by_ip, init_db
 from core.event_bus import bus
 from core.geo_locator import get_locator
 from core.logger import get_logger
-from core.rule_engine import get_engine, is_never_ban
+from core.rule_engine import is_never_ban
 from gui.about_dialog import AboutDialog, ClickableLabel, register_about_shortcut
 from gui.components import ShieldMark, TopStatusBar
 from gui.mixins import EventPumpMixin
@@ -282,6 +282,8 @@ class MainWindow(EventPumpMixin, QMainWindow):
     batch_ban_done = Signal(int, int)  # (成功数, 失败数)
     # 黑名单 → 防火墙联动的结果（写规则慢，必须后台跑完再回主线程提示）
     blacklist_sync_done = Signal(object)
+    # 旧黑 / 白名单已并入规则的提示（一次性迁移，回主线程刷新界面用）
+    lists_migrated = Signal(object)
     # 防火墙开关状态：netsh 要起进程（100~300ms），只能在后台线程读
     fw_state_ready = Signal(object)
 
@@ -296,6 +298,9 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.setWindowIcon(self._app_icon)
 
         self._last_stats = 0.0
+        # 启动校准总闸（名单迁移 + 防火墙联动）。见 _startup_rule_sync：
+        # selftest 会把它关掉，因为自检承诺绝不写防火墙规则。
+        self._startup_sync_enabled = True
         # 防火墙开关的轮询节流（0 = 启动后第一次统计刷新就去读）
         self._last_fw_poll = 0.0
         self._fw_polling = False
@@ -318,6 +323,62 @@ class MainWindow(EventPumpMixin, QMainWindow):
         QTimer.singleShot(3000, lambda: self._maybe_sync_xdb(first_run=True))
 
         self._init_permission_hint()
+
+        # 启动校准（后台线程，延迟一点让首屏先出来）：
+        #   ① 旧「黑 / 白名单」→「拦截 / 放行」规则的一次性迁移（幂等）；
+        #   ② 让防火墙追上规则（拦截目标补封、放行目标解封）。
+        # 放在启动时做而不是等用户手动操作：迁移若只在打开规则页时触发，
+        # 用户可能几周都不点进去，那期间名单已经"看不见"却还在生效/不生效。
+        self.lists_migrated.connect(self._on_lists_migrated)
+        QTimer.singleShot(1200, self._startup_rule_sync)
+
+    def _startup_rule_sync(self) -> None:
+        """启动时的名单迁移 + 规则校准（后台线程）。
+
+        ⚠️ `_startup_sync_enabled` 是给 selftest 用的总闸：自检脚本会跑真事件
+        循环（`app.exec()`），而这个定时器排在启动 1.2 秒后 —— 不关掉的话，
+        自检会真的去改防火墙规则，而 selftest 的承诺是「绝不写任何防火墙规则」。
+        """
+        if not getattr(self, "_startup_sync_enabled", True):
+            log.info("已禁用启动校准（自检 / 无副作用模式），跳过名单迁移与防火墙联动")
+            return
+
+        def work():
+            from app import list_migration
+
+            try:
+                mig = list_migration.migrate_lists_to_rules(actor=audit.ACTOR_SYSTEM)
+            except Exception:
+                log.exception("启动时迁移黑白名单失败")
+                mig = {}
+            if mig.get("migrated"):
+                self.lists_migrated.emit(mig)
+            try:
+                res = list_migration.calibrate_firewall(actor=audit.ACTOR_SYSTEM)
+            except Exception:
+                log.exception("启动时规则校准失败")
+                res = {"admin": True, "total": 0, "error": "校准失败，详见日志"}
+            self.blacklist_sync_done.emit(res)
+
+        threading.Thread(target=work, daemon=True, name="startup-rule-sync").start()
+
+    def _on_lists_migrated(self, mig) -> None:
+        from app import list_migration
+
+        text = list_migration.format_migrate(mig)
+        if not text:
+            return
+        self._set_status(
+            f"旧名单已并入规则（黑 {mig.get('black', 0)} / 白 {mig.get('white', 0)}）",
+            C.success,
+        )
+        # 规则页可能已经用旧配置渲染过了，必须重载才能看到迁移出来的规则
+        with contextlib.suppress(Exception):
+            self.page_rules.reload()
+        # 刻意**不弹窗**：这是启动 1.2 秒后的自动动作，弹模态框会打断用户
+        # 正在做的事（2026-10-22 反馈过弹窗打断）。结果落在状态栏，
+        # 详细清单与备份路径在日志和审计里（app.list_migration 已记）。
+        log.warning("旧名单已并入规则：%s", text)
 
     # ═══════════════════════════════════════════════
     #  小工具
@@ -732,88 +793,101 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.page_iplookup.lookup_and_show(ip)
 
     def _add_blacklist(self, ip: str) -> None:
+        """监控页右键「拦截该 IP」：写一条拦截规则并立即封禁。
+
+        2026-10-23 起黑 / 白名单入口取消，这条路径改成往「访问规则」追加一条
+        `action=block` 的规则。按钮位置、用户动作都没变，但结果只有一套语义 ——
+        不再出现「名单里有一条、规则页看不到」这种两处维护、两处对不上的局面。
+        """
         if is_never_ban(ip):
-            QMessageBox.warning(
-                self, "无法加入", f"{ip} 属于内网 / 回环 / 保留地址，不能加入黑名单。"
-            )
-            return
-        eng = get_engine()
-        if ip in eng.blacklist:
-            QMessageBox.information(self, "已存在", f"{ip} 已在黑名单中。")
+            QMessageBox.warning(self, "无法拦截", f"{ip} 属于内网 / 回环 / 保留地址，不能拦截。")
             return
         if (
             QMessageBox.question(
                 self,
-                "加入黑名单",
-                f"将 {ip} 加入黑名单，并**立即在 Windows 防火墙拦截**该 IP 的所有入站访问"
-                "（永久，直到移出黑名单）。\n\n继续？",
+                "加入拦截规则",
+                f"将为 {ip} 新增一条「拦截」规则，并**立即在 Windows 防火墙拦截**"
+                "该 IP 的所有入站访问（永久，直到停用或删除该规则）。\n\n继续？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             != QMessageBox.StandardButton.Yes
         ):
             return
+        from app import list_migration
+
         try:
-            eng.blacklist.add(ip)
-            eng.save_lists()
+            rule = list_migration.add_block_rule(ip)
         except Exception as e:
-            log.exception("保存黑名单失败 ip=%s", ip)
+            log.exception("新增拦截规则失败 ip=%s", ip)
             audit.record(
-                audit.ACTION_LIST_SAVE,
-                target_type="blacklist",
+                audit.ACTION_RULES_SAVE,
+                target_type="rule",
                 target_id=ip,
-                summary=f"加入黑名单失败：{e}",
+                summary=f"新增拦截规则失败：{e}",
                 result=audit.RESULT_FAIL,
                 detail=str(e),
             )
             QMessageBox.warning(self, "保存失败", str(e))
             return
-        # 这是「右键顺手加黑」的捷径入口，与设置页规则页的文本框保存是两条路径；
-        # 不记的话，「这个 IP 什么时候被谁拉黑的」会出现查不到的空档。
-        # target_type 用 blacklist 而不是 list：这里只动黑名单，没碰白名单。
+        # 右键是「顺手加」的捷径入口，与规则页手工新建是两条路径；
+        # 不记的话，「这个 IP 什么时候被谁拦的」会出现查不到的空档。
         audit.record(
-            audit.ACTION_LIST_SAVE,
-            target_type="blacklist",
-            target_id=ip,
-            summary=f"右键加入黑名单：{ip}",
-            before={"in_blacklist": False},
-            after={"in_blacklist": True, "blacklist_size": len(eng.blacklist)},
+            audit.ACTION_RULES_SAVE,
+            target_type="rule",
+            target_id=rule.get("id"),
+            summary=f"右键新增拦截规则：{ip}",
+            after={"action": "block", "cidrs": [ip], "rule_id": rule.get("id")},
         )
         self.page_rules.reload()
-        self._set_status(f"已把 {ip} 加入黑名单", C.success)
-        # 名单只是「意图」，拦截必须落到防火墙：名单保存后立刻封禁（后台线程，
+        self._set_status(f"已为 {ip} 新增拦截规则", C.success)
+        # 规则只是「意图」，拦截必须落到防火墙：立刻校准一次（后台线程，
         # 写规则可能要几秒）。非管理员时会被明确告知「未实际拦截」，不假成功。
         self._sync_blacklist_bans([ip], [])
 
     def _sync_blacklist_bans(self, added, removed) -> None:
-        """把黑名单变更落到防火墙（后台线程 → 信号回主线程）。"""
+        """把「拦截 / 放行」规则落到防火墙（后台线程 → 信号回主线程）。
+
+        参数保留旧签名：调用方只关心「有事要落到防火墙」，具体落哪些
+        由当前规则全量决定（全量对齐是幂等的，见 app.list_migration 的说明）。
+        """
 
         def work():
-            from app import blacklist_service
+            from app import list_migration
 
             try:
-                res = blacklist_service.apply_changes(added, removed)
+                res = list_migration.calibrate_firewall(actor=audit.actor_local())
             except Exception as e:
-                log.exception("黑名单联动封禁失败")
-                res = {"admin": False, "failed": [(ip, str(e)) for ip in added]}
+                log.exception("规则联动防火墙失败")
+                res = {"admin": True, "total": 0, "error": str(e)}
             self.blacklist_sync_done.emit(res)
 
-        threading.Thread(target=work, daemon=True, name="blacklist-sync").start()
+        threading.Thread(target=work, daemon=True, name="rule-enforce").start()
 
     def _on_blacklist_sync_done(self, res) -> None:
-        from app import blacklist_service
+        from app import list_migration
 
         self._refresh_stats(force=True)
         with contextlib.suppress(Exception):
             self.page_bans.refresh()
-        summary = blacklist_service.format_summary(res)
-        if res.get("admin") and not res.get("failed") and not res.get("unban_failed"):
-            self._set_status(summary, C.success)
+        if res.get("error"):
+            self._set_status(f"规则联动防火墙失败：{res['error']}", C.warning)
             return
-        self._set_status(summary, C.warning)
+        summary = list_migration.format_calibrate(res)
+        if not res.get("admin"):
+            # 非管理员是「常态」而不是错误：顶栏已经有「权限」一栏在提示。
+            # 每次启动都弹一个「需要管理员权限」只会被点掉不看，反而让真正
+            # 的失败提示失去分量。这里只在状态栏说一句。
+            self._set_status(summary or "拦截规则已保存，但需要管理员权限才能写入防火墙", C.warning)
+            return
+        if not res.get("failed") and not res.get("unban_failed"):
+            if summary:
+                self._set_status(summary, C.success)
+            return
+        self._set_status(summary or "拦截规则未实际生效", C.warning)
         QMessageBox.warning(
             self,
-            "黑名单未完全生效",
-            summary + "\n\n" + blacklist_service.format_detail(res),
+            "拦截规则未完全生效",
+            (summary or "") + "\n\n" + list_migration.format_calibrate_detail(res),
         )
 
     def _on_rules_saved(self) -> None:

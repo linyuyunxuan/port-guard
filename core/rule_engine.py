@@ -351,6 +351,10 @@ class RuleEngine:
                     "ports": ports,
                     "factor": float(r.get("factor", 0.3) or 0.3),
                     "score": int(r.get("score", 90) or 90),
+                    # 「仅豁免」：不限定端口的放行规则，只做豁免、不做默认拒绝。
+                    # 普通新建的放行规则不填端口时编译期会告警（见下），但由
+                    # 旧白名单迁移来的规则天生就是「仅豁免」语义，不该刷告警。
+                    "exempt_only": bool(r.get("exempt_only", False)),
                     "provinces": cls._as_str_list(match, "provinces"),
                     "cities": cls._as_str_list(match, "cities"),
                     "countries": cls._as_str_list(match, "countries"),
@@ -371,7 +375,7 @@ class RuleEngine:
         # 放行（allow）规则必须圈定端口才能「未命中即拦截」：
         # 端口留空（=全部端口）时只保留豁免半边，否则一次误配就把整机访问全掐了
         for r in out:
-            if r["action"] == "allow" and not r["ports"]:
+            if r["action"] == "allow" and not r["ports"] and not r["exempt_only"]:
                 log.warning(
                     "区域放行规则 %s 未限定生效端口，按「仅豁免、不拦截」处理；"
                     "要启用「其余来源直接拦截」请填写生效端口",
@@ -509,12 +513,47 @@ class RuleEngine:
         return bool(self.rule(rule_id).get("enabled", False))
 
     # ── 评估 ──
+    @staticmethod
+    def _block_result(rule_key: str, reason: str) -> RiskResult:
+        """「直接拦截」的统一结论。
+
+        force_block=True 是给 pipeline 看的信号：这条记录不许走「评分 → 阈值 →
+        人工确认」那条慢路，而是当场写防火墙。评分固定 100 + critical，是为了
+        让所有既有展示（等级徽标 / 颜色 / 导出 / 排序）不必为它单开一套口径 ——
+        对用户来说「黑名单/拦截规则命中」就是最高等级，本来就是。
+
+        disposition 只给「待确认拦截」这个初值：是否**真的**拦下来了，只有
+        pipeline 写完防火墙才知道（非管理员时写不进去），引擎不能替它下结论。
+        """
+        return RiskResult(
+            score=100,
+            level=LEVEL_CRITICAL,
+            matched_rules=[rule_key],
+            suggest_ban=True,
+            force_block=True,
+            reason=reason,
+            disposition=DISPOSITION_CONFIRM,
+        )
+
     def evaluate(self, rec: AccessRecord, geo: Optional[GeoInfo] = None) -> RiskResult:
         geo = geo or rec.geo or GeoInfo()
         ip = rec.ip
         now = rec.event_ts
 
-        # 白名单优先
+        # ── 拦截档：黑名单压过白名单，也压过所有区域规则 ──
+        #
+        # 2026-10-23 用户明确要求：「加入黑名单的 IP，无视其他规则，直接拦截」。
+        # 原来的顺序是白名单优先，于是同一个 IP 只要同时躺在两个名单里
+        # （先封后加白、或两边都由不同人维护），结论就是**放行** —— 给
+        # 「已知恶意地址」留了一条纯配置层面的后门。
+        # 现在拦截判断提到最前，且**不看 `rules.blacklist.enabled`**：
+        # 黑白名单入口已取消（改为规则的拦截/放行动作），这条留在引擎里的
+        # 判断只剩两层意义 —— ① 兼容尚未迁移的旧名单文件；② 惯犯升级兜底。
+        # 它已经不是一张「可以被关掉的规则卡」，所以不该再有开关语义。
+        if ip in self.blacklist:
+            return self._block_result("blacklist", "命中黑名单，直接拦截（无视其他规则）")
+
+        # 名单级白名单：命中即豁免，且永不封禁
         if ip in self.whitelist:
             return RiskResult(
                 score=0,
@@ -526,9 +565,20 @@ class RuleEngine:
                 disposition=DISPOSITION_ALLOW,
             )
 
-        # ── 区域规则：action=allow（含旧名 whitelist）优先级最高，命中即豁免 ──
-        # 「河南/山西的 IP 可以访问某端口」就是靠这条短路实现的。
+        # ── 区域规则：action=block 最高优先 ──
+        # 先判拦截、再判放行，是刻意的顺序：同一条记录若既命中「拦截」又命中
+        # 「放行」（例如按省放行、又按具体 IP 拦截），必须拦。安全侧优先这条
+        # 原则不允许被「哪条规则写在前面」影响。
         region_hits = self._match_region_rules(rec, geo)
+        for r in region_hits:
+            if r["action"] == "block":
+                return self._block_result(
+                    region_rule_key("block", r["id"]),
+                    f"命中拦截规则「{r['name']}」，直接拦截",
+                )
+
+        # ── 区域规则：action=allow（含旧名 whitelist）命中即豁免 ──
+        # 「河南/山西的 IP 可以访问某端口」就是靠这条短路实现的。
         for r in region_hits:
             if r["action"] == "allow":
                 return RiskResult(
@@ -580,11 +630,9 @@ class RuleEngine:
             self._prune(dq, now)
             self._maybe_gc(now)
 
-            # 1. 黑名单
-            r = rules.get("blacklist", {})
-            if r.get("enabled") and ip in self.blacklist:
-                score += int(r.get("score", 100))
-                matched.append("blacklist")
+            # 1. 黑名单已提到函数最前面直接 return（见「拦截档」注释），
+            #    这里不再有「命中黑名单加 100 分」这一档 —— 留着会让人误以为
+            #    黑名单还走评分路径，改阈值/关开关就能放它过去。
 
             # 2. 端口扫描
             r = rules.get("port_scan", {})

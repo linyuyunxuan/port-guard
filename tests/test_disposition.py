@@ -573,3 +573,62 @@ def test_monitor_shows_disposition_text():
     # 没判定过的记录不能硬编「已放行」
     assert model._cell_text(AccessRecord(ip=IP), COL_DISPOSITION) == "-"
     assert "处置结果：已放行" in model._tooltip(rec)
+
+
+# ═══════════════════ 名单 / 拦截规则的强制拦截（2026-10-23） ═══════════════════
+
+
+def test_blacklist_bans_even_in_observe_only_mode(engine, sink, no_ban, monkeypatch):
+    """「仅观察」模式下，黑名单仍然直接拦。
+
+    2026-10-23 需求原话：「加入黑名单的 IP，无视其他规则，直接拦截」。
+    `allow_auto_ban=False` 代表「仅观察」，它的语义是「别拿**自动评分**
+    去封人」；而黑名单 / 拦截规则是逐条显式授权，不该被这个全局开关吃掉。
+
+    变异：把 auto_gate 里的 force_block 挪回 `allow_auto_ban and ...`
+    里面 → 本例变红（只记一笔、不拦）。
+    """
+    calls = []
+
+    def fake_auto_ban(rec, result, actor=None, existing=None):
+        calls.append(rec.ip)
+        return True
+
+    monkeypatch.setattr(pipeline, "auto_ban_record", fake_auto_ban)
+    engine.blacklist.add(IP)
+
+    result = pipeline.process_record(_rec(), allow_auto_ban=False)
+
+    assert calls == [IP], "仅观察模式下黑名单没有落到防火墙"
+    assert result.disposition == DISPOSITION_BLOCK
+
+
+def test_block_rule_bans_even_in_observe_only_mode(engine, sink, no_ban, monkeypatch):
+    """「拦截」规则（替代黑名单的新写法）同样不受仅观察模式影响。"""
+    calls = []
+
+    def fake_auto_ban(rec, result, actor=None, existing=None):
+        calls.append(rec.ip)
+        return True
+
+    monkeypatch.setattr(pipeline, "auto_ban_record", fake_auto_ban)
+    engine._cfg["region_rules"] = [
+        {
+            "id": "blk-1",
+            "name": "拦截测试",
+            "enabled": True,
+            "action": "block",
+            "target_ports": [],
+            "match": {"cidrs": [IP]},
+        }
+    ]
+    engine._compile()
+    try:
+        result = pipeline.process_record(_rec(), allow_auto_ban=False)
+    finally:
+        engine._cfg["region_rules"] = []
+        engine._compile()
+
+    assert calls == [IP]
+    assert result.disposition == DISPOSITION_BLOCK
+    assert result.force_block is True

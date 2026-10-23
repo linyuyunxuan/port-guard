@@ -186,6 +186,7 @@ EVENT_CSV_HEADERS = [
 BAN_CSV_HEADERS = [
     "ID",
     "IP",
+    "归属地",
     "封禁原因",
     "来源",
     "评分",
@@ -230,16 +231,47 @@ def iter_event_rows(rows: Sequence[Any]) -> Iterator[List[Any]]:
         ]
 
 
+def _ban_geo_cell(b: BanRecord, loc=None) -> str:
+    """封禁记录的归属地单元格（与表格里显示同一串 `region_short`）。
+
+    优先用界面已经算好挂在对象上的 `geo`（`PageBans._attach_geo`）；
+    没有就现查一次 —— 命令行 / 脚本导出不会走界面那条路。
+    网段记录按网段地址查（离线库只吃单个 IP）。
+    """
+    geo = getattr(b, "geo", None)
+    if geo is None:
+        try:
+            ip = str(b.ip or "")
+            if "/" in ip:
+                import ipaddress
+
+                ip = str(ipaddress.ip_network(ip, strict=False).network_address)
+            if loc is None:
+                from core.geo_locator import get_locator
+
+                loc = get_locator()
+            geo = loc.lookup(ip)
+        except Exception:
+            geo = None
+    return geo.region_short if geo else "未知"
+
+
 def iter_ban_rows(rows: Sequence[BanRecord]) -> Iterator[List[Any]]:
     """封禁记录（`BanRecord`）-> CSV 行
 
     时长 / 状态 / 来源都用模型上的 `*label` 属性，和表格里显示的是同一套
     中文；到期时间用 `expire_label`，因为它已经处理了「永久 / 已解封」。
+    归属地插在 IP 后面，与表格列顺序保持一致（导出文件拿 Excel 打开时，
+    用户会照着表格的顺序读）。
     """
+    from core.geo_locator import get_locator
+
+    loc = get_locator()
     for b in rows:
         yield [
             b.id,
             b.ip,
+            _ban_geo_cell(b, loc),
             b.reason,
             b.source_label,
             b.risk_score,

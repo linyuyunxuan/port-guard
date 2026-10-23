@@ -88,10 +88,10 @@ BAN_HEADERS = [
     "ID",
     "IP",
     "原因",
+    "归属地",
     "来源",
     "评分",
     "状态",
-    "时长",
     "到期时间",
     "创建时间",
     "操作",
@@ -100,26 +100,26 @@ SUG_HEADERS = ["", "时间", "等级", "IP", "归属地", "端口", "评分", "�
 
 # 第 0 列都是勾选框（32px）。列宽按「实测文字 + 16 padding + 6 余量」定，
 # 两栈取大的那套（PySide2 的 YaHei / Consolas 度量比 PySide6 宽 6~20%）。
-# IP 列 120：`113.118.113.77` 实测 98px，早期给 108 已经开始截断；
-# IPv6 完整地址（147px）放不下，走 tooltip —— 但 IPv4 必须完整。
-# 到期 / 创建列 136：模型输出的是 `YYYY-MM-DD HH:MM`（112px），不能省年份，
+# IP 列 124：`113.118.113.77` 实测 98px；IPv6 完整地址（147px）放不下，
+# 走 tooltip —— 但 IPv4 必须完整。
+# 到期 / 创建列 124：模型输出的是 `YYYY-MM-DD HH:MM`（112px），不能省年份，
 # 封禁最长 365 天会跨年。
-# 原因列是唯一的拉伸列：旧配置固定列合计 898，1360 下它只拿到 199，
-# 而「[自动] 命中规则：判定风险：1024」要 234 —— 每条记录的原因都被截成省略号。
-# 现在把 ID / IP / 评分 / 状态 / 时长 / 两个时间列各收到实测需求（共省 69），
-# 原因列拿到 268，常见原因全放得下。
-# 来源列 58：「自动 / 手动 / 黑名单」三个两字词，50 时「自动」被截成「自…」
-# （QFontMetrics 量出来够，实际渲染还差了省略号的位置）。
+#
+# 2026-10-23 加「归属地」列（用户要求）时，视口 1097 塞不下 12 列，于是
+# **删掉了「时长」列**：到期时间与创建时间并列存在时，「多久」就是两者之差
+# （永久在到期列也单独写着），它是这张表里唯一一条冗余信息。腾出的空间加上
+# 各列收窄，让归属地拿到 122（与建议表同宽，同一套 `region_short` 已实测），
+# 原因列仍保住 240 —— 低于 240 会被 tests/test_ui_layout.py 拦下。
+# 来源列 56：`自动 / 手动 / 黑名单 / 规则`都是两字词，50 时「自动」被渲染成
+# 「自…」（QFontMetrics 量出来够，实际渲染还差省略号的位置）。
+# 状态列 84：要放得下「已封禁 ×128」。拦截次数（`hit_label`）跟在状态后面，
+# 不单开列 —— 视口只有 1097，多一列就要从原因列扣。
+BAN_WIDTHS = [33, 48, 124, 240, 122, 56, 42, 84, 124, 124, 100]
+
 #: 防火墙开关状态的刷新间隔（秒）。netsh 一次 100~300ms，只在后台探测，
 #: 缓存期间页面刷新直接复用上一次结论（见 _probe_fw_state）
 FW_PROBE_SEC = 20.0
 
-# 状态列 86：要放得下「已封禁 ×128」。拦截次数（`hit_label`）跟在状态后面，
-# 没有单开一列 —— 视口只有 1097，新开一列（哪怕只写「次数」两字也要 56）
-# 就要从原因列身上再扣 56，原因列会掉到 200 以下，「[自动] 命中规则：…」又
-# 得重新截成省略号（那是 2026-10 修过的老毛病）。状态与次数说的是同一件事
-# 的两个面，挤在一格里不损失信息。
-BAN_WIDTHS = [37, 51, 140, 207, 58, 48, 86, 66, 131, 131, 101]
 SUG_WIDTHS = [37, 138, 69, 150, 122, 64, 53, 184, 129]
 COL_SUG_CHECK = 0
 COL_SUG_LEVEL = 2
@@ -127,13 +127,13 @@ COL_SUG_REASON = 7
 COL_SUG_ACTION = 8
 COL_BAN_CHECK = 0
 COL_BAN_REASON = 3
+COL_BAN_GEO = 4
 COL_BAN_ACTION = 10
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 两张表各一套：都不给勾选列（点了是全选）与操作列（无值）建规则。
 # 等级按严重度（LEVEL_ORDER）而不是中文笔画；封禁状态按「已封禁 → 处理中 →
 # 失败 → 已解封」的业务序，按本地化文本排会把它排成无意义的顺序。
-# 时长用 duration_sec：显示的是「2 小时」这种带单位的文本，比不了大小。
 SUG_SORT_SPECS = {
     1: ColumnSpec(KIND_MS, lambda r: r.get("event_ts")),
     COL_SUG_LEVEL: ColumnSpec(KIND_NUM, lambda r: LEVEL_ORDER.get(str(r.get("risk_level") or ""))),
@@ -157,12 +157,15 @@ BAN_SORT_SPECS = {
     1: ColumnSpec(KIND_NUM, lambda b: b.id),
     2: ColumnSpec(KIND_TEXT, lambda b: b.ip),
     COL_BAN_REASON: ColumnSpec(KIND_TEXT, lambda b: b.reason),
-    4: ColumnSpec(KIND_TEXT, lambda b: b.source_label),
-    5: ColumnSpec(KIND_NUM, lambda b: b.risk_score),
-    6: ColumnSpec(KIND_NUM, lambda b: BAN_STATUS_ORDER.get(b.status)),
-    # duration_sec 为 None / 0 都是「永久」（见 BanRecord.duration_label），
-    # 归到空值排最后 —— 永久是最长的时长，不该出现在升序的第一屏
-    7: ColumnSpec(KIND_NUM, lambda b: b.duration_sec or None),
+    # 归属地按 `region_short` 文本排（与单元格显示的是同一串字）：
+    # 按 geo 对象排就得在排序层认识 GeoInfo，而排序层只该处理「显示的文本」。
+    COL_BAN_GEO: ColumnSpec(
+        KIND_TEXT,
+        lambda b: b.geo.region_short if b.geo else "",
+    ),
+    5: ColumnSpec(KIND_TEXT, lambda b: b.source_label),
+    6: ColumnSpec(KIND_NUM, lambda b: b.risk_score),
+    7: ColumnSpec(KIND_NUM, lambda b: BAN_STATUS_ORDER.get(b.status)),
     8: ColumnSpec(KIND_MS, lambda b: b.expire_at),
     9: ColumnSpec(KIND_DATETIME, lambda b: b.created_at),
 }
@@ -731,7 +734,7 @@ class BansPage(QWidget):
 
         self.table = QTableWidget(0, len(BAN_HEADERS))
         self.table.setHorizontalHeaderLabels(BAN_HEADERS)
-        align_headers(self.table, (1, 4, 5, 6, 7, 8, 9))
+        align_headers(self.table, (1, 5, 6, 7, 8, 9, 10))
         self._setup_table(self.table)
         self.ban_sel = CheckColumn(self.table, COL_BAN_CHECK)
         self.ban_sel.bind(self._on_ban_sel_changed)
@@ -1168,10 +1171,47 @@ class BansPage(QWidget):
 
     def _load_bans(self) -> None:
         rows = query_bans(status=self._status_filter(), keyword=self.search.text().strip())
+        self._attach_geo(rows)
         # 排序状态跨刷新保留：搜索词变了，用户期望的排序方向不变
         self._ban_rows_src = rows
         self._ban_rows = self.ban_sort.apply(rows)
         self._render_bans()
+
+    @staticmethod
+    def _attach_geo(rows) -> None:
+        """给每条封禁记录挂上归属地（渲染与排序共用这一次查询结果）。
+
+        为什么要挂到对象上而不是在 `_render_bans` 里现查：渲染会被排序、
+        勾选、解封反复触发，每渲染一次就重查一遍纯属浪费；而且排序层需要
+        拿到同一个值，两边各查一次还有可能拿到不同结果（离线库正在热更新时）。
+
+        网段记录（`1.2.3.0/24`）按**网段地址**查：离线库只吃单个 IP。
+        展示上不加「网段」二字 —— IP 列本身就写着 `/24`，加字会把
+        归属地列挤到省略号；tooltip 里说明清楚即可。
+
+        查询失败（离线库损坏 / 非法字符串）一律按「未知」处理：
+        归属地只是辅助信息，不能因为它让整页刷不出来。
+        """
+        import ipaddress
+
+        from core.geo_locator import get_locator
+
+        loc = get_locator()
+        for b in rows:
+            ip = str(getattr(b, "ip", "") or "")
+            probe = ip
+            if "/" in ip:
+                try:
+                    probe = str(ipaddress.ip_network(ip, strict=False).network_address)
+                except Exception:
+                    probe = ""
+            try:
+                geo = loc.lookup(probe) if probe else None
+            except Exception:
+                log.exception("查询封禁记录归属地失败 ip=%s", ip)
+                geo = None
+            b.geo = geo
+            b.geo_is_network = "/" in ip
 
     def _apply_ban_sort(self, _state: Optional[SortSpec]) -> None:
         """按新排序重渲染封禁记录表：勾选按业务 key（记录 id）回放，不是按行号"""
@@ -1209,11 +1249,23 @@ class BansPage(QWidget):
                 self.table.setItem(
                     i, COL_BAN_REASON, make_item(b.reason or "-", tip=b.reason or "")
                 )
+                # 归属地：与建议表同一套 `region_short`（省 市 / 国家 城市）。
+                # 查不到（内网、保留段、库未收录）一律写「未知」而不是留空 ——
+                # 空白格会被当成"这一列没数据"，而「未知」说明是**查了没查到**。
+                geo = getattr(b, "geo", None)
+                geo_tip = geo.display if geo else "未知"
+                if getattr(b, "geo_is_network", False):
+                    geo_tip += "（网段记录，按网段地址查询）"
                 self.table.setItem(
-                    i, 4, make_item(b.source_label, align=Qt.AlignmentFlag.AlignCenter)
+                    i,
+                    COL_BAN_GEO,
+                    make_item(geo.region_short if geo else "未知", tip=geo_tip),
                 )
                 self.table.setItem(
-                    i, 5, make_item(b.risk_score, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                    i, 5, make_item(b.source_label, align=Qt.AlignmentFlag.AlignCenter)
+                )
+                self.table.setItem(
+                    i, 6, make_item(b.risk_score, align=Qt.AlignmentFlag.AlignCenter, mono=True)
                 )
                 # 拦截次数跟在状态后面：封了还在撞的 IP 一眼能看出来
                 # （例：已封禁 ×7）。完整说明进 tooltip（见 BanRecord.hit_hint）
@@ -1222,18 +1274,13 @@ class BansPage(QWidget):
                     status_text = f"{b.status_label} {b.hit_label}"
                 self.table.setItem(
                     i,
-                    6,
+                    7,
                     make_item(
                         status_text,
                         status_color,
                         Qt.AlignmentFlag.AlignCenter,
                         tip=b.hit_hint if b.hit_label else b.status_label,
                     ),
-                )
-                self.table.setItem(
-                    i,
-                    7,
-                    make_item(b.duration_label, align=Qt.AlignmentFlag.AlignCenter, mono=True),
                 )
                 self.table.setItem(
                     i, 8, make_item(b.expire_min, align=Qt.AlignmentFlag.AlignCenter, mono=True)

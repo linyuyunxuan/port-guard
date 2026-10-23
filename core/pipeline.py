@@ -361,18 +361,20 @@ def process_record(
         # 的话，以后加第三种拦截来源必然只改一处。
         # 自动封禁的两个入口：
         #   常规 —— 设置页开了「自动封禁」且分数达标（默认关闭）；
-        #   规则强制 —— 端口白名单规则写了「其余来源直接拦截」（force_block）。
-        #   后者是管理员在规则里逐条显式授权过的动作，不再看 auto_mode 开关；
-        #   内网 / 本机保护（is_never_ban）在 auto_ban_record 里仍然生效。
-        auto_gate = (
-            allow_auto_ban
-            and result.suggest_ban
-            and (
-                result.force_block
-                or (
-                    cfg.get_bool("auto_mode", False)
-                    and result.score >= cfg.get_int("auto_ban_threshold", 90)
-                )
+        #   规则强制 —— 黑名单 / 拦截规则命中（force_block）。
+        #
+        # 为什么 force_block 连 `allow_auto_ban` 也不看：这个参数代表「仅观察」
+        # 模式，语义是「别拿自动评分去封人」。而 force_block 不是评分推出来的
+        # —— 它来自一条管理员亲手写下的拦截规则（或人工维护的黑名单），是**逐条
+        # 显式授权**的动作。把它也挡在观察模式后面，等于「我明确说了拦这个 IP，
+        # 程序却只观察」，这正是用户 2026-10-23 反馈要修的那件事。
+        # 内网 / 本机保护（is_never_ban）在 auto_ban_record 里仍然生效。
+        auto_gate = result.suggest_ban and (
+            result.force_block
+            or (
+                allow_auto_ban
+                and cfg.get_bool("auto_mode", False)
+                and result.score >= cfg.get_int("auto_ban_threshold", 90)
             )
         )
         if existing is not None or (

@@ -324,6 +324,10 @@ SOURCE_LABEL = {
     "manual": "手动",
     "auto": "自动",
     "suggest": "建议",
+    # 黑名单来源（2026-10-23 起改由「拦截」规则承担，历史记录里仍有这个值）
+    "blacklist": "黑名单",
+    # 「拦截 / 放行」规则联动写入的封禁（app.list_migration.calibrate_firewall）
+    "rule": "规则",
 }
 
 #: risk_event.handled 的中文标签。放在模型层是因为 GUI 与 CSV 导出都要用同一套
@@ -354,6 +358,13 @@ class BanRecord:
     hit_count: int = 0
     #: 最近一次被拦下的时刻（epoch 毫秒）
     last_hit_at: Optional[int] = None
+    #: 展示用归属地（**不落库**）。由 `PageBans._attach_geo` 在渲染前算一次，
+    #: 排序与 CSV 导出复用同一份结果 —— 表格会被排序/勾选/解封反复重渲染，
+    #: 每次都重新查库既浪费又可能拿到不同结果（离线库正在热更新时）。
+    #: `compare=False` 让 dataclass 的相等判断不受这个纯展示字段影响。
+    geo: Optional["GeoInfo"] = field(default=None, repr=False, compare=False)
+    #: 该条目本身是网段（`1.2.3.0/24`）：归属地是按网段地址查出来的
+    geo_is_network: bool = field(default=False, repr=False, compare=False)
 
     @property
     def status_label(self) -> str:

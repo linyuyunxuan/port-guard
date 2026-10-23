@@ -74,7 +74,12 @@ def test_blacklist_scores_100(engine):
 
 
 def test_whitelist_exempts_everything(engine):
-    engine.blacklist.add("203.0.113.10")
+    """白名单命中即豁免（未同时命中黑名单时）。
+
+    ⚠️ 2026-10-23 需求变更：**黑白同中时以黑名单为准**（原「白名单绝对优先」
+    已废止，见 test_lists_as_rules.test_blacklist_beats_whitelist）。
+    这里只保留「单白名单」这一半，别再把黑名单加回来 —— 那是被明确推翻的行为。
+    """
     engine.whitelist.add("203.0.113.10")
     r = engine.evaluate(_rec())
     assert r.score == 0 and r.whitelisted and not r.suggest_ban

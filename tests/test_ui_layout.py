@@ -83,9 +83,13 @@ def test_bans_reason_column_fits_auto_reason() -> None:
 
     reason_w = _stretch_width(page_bans.BAN_WIDTHS, page_bans.COL_BAN_REASON, 1097)
     assert reason_w >= 240, f"原因列只剩 {reason_w}px，每条记录的原因都会被截"
+    # 2026-10-23 加归属地列后，「时长」列被删掉腾空间（它是到期-创建的冗余）；
+    # 这两条钉住新增列与邻居的宽度，别在后续调列时把归属地挤成省略号。
+    assert page_bans.BAN_HEADERS[page_bans.COL_BAN_GEO] == "归属地"
+    assert page_bans.BAN_WIDTHS[page_bans.COL_BAN_GEO] >= 110, "归属地列放不下「河南省 焦作市」"
     # 来源列 50 时「自动」被渲染成「自…」：QFontMetrics 量出来够，
-    # 实际还差省略号的位置，所以按 58 卡
-    assert page_bans.BAN_WIDTHS[4] >= 58
+    # 实际还差省略号的位置，所以按 56 卡（列索引随归属地列右移）
+    assert page_bans.BAN_WIDTHS[5] >= 56
 
 
 # ═══════════════════ 2. 表单内容列限宽 ═══════════════════
@@ -216,3 +220,27 @@ def test_iplookup_single_result_is_a_field_grid(fresh_db) -> None:
     # 所以这里只钉「四格都被填上了」与「范围是二选一」
     assert page._single_vals["region"].text() not in ("", "—")
     assert page._single_vals["scope"].text() in ("境内", "境外")
+
+
+# ═══════════════════ 4. 封禁记录归属地列 ═══════════════════
+
+
+def test_ban_geo_is_attached_for_ip_and_network() -> None:
+    """封禁记录渲染前必须算好归属地：IP 按自身查、网段按网段地址查。
+
+    没这一步，「归属地」列会整列空白 —— 而空白看起来像「这列还没做」，
+    用户不会想到去查是不是数据没接上。
+    """
+    from core.models import BanRecord
+    from gui import page_bans
+
+    rows = [BanRecord(ip="203.0.113.7"), BanRecord(ip="198.51.100.0/24")]
+    page_bans.BansPage._attach_geo(rows)
+
+    assert rows[0].geo is not None
+    assert rows[0].geo_is_network is False
+    # 网段条目：按网段地址查，并标记出来（tooltip 里会说明）
+    assert rows[1].geo is not None
+    assert rows[1].geo_is_network is True
+    # 渲染取的是 region_short；查不到时它给「未知」而不是空串
+    assert isinstance(rows[0].geo.region_short, str) and rows[0].geo.region_short

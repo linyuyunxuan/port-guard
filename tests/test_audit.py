@@ -620,26 +620,22 @@ def test_add_blacklist_is_audited(isolated_env, msgbox, monkeypatch, as_user):
     """
     变异：删掉 `_add_blacklist` 里的 audit.record → 本例变红。
 
-    这是「右键顺手加黑」的捷径，与规则页文本框保存是两条路径；不记就会有
-    「这个 IP 什么时候被谁拉黑的」查不到的空档。
+    2026-10-23 起这个入口不再写「黑名单」，而是往访问规则里加一条拦截规则
+    （名单入口已取消，见 app/list_migration）。审计仍然必须留痕 ——
+    它是「右键顺手点出来」的捷径，与规则页手工新建是两条路径。
     """
+    from app import list_migration
     from gui import main_window
 
-    class _Set(set):
-        def add(self, x):
-            super().add(x)
-
-    class _Eng:
-        def __init__(self):
-            self.blacklist = _Set()
-            self.whitelist = _Set()
-            self.saved = 0
-
-        def save_lists(self):
-            self.saved += 1
-
-    eng = _Eng()
-    monkeypatch.setattr(main_window, "get_engine", lambda: eng)
+    monkeypatch.setattr(
+        list_migration,
+        "add_block_rule",
+        lambda ip, actor=None, name="": {
+            "id": "blk-test",
+            "name": f"拦截：{ip}",
+            "action": "block",
+        },
+    )
 
     class _PageRules:
         def reload(self):
@@ -652,35 +648,27 @@ def test_add_blacklist_is_audited(isolated_env, msgbox, monkeypatch, as_user):
             pass
 
         def _sync_blacklist_bans(self, *_a, **_k):
-            # 加黑后要联动防火墙封禁（后台线程）；本用例只验审计，把这一步短路
+            # 规则写完后要联动防火墙；本用例只验审计，把这一步短路
             pass
 
     _call(main_window.MainWindow._add_blacklist, _Host(), IP)
 
-    assert eng.saved == 1
-    row = _last(audit.ACTION_LIST_SAVE)
+    row = _last(audit.ACTION_RULES_SAVE)
     assert row["actor"] == "alice"
-    assert row["target_type"] == "blacklist"
-    assert row["target_id"] == IP
+    assert row["target_type"] == "rule"
+    assert row["target_id"] == "blk-test"
 
 
 def test_add_blacklist_triggers_firewall_sync(isolated_env, msgbox, monkeypatch, as_user):
-    """加入黑名单必须**立刻**写防火墙 —— 只进名单不拦截等于没拦。"""
+    """右键加拦截规则后必须**立刻**校准防火墙 —— 只写规则不落地等于没拦。"""
+    from app import list_migration
     from gui import main_window
 
-    class _Set(set):
-        def add(self, x):
-            super().add(x)
-
-    class _Eng:
-        def __init__(self):
-            self.blacklist = _Set()
-            self.whitelist = _Set()
-
-        def save_lists(self):
-            pass
-
-    monkeypatch.setattr(main_window, "get_engine", _Eng)
+    monkeypatch.setattr(
+        list_migration,
+        "add_block_rule",
+        lambda ip, actor=None, name="": {"id": "blk-test", "action": "block"},
+    )
 
     class _PageRules:
         def reload(self):
@@ -699,7 +687,7 @@ def test_add_blacklist_triggers_firewall_sync(isolated_env, msgbox, monkeypatch,
             seen["removed"] = list(removed)
 
     _call(main_window.MainWindow._add_blacklist, _Host(), IP)
-    assert seen.get("added") == [IP], "加入黑名单后没有触发防火墙封禁"
+    assert seen.get("added") == [IP], "新增拦截规则后没有触发防火墙校准"
     assert seen.get("removed") == []
 
 

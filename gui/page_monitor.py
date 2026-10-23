@@ -481,7 +481,7 @@ class MonitorPage(QWidget):
     """实时监控页面"""
 
     ask_lookup = Signal(str)  # 请求切到 IP 查询页并查询
-    ask_blacklist = Signal(str)  # 请求把 IP 加入黑名单
+    ask_blacklist = Signal(str)  # 请求把 IP 加进「拦截」规则（原黑名单入口）
     ask_ban = Signal(str, int, str)  # 请求封禁 ip / score / reason
     ask_settings = Signal()  # 请求跳到设置页（空态「去启动」）
 
@@ -655,7 +655,7 @@ class MonitorPage(QWidget):
         a_lookup = QAction("查询该 IP 归属地", self)
         a_copy = QAction("复制 IP", self)
         a_copy_ua = QAction("复制 User-Agent", self)
-        a_black = QAction("加入黑名单", self)
+        a_black = QAction("加入拦截规则", self)
         a_ban = QAction("封禁该 IP…", self)
         # 已封禁的 IP 把封禁项置灰并说明原因：不然点下去只会弹「已处于封禁状态」，
         # 看上去跟「上次点了没生效」一模一样

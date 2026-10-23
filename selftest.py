@@ -145,6 +145,10 @@ from gui.main_window import PAGE_LOGS, PAGE_SETTINGS, MainWindow
 from gui.region_rules import new_rule_id
 
 win = MainWindow()
+# 本脚本会跑真事件循环（末尾 app.exec()），而主窗口在启动 1.2 秒后会排一次
+# 「名单迁移 + 防火墙校准」—— 那会真的写防火墙规则，与本脚本「绝不创建任何
+# 防火墙规则」的承诺冲突。这里把总闸关掉。
+win._startup_sync_enabled = False
 check("MainWindow 构建", win is not None)
 # 离屏模式下必须真正 show()，否则页面 isVisible() 恒为 False，
 # page_logs.append_access 会走「只进缓冲、不渲染」分支，访问行进不了界面文档
@@ -261,10 +265,12 @@ check(
     win.page_iplookup.single_result.text(),
 )
 
-check("规则页卡片数", len(win.page_rules._cards) == 9, str(len(win.page_rules._cards)))
+# 8 = 9 条引擎规则去掉「黑名单命中」：2026-10-23 名单入口取消，
+# 它不再是一张可开关的规则卡（拦截改由访问规则的「拦截」动作承担）
+check("规则页卡片数", len(win.page_rules._cards) == 8, str(len(win.page_rules._cards)))
 win.page_rules.reload()
 
-# 区域访问白名单页签（本轮新增）：装填 / 回收 / ID 生成 / 引擎一致性
+# 访问规则页签（原「区域访问白名单」，本轮并入黑 / 白名单语义）
 tab_region = win.page_rules.tab_region
 check("区域规则页签已就绪", tab_region is not None)
 n_region = tab_region.table.rowCount()

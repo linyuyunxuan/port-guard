@@ -222,6 +222,18 @@ def escalate_repeat_offender(
         )
         return False
 
+    # 同时落一条「拦截」规则（2026-10-23）。
+    # 名单入口已经取消，只写名单等于**写进一个界面上看不见的地方**：
+    # 用户没法在规则页找到它、也没法停用，下次启动还会被迁移逻辑再翻译一遍。
+    # 写成规则之后它就是一条看得见、能编辑、能停用的拦截规则。
+    # 失败不影响升级本身（名单仍然生效，下次启动会迁移）。
+    try:
+        from app.list_migration import add_block_rule
+
+        add_block_rule(ip)
+    except Exception:
+        log.exception("惯犯升级：写入拦截规则失败 ip=%s（名单已生效，启动时会迁移）", ip)
+
     permanent = False
     note = ""
     try:

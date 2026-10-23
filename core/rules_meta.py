@@ -105,7 +105,14 @@ def rule_label(rule_id: str) -> str:
 # 每条规则自己挑动作。2026-10-22 用户确认：
 #   「放行」= 仅限所选区域通行，其他区域访问所选端口直接封禁（原 whitelist 语义合并进 allow）；
 #   「判定风险」= 仅针对所选区域拦截，其他区域不受本规则影响。
+#
+# 2026-10-23 用户确认：独立维护的「黑名单 / 白名单」取消，统一由规则的
+# 「拦截 / 放行」动作表达 —— 一个 IP 想直接拦住，就建一条命中它（IP/CIDR）
+# 的「拦截」规则，不必再在两个名单框里各维护一份。于是新增 block：
+#   block = 命中即直接拦截（评分 100 + 直接写防火墙），不看自动封禁开关与阈值；
+#           与 allow 同时命中时 block 优先（安全侧优先，绝不因为"也配了放行"而漏拦）。
 REGION_ACTIONS = [
+    ("block", "拦截（命中即直接封禁：无视评分与自动封禁开关，立即写入防火墙）"),
     ("allow", "放行（仅限所选区域通行，其他区域访问所选端口直接拦截）"),
     (
         "suggest_ban",
@@ -114,11 +121,11 @@ REGION_ACTIONS = [
     ("watch", "仅关注（不影响评分，只打标签留痕）"),
     ("downgrade", "降级（把已累计的风险分打到很低，仍留记录）"),
 ]
-# 下拉框只展示以上四个动作。whitelist 是「放行」的旧名（已合并进 allow），
+# 下拉框展示以上五个动作。whitelist 是「放行」的旧名（已合并进 allow），
 # 仍可能在老 rules.json / 老事件里出现，必须保留为合法动作且翻译成放行，避免翻车。
 REGION_ACTION_LABEL = {k: v.split("（", 1)[0] for k, v in REGION_ACTIONS}
 REGION_ACTION_LABEL["whitelist"] = "放行"
-REGION_ACTION_KEYS = ["allow", "suggest_ban", "watch", "downgrade", "whitelist"]
+REGION_ACTION_KEYS = ["block", "allow", "suggest_ban", "watch", "downgrade", "whitelist"]
 
 REGION_PREFIX = "region_"
 

@@ -1,6 +1,13 @@
 """PortGuard — 规则配置页
 
-三块内容用下划线 tab 分：风险规则 / 黑·白名单 / 区域访问白名单。
+两块内容用下划线 tab 分：风险规则 / 访问规则。
+
+2026-10-23 用户要求：「新增规则里也能选放行和拦截，把黑 / 白名单取消掉」。
+于是原来的第三个「黑 / 白名单」tab 被撤掉，名单语义并入「访问规则」的
+两个动作：`拦截`（命中即直接封禁）与 `放行`（命中即豁免、永不封禁）。
+已有的名单条目由 `app.list_migration` 一次性迁移成等价规则（带备份），
+本页只负责呈现与保存，不再有第二个维护名单的入口 ——
+同一个 IP「该拦还是该放」只在一个地方回答，不会出现两边对不上的情况。
 
 本轮只改呈现（_design/02_ux_spec.md P1-12、P2-3）：
   · 每张规则卡 = `#panel` 无边框 r8，标题区 14/600 + 说明 12 muted；
@@ -13,7 +20,7 @@
 import threading
 from typing import Dict, List, Tuple
 
-from app import audit, blacklist_service
+from app import audit, list_migration
 from core.config import (
     LEVEL_CRITICAL,
     LEVEL_HIGH,
@@ -38,12 +45,12 @@ from qtcompat import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
     Qt,
     QTabWidget,
+    QTimer,
     QVBoxLayout,
     QWidget,
     Signal,
@@ -252,15 +259,15 @@ def _split(text: str) -> List[str]:
 
 class RulesPage(QWidget):
     rules_saved = Signal()
-    # 黑名单变更 → 防火墙联动的结果（后台线程跑完回主线程）
-    blacklist_sync_done = Signal(object)
+    # 规则 → 防火墙校准的结果（后台线程跑完回主线程）
+    enforce_done = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cards: Dict[str, RuleCard] = {}
         self._dirty = False
         self._loading = True
-        self.blacklist_sync_done.connect(self._on_blacklist_sync_done)
+        self.enforce_done.connect(self._on_enforce_done)
         self._build()
         self.reload()
 
@@ -303,13 +310,12 @@ class RulesPage(QWidget):
         self.rules_area.setWidget(self.rules_host)
         self.tabs.addTab(self.rules_area, "风险规则")
 
-        # Tab2 名单
-        self.tabs.addTab(self._build_lists(), "黑 / 白名单")
-
-        # Tab3 区域规则（区域访问白名单）
+        # Tab2 访问规则（原「区域访问白名单」+ 原「黑 / 白名单」合并而来）
+        # 名单不再是独立实体：想拦一个 IP 就建一条「拦截」规则，
+        # 想放行就建一条「放行」规则，动作与匹配条件在同一个对话框里。
         self.tab_region = RegionRulesTab()
         self.tab_region.changed.connect(self._mark_dirty)
-        self.tabs.addTab(self.tab_region, "区域访问白名单")
+        self.tabs.addTab(self.tab_region, "访问规则")
 
         root.addWidget(self.tabs, 1)
 
@@ -336,72 +342,7 @@ class RulesPage(QWidget):
     def _dot_region_tab(self, on: bool) -> None:
         i = self.tabs.indexOf(self.tab_region)
         if i >= 0:
-            self.tabs.setTabText(i, "区域访问白名单 •" if on else "区域访问白名单")
-
-    def _build_lists(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 8, 8, 8)
-        lay.setSpacing(10)
-
-        tip = QLabel(
-            "每行一条，支持单个 IP 或 CIDR 网段（如 203.0.113.0/24）。"
-            "白名单优先于一切规则，命中即豁免且永不封禁。"
-        )
-        tip.setObjectName("hint")
-        tip.setWordWrap(True)
-        lay.addWidget(tip)
-
-        row = QHBoxLayout()
-        row.setSpacing(12)
-
-        p1, self.txt_black = self._list_panel(
-            "黑名单", "命中直接判为严重风险", "203.0.113.10\n198.51.100.0/24"
-        )
-        p2, self.txt_white = self._list_panel(
-            "白名单", "命中即豁免，永不封禁", "127.0.0.1\n192.168.1.0/24"
-        )
-        for _ed in (self.txt_black, self.txt_white):
-            _ed.textChanged.connect(self._mark_dirty)
-        row.addWidget(p1)
-        row.addWidget(p2)
-        lay.addLayout(row, 1)
-
-        b = QHBoxLayout()
-        b.addStretch(1)
-        self.btn_save_lists = QPushButton("保存名单")
-        self.btn_save_lists.setObjectName("btn_primary")
-        self.btn_save_lists.clicked.connect(self._save_lists)
-        b.addWidget(self.btn_save_lists)
-        lay.addLayout(b)
-        return w
-
-    @staticmethod
-    def _list_panel(title: str, hint: str, placeholder: str) -> Tuple[QFrame, QPlainTextEdit]:
-        """一栏地址清单：标题 + 一句说明 + 等宽编辑器（两栏等高 stretch）"""
-        p = QFrame()
-        p.setObjectName("panel")
-        lay = QVBoxLayout(p)
-        lay.setContentsMargins(16, 14, 16, 14)
-        lay.setSpacing(4)
-
-        t = QLabel(title)
-        t.setObjectName("panel_title")
-        lay.addWidget(t)
-        h = QLabel(hint)
-        h.setObjectName("hint")
-        lay.addWidget(h)
-
-        ed = QPlainTextEdit()
-        ed.setPlaceholderText(placeholder)
-        ed.setStyleSheet(
-            f"QPlainTextEdit{{background:{C.bg_input};color:{C.text_primary};"
-            f"border:1px solid {C.border};border-radius:6px;padding:8px;"
-            f'font-family:"Consolas","Microsoft YaHei UI",monospace;font-size:13.5px;}}'
-            f"QPlainTextEdit:focus{{border-color:{C.primary};}}"
-        )
-        lay.addWidget(ed, 1)
-        return p, ed
+            self.tabs.setTabText(i, "访问规则 •" if on else "访问规则")
 
     # ── 数据 ──
     def reload(self) -> None:
@@ -420,6 +361,12 @@ class RulesPage(QWidget):
         self._cards.clear()
 
         for rule_id in RULE_LABELS:
+            # 「黑名单命中」不再是一张规则卡：名单入口已取消，拦截由
+            # 「访问规则」里的拦截动作承担（见 app/list_migration 的说明）。
+            # 引擎里仍保留对旧名单文件的兼容判断，但不再暴露开关 ——
+            # 让人在这里关掉它却依然被拦（或反过来），是最糟的交互。
+            if rule_id == "blacklist":
+                continue
             if rule_id not in cfg:
                 continue
             card = RuleCard(rule_id, cfg[rule_id], self.rules_host)
@@ -427,28 +374,32 @@ class RulesPage(QWidget):
             self.rules_lay.insertWidget(self.rules_lay.count() - 1, card)
             self._cards[rule_id] = card
 
-        self._load_lists()
-
-        # 区域规则
+        # 访问规则（含拦截 / 放行 / 判定风险 / 仅关注 / 降级）
         self.tab_region.load(eng.get_config().get("region_rules") or [])
         self._loading = False
         self._clear_dirty()
-
-    def _load_lists(self) -> None:
-        eng = get_engine()
-        eng.load_lists()
-        self.txt_black.setPlainText("\n".join(eng.blacklist.entries()))
-        self.txt_white.setPlainText("\n".join(eng.whitelist.entries()))
 
     def save(self) -> None:
         eng = get_engine()
         cfg = eng.get_config()
         for rule_id, card in self._cards.items():
             cfg.setdefault("rules", {})[rule_id] = card.collect()
-        # 区域访问白名单规则（顶层数组，与 rules 并列）
+        # 访问规则（顶层数组，与 rules 并列）
         region_rules = self.tab_region.collect()
         cfg["region_rules"] = region_rules
         enabled = sum(1 for r in region_rules if r.get("enabled", True))
+        # 拦截 / 放行条数单独统计：它们是会真正改动防火墙的两类规则，
+        # 保存结果里必须能一眼看到「这次动了几条」。
+        n_block = sum(
+            1
+            for r in region_rules
+            if r.get("enabled", True) and str(r.get("action") or "") == "block"
+        )
+        n_allow = sum(
+            1
+            for r in region_rules
+            if r.get("enabled", True) and str(r.get("action") or "") in ("allow", "whitelist")
+        )
         try:
             eng.save_config(cfg)
             eng.reload()
@@ -467,7 +418,7 @@ class RulesPage(QWidget):
         audit.record(
             audit.ACTION_RULES_SAVE,
             target_type="rule",
-            summary=f"保存规则（{len(self._cards)} 条引擎规则、{len(region_rules)} 条区域规则）",
+            summary=f"保存规则（{len(self._cards)} 条引擎规则、{len(region_rules)} 条访问规则）",
             after={
                 "rules": {
                     rid: {
@@ -478,144 +429,78 @@ class RulesPage(QWidget):
                 },
                 "region_rules": len(region_rules),
                 "region_enabled": enabled,
+                "region_block": n_block,
+                "region_allow": n_allow,
             },
         )
         self._clear_dirty()
+        self._flash_saved(f"✓ 已保存（拦截 {n_block} / 放行 {n_allow}）")
         self.rules_saved.emit()
-        QMessageBox.information(
-            self,
-            "已保存",
-            f"规则已保存并即时生效。\n\n区域访问白名单：共 {len(region_rules)} 条，启用 {enabled} 条。",
-        )
+        # 保存后必须让防火墙追上规则（拦截补封 / 放行解封），后台跑。
+        # 这一步的结果若失败会在 _on_enforce_done 里**弹窗**——那才是需要
+        # 打断用户的事：规则看着保存了，实际没拦住。
+        self._start_enforce()
 
-    def _save_lists(self) -> None:
-        eng = get_engine()
-        from core.rule_engine import _IPSet
+    def _flash_saved(self, text: str) -> None:
+        """标题区亮一句「已保存」，3 秒后自动消失。
 
-        black = _IPSet(_lines(self.txt_black.toPlainText()))
-        white = _IPSet(_lines(self.txt_white.toPlainText()))
-        # 校验非法项
-        bad_b = [
-            x
-            for x in _lines(self.txt_black.toPlainText())
-            if x not in black.entries() and not _valid(x)
-        ]
-        bad_w = [
-            x
-            for x in _lines(self.txt_white.toPlainText())
-            if x not in white.entries() and not _valid(x)
-        ]
-        bad = bad_b + bad_w
-        if bad:
-            QMessageBox.warning(
-                self,
-                "存在非法条目",
-                "以下条目不是合法 IP 或 CIDR，已忽略：\n" + "\n".join(bad[:20]),
-            )
-        # 审计要记「加了谁、删了谁」，所以必须在覆盖 eng.blacklist **之前**
-        # 取旧集合 —— 覆盖之后旧值就没了，只剩「现在有多少条」。
-        old_black = set(eng.blacklist.entries())
-        old_white = set(eng.whitelist.entries())
-        eng.blacklist = black
-        eng.whitelist = white
-        try:
-            eng.save_lists()
-        except Exception as e:
-            QMessageBox.warning(self, "保存失败", str(e))
-            audit.record(
-                audit.ACTION_LIST_SAVE,
-                target_type="list",
-                summary=f"保存黑白名单失败：{e}",
-                result=audit.RESULT_FAIL,
-            )
+        为什么不弹模态框：保存是低频但结果很确定的动作，多一次
+        「点确定」纯属打断（用户明确抱怨过弹窗打断）。真正值得打断的只有
+        「拦截规则没生效」，那一条在 _on_enforce_done 里仍然是弹窗。
+        """
+        self.lbl_dirty.setText(text)
+        self.lbl_dirty.setStyleSheet(f"color:{C.success};font-size:13.5px;")
+        self.lbl_dirty.setVisible(True)
+        QTimer.singleShot(3000, self._clear_flash)
+
+    def _clear_flash(self) -> None:
+        """闪一下之后把标题区恢复成「未保存 / 空」的正确状态"""
+        if self._dirty:
+            self.lbl_dirty.setText("● 未保存")
+            self.lbl_dirty.setStyleSheet(f"color:{C.warning};font-size:13.5px;")
+            self.lbl_dirty.setVisible(True)
             return
-        added, removed = blacklist_service.diff(old_black, set(black.entries()))
-        if (added or removed) and not self._confirm_blacklist_sync(added, removed):
-            # 用户放弃同步：名单已经写盘了，必须说清楚「名单生效了但没拦」
-            QMessageBox.warning(
-                self,
-                "已取消联动封禁",
-                "名单已保存，但**没有**对防火墙做任何改动。\n"
-                f"新增 {len(added)} 条、移除 {len(removed)} 条仍按原状态拦截，"
-                "可在封禁页手工处理。",
-            )
-        audit.record(
-            audit.ACTION_LIST_SAVE,
-            target_type="list",
-            summary=(
-                f"黑名单 {len(black)} 条（+{len(set(black.entries()) - old_black)}"
-                f" -{len(old_black - set(black.entries()))}）、"
-                f"白名单 {len(white)} 条（+{len(set(white.entries()) - old_white)}"
-                f" -{len(old_white - set(white.entries()))}）"
-            ),
-            before={"black": sorted(old_black), "white": sorted(old_white)},
-            after={"black": sorted(black.entries()), "white": sorted(white.entries())},
-        )
-        self.rules_saved.emit()
-        self._sync_blacklist(added, removed)
+        self.lbl_dirty.setText("")
+        self.lbl_dirty.setVisible(False)
 
-    # ── 黑名单 → 防火墙联动 ──
-    def _confirm_blacklist_sync(self, added: List[str], removed: List[str]) -> bool:
-        """批量改名单等于批量写/删防火墙规则，必须先讲清楚再动手。"""
-        lines: List[str] = []
-        if added:
-            lines.append(f"新增 {len(added)} 个 IP：立即在 Windows 防火墙**永久封禁**")
-            lines += [f"   · {ip}" for ip in added[:10]]
-            if len(added) > 10:
-                lines.append(f"   … 其余 {len(added) - 10} 个")
-        if removed:
-            lines.append(f"移除 {len(removed)} 个 IP：解封**仅限黑名单来源**的封禁")
-            lines.append("   （手工封禁 / 自动封禁不会因此被解封）")
-            lines += [f"   · {ip}" for ip in removed[:10]]
-        return (
-            QMessageBox.question(
-                self,
-                "黑名单联动防火墙",
-                "\n".join(lines) + "\n\n继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            == QMessageBox.StandardButton.Yes
-        )
+    # ── 规则 → 防火墙校准 ──
+    def _start_enforce(self) -> None:
+        """把「拦截 / 放行」规则落到防火墙（后台线程）。
 
-    def _sync_blacklist(self, added: List[str], removed: List[str]) -> None:
-        if not added and not removed:
-            QMessageBox.information(
-                self, "已保存", f"黑名单 {len(get_engine().blacklist)} 条，规则已即时生效。"
-            )
-            return
+        为什么保存后必须立刻做一次：拦截规则本身只是「命中时判拦截」，
+        如果目标 IP 此刻正连着业务系统、或者干脆不再来了，就没有任何一条
+        访问记录能触发它 —— 用户以为「刚加了拦截，现在应该进不来了」，
+        而防火墙里实际什么都没有。放行同理：不主动解封，那条放行规则
+        永远等不到下一次访问（连接早在防火墙层就被丢了）。
+        """
+        who = audit.actor_local()
 
         def work():
             try:
-                res = blacklist_service.apply_changes(added, removed)
+                res = list_migration.calibrate_firewall(actor=who)
             except Exception as e:
-                log.exception("黑名单联动封禁失败")
-                res = {"admin": False, "failed": [(ip, str(e)) for ip in added]}
-            self.blacklist_sync_done.emit(res)
+                log.exception("规则联动防火墙失败")
+                res = {"admin": True, "total": 0, "error": str(e)}
+            self.enforce_done.emit(res)
 
-        threading.Thread(target=work, daemon=True, name="blacklist-sync").start()
+        threading.Thread(target=work, daemon=True, name="rule-enforce").start()
 
-    def _on_blacklist_sync_done(self, res) -> None:
-        summary = blacklist_service.format_summary(res)
-        detail = blacklist_service.format_detail(res)
-        if res.get("admin") and not res.get("failed") and not res.get("unban_failed"):
-            QMessageBox.information(self, "黑名单已生效", summary + "\n\n" + detail)
+    def _on_enforce_done(self, res) -> None:
+        if not res:
             return
-        QMessageBox.warning(self, "黑名单未完全生效", summary + "\n\n" + detail)
-
-
-def _lines(text: str) -> List[str]:
-    return [x.strip() for x in text.replace("，", "\n").splitlines() if x.strip()]
-
-
-def _valid(entry: str) -> bool:
-    import ipaddress
-
-    try:
-        if "/" in entry:
-            ipaddress.ip_network(entry, strict=False)
-        else:
-            ipaddress.ip_address(entry)
-    except Exception:
-        return False
-    return True
+        if res.get("error"):
+            QMessageBox.warning(self, "规则联动防火墙失败", res["error"])
+            return
+        if not res.get("total"):
+            return
+        summary = list_migration.format_calibrate(res)
+        detail = list_migration.format_calibrate_detail(res)
+        ok = res.get("admin") and not res.get("failed") and not res.get("unban_failed")
+        body = summary + ("\n\n" + detail if detail else "")
+        if ok:
+            # 只有真的动了防火墙才提示。每次保存都弹一个「无变更」很烦，
+            # 这是用户明确抱怨过的那类打断。
+            if res.get("banned") or res.get("unbanned"):
+                QMessageBox.information(self, "拦截 / 放行已生效", body)
+            return
+        QMessageBox.warning(self, "规则未完全生效", body or "未写入防火墙")

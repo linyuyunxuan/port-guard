@@ -94,6 +94,11 @@ ACTION_DATA_CLEANUP = "data.cleanup"  # 定期清理
 ACTION_SETTINGS_SAVE = "settings.save"  # 保存设置
 ACTION_RULES_SAVE = "rules.save"  # 保存规则
 ACTION_LIST_SAVE = "list.save"  # 黑白名单变更
+#: 黑/白名单并入规则（一次性迁移）。必须单独留一条动作：
+#: 它会把名单清空，事后有人问「我的黑名单去哪了」，只有这条审计答得出来。
+ACTION_LIST_MIGRATE = "list.migrate"
+#: 按「拦截 / 放行」规则校准防火墙（补封 / 补解封）
+ACTION_RULE_ENFORCE = "rule.enforce"
 ACTION_XDB_SYNC = "xdb.sync"  # 离线库同步
 ACTION_XDB_ROLLBACK = "xdb.rollback"  # 离线库回滚
 ACTION_DB_MAINTENANCE = "db.maintenance"  # 数据库整理 / 重建索引
@@ -119,6 +124,8 @@ ACTION_LABELS: Dict[str, str] = {
     ACTION_SETTINGS_SAVE: "保存设置",
     ACTION_RULES_SAVE: "保存规则",
     ACTION_LIST_SAVE: "黑白名单变更",
+    ACTION_LIST_MIGRATE: "名单并入规则",
+    ACTION_RULE_ENFORCE: "规则联动防火墙",
     ACTION_XDB_SYNC: "离线库同步",
     ACTION_XDB_ROLLBACK: "离线库回滚",
     ACTION_DB_MAINTENANCE: "数据库维护",
