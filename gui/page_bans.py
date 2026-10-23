@@ -18,6 +18,7 @@ from core.database import (
     query_risk_events,
     set_risk_handled,
     set_risk_handled_batch,
+    sum_ban_hits,
 )
 from core.logger import get_logger
 from core.models import (
@@ -113,7 +114,12 @@ SUG_HEADERS = ["", "时间", "等级", "IP", "归属地", "端口", "评分", "�
 #: 缓存期间页面刷新直接复用上一次结论（见 _probe_fw_state）
 FW_PROBE_SEC = 20.0
 
-BAN_WIDTHS = [37, 51, 140, 207, 58, 48, 66, 66, 131, 131, 101]
+# 状态列 86：要放得下「已封禁 ×128」。拦截次数（`hit_label`）跟在状态后面，
+# 没有单开一列 —— 视口只有 1097，新开一列（哪怕只写「次数」两字也要 56）
+# 就要从原因列身上再扣 56，原因列会掉到 200 以下，「[自动] 命中规则：…」又
+# 得重新截成省略号（那是 2026-10 修过的老毛病）。状态与次数说的是同一件事
+# 的两个面，挤在一格里不损失信息。
+BAN_WIDTHS = [37, 51, 140, 207, 58, 48, 86, 66, 131, 131, 101]
 SUG_WIDTHS = [37, 138, 69, 150, 122, 64, 53, 184, 129]
 COL_SUG_CHECK = 0
 COL_SUG_LEVEL = 2
@@ -791,6 +797,15 @@ class BansPage(QWidget):
         except Exception:
             log.exception("加载生效中的封禁失败（建议表按钮将按「未封禁」渲染）")
             self._banned = {}
+        # 已经封掉的 IP 不再出现在「待确认的封禁建议」里（2026-10-22 用户反馈）。
+        # 建议表的语义是「等你拿主意」，而这类 IP 的主意已经拿完了 —— 留着只会
+        # 让人再点一次「确认封禁」，然后被告知「该 IP 已在封禁中」。
+        # 隐藏条数要说出来：静默少几行，用户会以为建议丢了。
+        self._sug_hidden = 0
+        if self._banned:
+            before = len(rows)
+            rows = [r for r in rows if str(r.get("ip") or "") not in self._banned]
+            self._sug_hidden = before - len(rows)
         # 排序状态跨刷新保留：用户按评分降序看建议，封完一条回来还想是降序
         self._sug_rows_src = rows
         self._sug_rows = self.sug_sort.apply(rows)
@@ -810,10 +825,16 @@ class BansPage(QWidget):
         # 合并后「27 条」变成「1 项」：标题要把两个数都说出来，否则用户会以为
         # 建议被吞了 26 条
         total_events = sum(int(r.get("group_count") or 1) for r in rows)
+        # 已封禁的 IP 不进这张表（见 _load_suggestions），但**必须**把「还藏着
+        # N 项」写出来：平白少几行，用户第一反应是「建议被吞了」。
+        hidden = int(getattr(self, "_sug_hidden", 0) or 0)
+        tail = f"，另有 {hidden} 项已封禁未显示" if hidden else ""
         if total_events != len(rows):
-            self.sug_title.setText(f"待确认的封禁建议（{len(rows)} 项 / {total_events} 条事件）")
+            self.sug_title.setText(
+                f"待确认的封禁建议（{len(rows)} 项 / {total_events} 条事件{tail}）"
+            )
         else:
-            self.sug_title.setText(f"待确认的封禁建议（{len(rows)}）")
+            self.sug_title.setText(f"待确认的封禁建议（{len(rows)}{tail}）")
 
         empty = not rows
         self.sug_empty.setVisible(empty)
@@ -1194,8 +1215,20 @@ class BansPage(QWidget):
                 self.table.setItem(
                     i, 5, make_item(b.risk_score, align=Qt.AlignmentFlag.AlignCenter, mono=True)
                 )
+                # 拦截次数跟在状态后面：封了还在撞的 IP 一眼能看出来
+                # （例：已封禁 ×7）。完整说明进 tooltip（见 BanRecord.hit_hint）
+                status_text = b.status_label
+                if b.hit_label:
+                    status_text = f"{b.status_label} {b.hit_label}"
                 self.table.setItem(
-                    i, 6, make_item(b.status_label, status_color, Qt.AlignmentFlag.AlignCenter)
+                    i,
+                    6,
+                    make_item(
+                        status_text,
+                        status_color,
+                        Qt.AlignmentFlag.AlignCenter,
+                        tip=b.hit_hint if b.hit_label else b.status_label,
+                    ),
                 )
                 self.table.setItem(
                     i,
@@ -1212,7 +1245,13 @@ class BansPage(QWidget):
             self.ban_sel.end_render()
             self.table.setUpdatesEnabled(True)
 
-        self.lbl_info.setText(f"共 {len(rows)} 条 · 当前生效 {count_active_bans()} 条")
+        # 累计拦截次数：已封禁的重复命中不再弹窗，这个数字是它们唯一的去处 ——
+        # 「这堵墙到底挡了多少次」必须能在这里看到，否则静默就变成了「什么都不说」
+        hits = sum_ban_hits()
+        text = f"共 {len(rows)} 条 · 当前生效 {count_active_bans()} 条"
+        if hits:
+            text += f" · 封禁期间累计拦截 {hits} 次"
+        self.lbl_info.setText(text)
 
     def _ban_spec(self, row: int) -> Optional[RowAction]:
         """封禁记录表操作列：「解封」只在生效中的记录上可点"""

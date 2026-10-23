@@ -84,6 +84,8 @@ ACTION_BAN_EXPIRE = "ban.expire"  # 到期自动解封
 ACTION_BAN_RECONCILE = "ban.reconcile"  # 与防火墙对账修正
 ACTION_BAN_RECOVER = "ban.recover"  # 残留 pending 记录收敛（启动时）
 ACTION_BAN_DELETE = "ban.delete"  # 删除封禁记录
+#: 惯犯升级：已封禁 IP 反复访问到阈值 → 列入黑名单（永久封禁）
+ACTION_BAN_ESCALATE = "ban.escalate"
 ACTION_EVENT_CONFIRM = "event.confirm"  # 确认风险事件
 ACTION_EVENT_IGNORE = "event.ignore"  # 忽略风险事件
 ACTION_EVENT_DELETE = "event.delete"  # 删除风险事件
@@ -108,6 +110,7 @@ ACTION_LABELS: Dict[str, str] = {
     ACTION_BAN_RECONCILE: "防火墙对账",
     ACTION_BAN_RECOVER: "残留记录收敛",
     ACTION_BAN_DELETE: "删除封禁记录",
+    ACTION_BAN_ESCALATE: "封禁·升级黑名单",
     ACTION_EVENT_CONFIRM: "确认事件",
     ACTION_EVENT_IGNORE: "忽略事件",
     ACTION_EVENT_DELETE: "删除事件",

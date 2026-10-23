@@ -51,6 +51,7 @@ class BatchWriter:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self.written = 0
+        self.hits = 0
         self.dropped = 0
         self.errors = 0
         self.batches = 0
@@ -87,6 +88,19 @@ class BatchWriter:
         """一条记录 + 它的风险事件（同一事务内插入并关联 access_id）"""
         return self.submit("risk", (rec, result))
 
+    def submit_hit(self, ip: str, ts: Optional[int] = None) -> bool:
+        """
+        已封禁 IP 又命中一次 → 累加封禁记录的拦截次数。
+
+        为什么要进队列而不是就地写库：这条路径在攻击期每秒几十次，而
+        「新连接 + commit + close」在 SQLite 上单次 170ms（关闭时触发 WAL
+        checkpoint），长连接只要 2ms。见 `database.bump_ban_hits_sql` 的说明。
+
+        计数是**幂等增量**，所以这里允许丢（队列满时 submit 会返回 False）：
+        少记几次不影响「这个 IP 是惯犯」的判断，但绝不能因此堵住采集线程。
+        """
+        return self.submit("hit", (ip, ts))
+
     def submit(self, kind: str, payload: Any) -> bool:
         try:
             self._q.put_nowait((kind, payload))
@@ -106,6 +120,7 @@ class BatchWriter:
         with self._lock:
             return {
                 "written": self.written,
+                "hits": self.hits,
                 "dropped": self.dropped,
                 "errors": self.errors,
                 "batches": self.batches,
@@ -174,6 +189,7 @@ class BatchWriter:
         try:
             conn.execute("BEGIN")
             n_access = 0
+            n_hit = 0
             for kind, payload in items:
                 if kind == "access":
                     database.insert_access_log_sql(conn, payload)
@@ -183,9 +199,15 @@ class BatchWriter:
                     access_id = database.insert_access_log_sql(conn, rec)
                     database.insert_risk_event_sql(conn, rec, result, access_id)
                     n_access += 1
+                elif kind == "hit":
+                    # 拦截次数的累加：同一条语句、同一个事务，不额外 fsync
+                    ip, ts = payload
+                    database.bump_ban_hits_sql(conn, ip, ts)
+                    n_hit += 1
             conn.commit()  # ← 每批一次 fsync，这就是 2000 倍差距的来源
             with self._lock:
                 self.written += n_access
+                self.hits += n_hit
                 self.batches += 1
         except Exception:
             with contextlib.suppress(Exception):

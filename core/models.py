@@ -348,6 +348,12 @@ class BanRecord:
     #: 谁解封的（v2 迁移加的列，长期为空是因为一直没有写入点；现在由审计
     #: 埋点统一填，口径见 app.audit.ACTOR_*）
     unblocked_by: str = ""
+    #: 本次封禁期间又拦下该 IP 的次数（v5 迁移加的列）。
+    #: 它回答的是「封了还在撞吗、撞了几次」—— 达到阈值就要升级成黑名单，
+    #: 所以必须落库：进程一重启内存计数就归零，升级判断会永远差一口气。
+    hit_count: int = 0
+    #: 最近一次被拦下的时刻（epoch 毫秒）
+    last_hit_at: Optional[int] = None
 
     @property
     def status_label(self) -> str:
@@ -386,6 +392,27 @@ class BanRecord:
         if not self.expire_at:
             return "永久"
         return ms_to_min(self.expire_at)
+
+    @property
+    def hit_label(self) -> str:
+        """表格里跟在状态后面的拦截次数（`×3`），0 次返回空串。
+
+        用 `×N` 而不是「拦截 3 次」：封禁记录表只有 1097px 的视口，
+        每加一个字都要从「原因」列身上扣（见 gui/page_bans.py 的列宽注释）。
+        `×N` 在本项目里已经是「同一件事重复 N 次」的既定写法
+        （封禁建议的合并行就标 ×N），不另造一套。
+        """
+        n = int(self.hit_count or 0)
+        return f"×{n}" if n > 0 else ""
+
+    @property
+    def hit_hint(self) -> str:
+        """拦截次数的 tooltip：把 `×3` 说明白，并带上最近一次的时间"""
+        n = int(self.hit_count or 0)
+        if n <= 0:
+            return "封禁期间没有再拦到该 IP 的访问"
+        tail = f"，最近一次 {ms_to_str(self.last_hit_at)}" if self.last_hit_at else ""
+        return f"封禁期间又拦下该 IP {n} 次访问{tail}"
 
     @property
     def created_min(self) -> str:

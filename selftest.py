@@ -175,11 +175,73 @@ win.page_bans.refresh()
 check(
     "风险事件页", win.page_events.table.rowCount() >= 1, f"行数={win.page_events.table.rowCount()}"
 )
+
+# ── 封禁建议页 ──
+# 这里**不能**直接断言「行数 ≥ 1」：真实库里有没有待处理的高危事件取决于
+# 这台机器实际被扫过没有。原来的断言能过只是因为库里恰好有历史数据。
+# 更关键的是 2026-10-22 之后建议表会**主动隐藏已封禁的 IP** ——
+# 历史数据偏偏就是「已经封掉的那个扫描器」，于是这一项从「稳过」变成「看运气」。
+# 现在改成三条与环境无关的断言：
+#   ① 建议表里不许出现已封禁的 IP（这是新需求本身）；
+#   ② 渲染行数与数据源一致（渲染没吞行）；
+#   ③ 有候选时必须有行（表不是恒空）。
+# 为了让 ③ 有东西可验：一条可展示的候选都没有时先造一条自检样本，
+# 检查完立刻标成已忽略，不把假数据留在用户的待办列表里
+# （自检本来就会往真实库写访问记录）。
+_selftest_event = 0
+_sug_tbl = win.page_bans.sug_table
+if _sug_tbl.rowCount() == 0:
+    from core.database import insert_risk_event
+    from core.models import RiskResult
+
+    _selftest_event = insert_risk_event(
+        AccessRecord(
+            ip="203.0.113.250",
+            local_port=62222,
+            protocol="tcp",
+            method="GET",
+            path="/selftest",
+            status_code=403,
+            user_agent="PortGuard-selftest",
+            tags={"channel": "selftest"},
+        ),
+        RiskResult(
+            score=90,
+            level="critical",
+            matched_rules=["selftest"],
+            suggest_ban=True,
+            reason="自检样本",
+        ),
+    )
+    win.page_bans.refresh()
+
+from core.database import active_ban_ip_map
+
+_sug_n = _sug_tbl.rowCount()
+_banned_ips = set(active_ban_ip_map())
+_sug_ips = set()
+for _i in range(_sug_n):
+    _cell = _sug_tbl.item(_i, 3)  # 第 3 列是 IP
+    if _cell is not None:
+        _sug_ips.add(_cell.text())
 check(
-    "封禁建议页",
-    win.page_bans.sug_table.rowCount() >= 1,
-    f"行数={win.page_bans.sug_table.rowCount()}",
+    "封禁建议页不显示已封禁 IP",
+    not (_sug_ips & _banned_ips),
+    f"行数={_sug_n} 已隐藏={win.page_bans._sug_hidden} 封禁中={sorted(_sug_ips & _banned_ips)}",
 )
+check(
+    "封禁建议页渲染与数据一致",
+    _sug_n == len(win.page_bans._sug_rows),
+    f"表格={_sug_n} 数据={len(win.page_bans._sug_rows)}",
+)
+check("封禁建议页有可展示的候选", _sug_n >= 1, f"行数={_sug_n}")
+
+if _selftest_event:
+    from core.database import delete_risk_events
+
+    # 直接删掉而不是标「已忽略」：这条记录是自检造出来的假数据，
+    # 标成已忽略还会留在风险事件页里，用户会去查一个根本不存在的访问。
+    delete_risk_events([_selftest_event])
 
 # 历史访问页的「清空列表」：按钮存在，且可用性跟着「有没有记录」走
 # （一条都没有时置灰，否则用户点下去只会弹一个「没有可清空」的空框）

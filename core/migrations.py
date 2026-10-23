@@ -17,7 +17,7 @@ from core.logger import get_logger
 log = get_logger(__name__)
 
 # 当前程序支持的 schema 版本（每加一版 +1 并在下方登记 DDL）
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # version -> DDL 列表（从上一版升级到该版需要执行的语句）
 MIGRATIONS: Dict[int, List[str]] = {
@@ -80,6 +80,20 @@ MIGRATIONS: Dict[int, List[str]] = {
         WHERE disposition IS NULL OR disposition = ''
         """,
         "CREATE INDEX IF NOT EXISTS idx_event_disposition ON risk_event(disposition)",
+    ],
+    # v5：ban_list 补「拦截次数」两列（2026-10-22 用户反馈）
+    #
+    # 背景：已封禁的 IP 会继续撞防火墙，原来每次都按「新风险」弹一次窗 ——
+    # 用户在正常办公时被反复打断，而这些弹窗说的都是同一句「已拦截」。
+    # 改成静默之后，这些重复命中必须有地方沉淀，否则「到底拦了多少次」永远
+    # 查不到，也没法判断这个 IP 该不该升级成黑名单。
+    #   hit_count   —— 该 IP 在**本次封禁期间**被拦下的次数（解封后重新计数）
+    #   last_hit_at —— 最近一次被拦下的时刻（epoch 毫秒）
+    # 两者都记在封禁记录上而不是另开一张表：它回答的是「这条封禁拦得值不值」，
+    # 属于这条记录本身的属性；单开表就要每次 join，而界面是每行都要显示。
+    5: [
+        "ALTER TABLE ban_list ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE ban_list ADD COLUMN last_hit_at INTEGER",
     ],
 }
 

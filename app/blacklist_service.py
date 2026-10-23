@@ -19,6 +19,8 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from app import audit, ban_service
 from core import firewall
+from core import settings as cfg
+from core.config import DEFAULT_REPEAT_BLACKLIST_HITS
 from core.database import find_active_ban_by_ip
 
 log = logging.getLogger("portguard.blacklist")
@@ -148,6 +150,141 @@ def ensure_enforced(limit: int = 100) -> Dict[str, Any]:
         return res
     log.info("启动补封：黑名单 %d 条中 %d 条无活动封禁，开始补齐", len(entries), len(pending))
     return apply_changes(pending[:limit], [], actor=audit.ACTOR_SYSTEM)
+
+
+def escalate_repeat_offender(
+    ip: str, ban: Optional[Any] = None, hits: int = 0, actor: Optional[str] = None
+) -> bool:
+    """
+    已封禁 IP 反复访问到阈值 → 写进黑名单，并把这条封禁改成**永久**。
+
+    为什么不是「再封一次」：封禁本来就有到期时间，攻击者等它到期就能再来一轮，
+    于是「封 → 到期 → 再来 → 再封」永远循环。黑名单语义是**永不信任**，
+    正好对上「封了还在撞」这种最明确的恶意信号（2026-10-22 用户提出）。
+
+    做三件事，缺一不可：
+    1. 写名单文件（`rule_engine.blacklist`）—— 之后每次访问按 100 分算，
+       而且**重启后仍然生效**（这是它区别于一次封禁的地方）；
+    2. 把当前这条封禁改成永久 + 来源标成 `blacklist`（有 active 记录时）。
+       不新建规则的理由：规则已经在防火墙里生效了，重建反而会留下两条规则
+       （旧的那条没人认领，见 ban_service.reenforce_all 的历史教训）；
+       改成永久只是让到期巡检**不再删它**，代价最小。
+       封禁记录不是 active（pending / failed，规则没建成）时才走
+       `apply_changes` 真去建一条；
+    3. 审计 + 一次托盘提示。这是**程序自己改了安全策略**，必须留痕，
+       也必须让人知道 —— 但只提示一次，用 tray 而不是弹窗。
+
+    返回是否真的执行了升级（已在黑名单 / 未达阈值 / 关闭开关 都返回 False）。
+    """
+    ip = (ip or "").strip()
+    if not ip:
+        return False
+    try:
+        if not cfg.get_bool("repeat_blacklist_enabled", True):
+            return False
+        need = max(1, cfg.get_int("repeat_blacklist_hits", DEFAULT_REPEAT_BLACKLIST_HITS))
+    except Exception:
+        log.exception("读取惯犯升级设置失败 ip=%s，本次不升级", ip)
+        return False
+    if hits < need:
+        return False
+
+    from core.rule_engine import get_engine
+
+    engine = get_engine()
+    if ip in engine.blacklist:
+        return False  # 已经是黑名单，别重复提示
+
+    who = actor or audit.ACTOR_SYSTEM
+    before = {
+        "ip": ip,
+        "hits": hits,
+        "threshold": need,
+        "ban_id": getattr(ban, "id", None),
+        "status": getattr(ban, "status", ""),
+        "duration_sec": getattr(ban, "duration_sec", None),
+    }
+
+    try:
+        engine.blacklist.add(ip)
+        engine.save_lists()
+    except Exception:
+        log.exception("写入黑名单文件失败 ip=%s", ip)
+        audit.record(
+            audit.ACTION_BAN_ESCALATE,
+            actor=who,
+            target_type="ip",
+            target_id=ip,
+            summary=f"惯犯升级失败：写入黑名单文件出错（ip={ip}）",
+            before=before,
+            result=audit.RESULT_FAIL,
+            detail="名单未写入，本次不升级封禁",
+        )
+        return False
+
+    permanent = False
+    note = ""
+    try:
+        if ban is not None and getattr(ban, "id", None) and getattr(ban, "status", "") == "active":
+            # 规则已在防火墙里：改成永久即可，不动规则本身
+            from core.database import update_ban
+
+            update_ban(
+                int(ban.id),
+                duration_sec=PERMANENT,
+                expire_at=None,
+                source=SOURCE_BLACKLIST,
+            )
+            permanent = True
+            note = f"封禁记录 #{ban.id} 已改为永久"
+        elif firewall.is_admin():
+            res = apply_changes([ip], [], actor=who)
+            if res.get("banned"):
+                permanent = True
+                note = "已写入永久防火墙规则"
+            elif res.get("already"):
+                permanent = True
+                note = "已有生效封禁，未重复建规则"
+            else:
+                failed = res.get("failed") or []
+                note = f"建规则失败：{failed[0][1]}" if failed else "建规则未完成"
+        else:
+            note = "已写入名单，但当前无管理员权限，防火墙规则待下次以管理员运行补齐"
+    except Exception:
+        log.exception("惯犯升级：改为永久封禁失败 ip=%s", ip)
+        note = "改为永久封禁失败"
+
+    audit.record(
+        audit.ACTION_BAN_ESCALATE,
+        actor=who,
+        target_type="ban",
+        target_id=getattr(ban, "id", None),
+        summary=f"惯犯升级：{ip} 封禁期间又命中 {hits} 次，已列入黑名单（永久）",
+        before=before,
+        after={"blacklisted": True, "permanent": permanent, "note": note},
+        result=audit.RESULT_OK if permanent else audit.RESULT_SKIP,
+        detail=note,
+    )
+    log.warning("惯犯升级黑名单：%s（封禁期间命中 %d 次，%s）", ip, hits, note or "-")
+
+    # 提示一次：程序自己收紧了安全策略，不说就是「偷偷改了配置」。
+    # 用 tray 而不是弹窗 —— 用户明确抱怨过弹窗打断操作（2026-10-22）。
+    from core.event_bus import bus
+
+    bus.emit_alert(
+        {
+            "ip": ip,
+            "level": "critical",
+            "score": 100,
+            "reason": f"封禁期间反复访问 {hits} 次，已达阈值 {need}",
+            "geo": "",
+            "local_port": "",
+            "disposition": "block",
+            "escalated": True,
+            "block_hits": hits,
+        }
+    )
+    return True
 
 
 def format_summary(res: Dict[str, Any]) -> str:

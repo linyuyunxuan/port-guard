@@ -242,6 +242,14 @@ DEFAULT_RISK_RETENTION_DAYS = 90
 DEFAULT_BAN_RETENTION_DAYS = 180
 DEFAULT_AUDIT_RETENTION_DAYS = 180
 
+#: 自动清理的保留期预设（天）。用户要的是「1 天 / 3 天 / 7 天」这种一句话
+#: 就能选完的档位，而不是在四个 SpinBox 里逐个填 —— 预设一次写入四张表。
+#: 「自定义」= 保留下方四项各自的取值，由用户自己调。
+RETENTION_PRESETS: list = [1, 3, 7, 30, 90, 180]
+
+#: 已封禁 IP 反复访问多少次后直接列入黑名单（永久）
+DEFAULT_REPEAT_BLACKLIST_HITS = 5
+
 
 # ── 默认设置（写入 settings 表）──
 DEFAULT_SETTINGS = {
@@ -260,6 +268,12 @@ DEFAULT_SETTINGS = {
     "ban_escalation_enabled": "0",  # 1=同一 IP 再次被封时按倍数加长
     "ban_escalation_factor": str(DEFAULT_ESCALATION_FACTOR),  # 每次递增的倍数
     "ban_escalation_max_sec": str(DEFAULT_ESCALATION_MAX_SEC),  # 递增封顶（秒）
+    # ── 惯犯自动加固：已封禁 IP 反复访问 → 直接列入黑名单（永久）──
+    # 只封 1 小时的 IP 到期后还能再来，而「封了还在撞」本身就是最明确的恶意信号。
+    # 达到阈值后把它写进黑名单（永久封禁 + 之后每次访问都按 100 分算），
+    # 彻底省掉「到期 → 重来 → 再封」的循环。动作会自动审计，并提示一次。
+    "repeat_blacklist_enabled": "1",
+    "repeat_blacklist_hits": str(DEFAULT_REPEAT_BLACKLIST_HITS),
     # ── 最大封禁时长（硬上限，秒）──
     # 防火墙规则本身没有到期时间，到期完全靠程序内巡检删规则。程序长期不在时，
     # 「封一年」就等于永久封掉一个可能无辜的地址。所以所有**有限时长**都会被截断到
@@ -270,6 +284,12 @@ DEFAULT_SETTINGS = {
     "alert_sound": "1",
     "alert_popup_level": LEVEL_CRITICAL,
     "alert_merge_sec": "60",  # 同 IP 告警合并窗口
+    # ── 已拦截（该 IP 已在封禁名单中）的重复命中 ──
+    # 2026-10-22 用户反馈：「已拦截了还弹窗提示或者右下角窗口提示，影响电脑操作」。
+    # 防火墙规则已经生效，重复命中只是**同一件事又发生了一次**，不是新待办 ——
+    # 这时候弹窗除了抢走焦点没有任何信息量。默认改为静默：只累加拦截次数
+    # （ban_list.hit_count），不弹窗、不气泡、不响铃。
+    "alert_block_silent": "1",
     # ── 外部告警推送（Webhook，默认关闭）──
     # 地址里通常带机器人 key，日志只记录 scheme://host（见 core/alert_webhook.py）
     "alert_webhook_enabled": "0",
@@ -281,6 +301,7 @@ DEFAULT_SETTINGS = {
     # 开启后每次登录都会弹一次 UAC，得由用户自己权衡（7×24 服务器通常要开）。
     "autostart_enabled": "0",
     # 数据
+    "maintenance_enabled": "1",  # 1=每天到点自动清理（关掉就只保留手动入口）
     "log_retention_days": str(DEFAULT_LOG_RETENTION_DAYS),  # 访问记录 + 日志文件的保留天数
     # ── 其余三张表各自的保留期（见 DEFAULT_*_RETENTION_DAYS 说明）──
     "risk_retention_days": str(DEFAULT_RISK_RETENTION_DAYS),  # risk_event

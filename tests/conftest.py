@@ -56,7 +56,7 @@ def fresh_db(isolated_env, request):
     """
     import time
 
-    from core import database, db_writer, settings
+    from core import database, db_writer, pipeline, settings
 
     def _wipe():
         db = config.db_path()
@@ -80,6 +80,10 @@ def fresh_db(isolated_env, request):
                     "十有八九还有后台写入线程握着它的句柄 —— 见护栏报错。"
                 )
         database._initialized = False
+        # 「拦截次数」是**进程内**计数，key 是封禁记录 id；库一删，id 会从 1
+        # 重新开始，不清就会把上一个用例的次数算到下一个用例的同 id 记录上
+        # （表现为「刚封的 IP 一命中就直接升黑名单」这种莫名其妙的红）。
+        pipeline.reset_block_hits()
         settings.invalidate()
 
     def _stop_writers(writers):

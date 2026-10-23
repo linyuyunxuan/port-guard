@@ -292,15 +292,15 @@ def test_list_audit_actors_dedups(as_user):
 # ═══════════════════ 迁移 / 展示 ═══════════════════
 
 
-def test_schema_version_is_four():
+def test_schema_version_is_five():
     """版本闸门：升版时必须把这里的期望值一起改掉。
 
-    变异：把 SCHEMA_VERSION 改回 3 → 本例变红（v4 的
-    `risk_event.disposition` 不会被执行，处置结论永远落不了库）。
+    变异：把 SCHEMA_VERSION 改回 4 → 本例变红（v5 的
+    `ban_list.hit_count` / `last_hit_at` 不会被执行，拦截次数永远落不了库）。
     """
     from core.migrations import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
 
 
 def test_v3_creates_audit_table_and_covering_index():

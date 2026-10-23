@@ -43,10 +43,11 @@ class Alerter:
                 "sound": cfg.get_bool("alert_sound", True),
                 "popup_level": cfg.get("alert_popup_level", "critical") or "none",
                 "merge_sec": cfg.get_int("alert_merge_sec", 60),
+                "block_silent": cfg.get_bool("alert_block_silent", True),
             }
         except Exception:
             log.exception("读取告警设置失败，使用默认值")
-            return {"sound": True, "popup_level": "critical", "merge_sec": 60}
+            return {"sound": True, "popup_level": "critical", "merge_sec": 60, "block_silent": True}
 
     def set_tray(self, tray) -> None:
         self.tray = tray
@@ -58,11 +59,22 @@ class Alerter:
     def notify(self, alert: Dict) -> bool:
         """
         alert: {ip, level, score, reason, geo, local_port, disposition}
-        返回是否真正弹出了提醒（被节流则返回 False）
+               blocked_again —— 该 IP 本来就在封禁中，这是重复命中
+               block_hits   —— 封禁期间累计被拦下的次数
+               escalated    —— 本次触发了「惯犯升级黑名单」
+        返回是否真正弹出了提醒（被静默或节流则返回 False）
         """
         s = self._settings()
         ip = alert.get("ip", "")
         now = time.time()
+
+        # ── 静默：封禁期间的重复命中 ──
+        # 用户原话（2026-10-22）：「已拦截了还弹窗提示或者右下角窗口提示，
+        # 影响电脑操作」。防火墙规则已经生效，重复命中说的还是同一句「已拦截」，
+        # 除了抢走焦点没有任何新信息 —— 改为只累加次数（pipeline 已写库），
+        # 什么都不弹。真正的「状态变了」（升级黑名单）走下面的 escalated 分支。
+        if s["block_silent"] and alert.get("blocked_again") and not alert.get("escalated"):
+            return False
 
         # 同 IP 合并节流
         last = self._last_alert.get(ip, 0)
@@ -73,8 +85,13 @@ class Alerter:
 
         level = alert.get("level", "medium")
         disposition = str(alert.get("disposition") or "")
-        title = self._title(level, disposition)
-        body = self._body(alert)
+        escalated = bool(alert.get("escalated"))
+        if escalated:
+            title = self._escalation_title(ip, alert)
+            body = self._escalation_body(alert)
+        else:
+            title = self._title(level, disposition)
+            body = self._body(alert)
 
         if self.tray is not None:
             try:
@@ -82,7 +99,11 @@ class Alerter:
 
                 # 「已拦截」用 Information 而不是警告图标：它已经不是待办事项，
                 # 用感叹号催用户去处理，反而让人以为还有事没做。
-                if disposition == DISPOSITION_BLOCK:
+                if escalated:
+                    # 升级黑名单是「程序自己收紧了安全策略」：图标用 Critical，
+                    # 让人一眼看出这不是一次普通的拦截
+                    icon = QSystemTrayIcon.MessageIcon.Critical
+                elif disposition == DISPOSITION_BLOCK:
                     icon = QSystemTrayIcon.MessageIcon.Information
                 elif level in ("critical", "high"):
                     icon = QSystemTrayIcon.MessageIcon.Critical
@@ -92,12 +113,19 @@ class Alerter:
             except Exception:
                 log.exception("托盘气泡告警失败")
 
-        if s["sound"]:
+        # 升级提示刻意不响铃、不弹窗：它一天也未必有一次，但弹窗抢焦点
+        # 打断操作的代价是一样的（2026-10-22 用户反馈）。气泡 + 审计足够。
+        if s["sound"] and not escalated:
             self._beep(level, disposition)
 
         popup_level = s.get("popup_level") or ""
         # 注意 "none" 必须显式排除：它会被 _rank 当成 0，导致「不弹窗」反而每次都弹
-        if popup_level and popup_level != "none" and self._rank(level) >= self._rank(popup_level):
+        if (
+            popup_level
+            and popup_level != "none"
+            and not escalated
+            and self._rank(level) >= self._rank(popup_level)
+        ):
             self._popup(title, body, disposition)
 
         # 外部推送（可选）：气泡 + 声音 + 弹窗都要求「有人正看着这台机器」，
@@ -173,6 +201,26 @@ class Alerter:
         }.get(level, "PortGuard 告警")
 
     @staticmethod
+    def _escalation_title(ip: str, alert: Dict) -> str:
+        """「已列入黑名单」的标题：说的是**策略变了**，不是又一次拦截"""
+        return f"⛔ PortGuard 已列入黑名单 · {ip}"
+
+    @staticmethod
+    def _escalation_body(alert: Dict) -> str:
+        hits = int(alert.get("block_hits") or 0)
+        lines = [
+            f"来源 IP：{alert.get('ip', '-')}",
+            f"归属地：{alert.get('geo') or '未知'}",
+            f"封禁期间又访问：{hits} 次",
+            "处置结果：已列入黑名单（永久封禁）",
+            "　　说明：封了还在撞，已按惯犯处理，到期不再自动解封",
+        ]
+        reason = alert.get("reason")
+        if reason:
+            lines.append(f"命中：{reason}")
+        return "\n".join(lines)
+
+    @staticmethod
     def _body(alert: Dict) -> str:
         lines = [
             f"来源 IP：{alert.get('ip', '-')}",
@@ -186,6 +234,11 @@ class Alerter:
             hint = DISPOSITION_HINT.get(disposition)
             if hint:
                 lines.append(f"　　说明：{hint}")
+        hits = int(alert.get("block_hits") or 0)
+        if hits:
+            # 关掉「已拦截静默」时才会走到这里。次数必须说出来 ——
+            # 否则这条弹窗和上一次长得一模一样，等于白打扰一次。
+            lines.append(f"　　已拦截次数：{hits} 次")
         reason = alert.get("reason")
         if reason:
             lines.append(f"命中：{reason}")

@@ -15,11 +15,12 @@ PortGuard — 记录处理流水线（本机采集双通道共用）
 本模块不依赖 Qt，可单测。
 """
 
+import threading
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 from core import settings as cfg
-from core.database import find_active_ban_by_ip
+from core.database import bump_ban_hits, find_active_ban_by_ip
 from core.db_writer import get_writer
 from core.event_bus import bus
 from core.geo_locator import get_locator
@@ -67,6 +68,98 @@ def _resolve_ban_duration(ip: str, result: RiskResult) -> int:
         ip,
     )
     return decision.seconds
+
+
+def _maybe_escalate(ip: str, ban: Optional[BanRecord], hits: int) -> None:
+    """
+    已封禁 IP 反复访问到阈值 → 直接列入黑名单（永久）。
+
+    为什么放在 pipeline 里调：这是**唯一知道「这次命中发生在封禁期间」**的地方，
+    也是唯一已经把次数累好的地方。放到定时器里轮询就会丢掉「刚够阈值」这个时刻。
+
+    懒导入 app：core 不在模块级依赖 app（见 `_resolve_ban_duration` 的同款说明）。
+    整段包在 try 里 —— 升级失败不该影响这条访问本身的处置结论。
+    """
+    try:
+        from app.blacklist_service import escalate_repeat_offender
+
+        if escalate_repeat_offender(ip, ban, hits):
+            forget_block_hits(ban)
+    except Exception:
+        log.exception("惯犯升级黑名单失败 ip=%s", ip)
+
+
+# ── 拦截次数（内存计数 + 异步落库）──
+#
+# 只统计「封禁期间又被拦下」的命中，key 用**封禁记录 id**：同一个 IP 解封后
+# 再被封，是一条新记录，次数应该从 0 开始；沿用 IP 当 key 会让「上个月那轮
+# 封禁期间拦了 5 次」把这次直接顶到阈值，刚封就升黑名单。
+_hit_counts: Dict[object, int] = {}
+_hit_lock = threading.Lock()
+#: 硬上限。只会为「封禁中的 IP」计一条，正常几百条封顶；但规则/批量封禁
+#: 可能一次封上千个，这里给个上限，超了整体清空 —— 计数会退回库里的那份，
+#: 只是暂时少算，绝不会算错总量（宁可重算，不可撑爆内存）。
+_HIT_COUNT_CAP = 4096
+
+
+def count_block_hit(ban: BanRecord, ts: Optional[int] = None) -> int:
+    """
+    记一次「封禁期间又拦下这个 IP」，返回该封禁记录累计的拦截次数。
+
+    **为什么计数在内存、落库异步**（这条路径的性能背景很重要）：
+      · 「新连接 + UPDATE + commit + close」在本机实测 **170ms** —— 慢在
+        close：SQLite 关掉最后一个连接时会尝试 WAL checkpoint；同样一条
+        UPDATE 走长连接只要 **2ms**（差 85 倍）。
+      · 攻击期这条路径每秒几十次，同步写库会把采集线程堵死，直接漏采。
+      · 阈值判断又必须**立刻**拿到次数，不能等异步写完再回查。
+    于是：内存记数决定「要不要升级」，异步落库只为重启后还能回答
+    「拦了多少次」。落库失败不影响判断（计数只用于阈值，不能拖累主流程）。
+
+    起点取 `ban.hit_count`（库里已持久化的次数），进程重启后不清零 ——
+    否则每次重启门槛都得重新爬，「惯犯」永远升不了级。
+    """
+    key: object = int(ban.id) if ban.id else (ban.ip or "")
+    with _hit_lock:
+        if key not in _hit_counts:
+            if len(_hit_counts) >= _HIT_COUNT_CAP:
+                _hit_counts.clear()
+            _hit_counts[key] = int(ban.hit_count or 0)
+        _hit_counts[key] += 1
+        n = _hit_counts[key]
+
+    try:
+        writer = get_writer()
+        submit = getattr(writer, "submit_hit", None)
+        if submit is not None:
+            submit(ban.ip, ts)
+        else:
+            # 替身写入器（测试里的 _Sink 之类）没有这个方法：同步补写一次，
+            # 保证「读库时次数是准的」。线上写入器永远走上面那条异步路径。
+            bump_ban_hits(ban.ip, ts)
+    except Exception:
+        log.exception("拦截次数落库失败 ip=%s（内存计数不受影响）", ban.ip)
+    return n
+
+
+def forget_block_hits(ban: Optional[BanRecord]) -> None:
+    """清掉某条封禁记录的内存计数（升级黑名单后调用，别让字典只增不减）"""
+    if ban is None:
+        return
+    key: object = int(ban.id) if ban.id else (ban.ip or "")
+    with _hit_lock:
+        _hit_counts.pop(key, None)
+
+
+def reset_block_hits() -> None:
+    """
+    清空全部内存计数。
+
+    **只给测试和「整库被替换」的场景用**（恢复备份后旧 id 会被复用，
+    不清会把上一份库的次数算到新库的同 id 记录上）。正常运行中调用不会算错，
+    只是让次数退回库里已持久化的那份（少算，不会多算）。
+    """
+    with _hit_lock:
+        _hit_counts.clear()
 
 
 def auto_ban_record(
@@ -239,6 +332,10 @@ def process_record(
     rec.matched_rules = result.matched_rules
     rec.suggest_ban = result.suggest_ban
 
+    # 「封禁期间的又一次命中」/ 累计拦截次数：见下方 3 处的注释
+    blocked_again = False
+    block_hits = 0
+
     # 3. 处置结论必须在**落库与告警之前**定下来，因为两者说的都是「最终结论」：
     #    落库存的是结论，弹窗显示的是结论。事后再改就得改两处，界面还可能先
     #    弹「仅提醒」再跳成「已拦截」—— 用户看不懂到底拦没拦。
@@ -285,6 +382,23 @@ def process_record(
         ):
             result.disposition = DISPOSITION_BLOCK
 
+        # ── 拦截次数与「惯犯升级」──
+        #
+        # 「已拦截」有两种来源，处理方式必须分开：
+        #   · 本来就封着（existing）—— 防火墙已经挡住了，这次命中只是**同一件事
+        #     又发生一次**。原来照样弹窗，用户被反复打断（2026-10-22 反馈）。
+        #     现在改为静默 + 累加次数，达到阈值再升级成黑名单。
+        #   · 本次刚封（auto_ban_record）—— 状态真的变了，值得通知一次。
+        #     这一次命中是「封禁的原因」，不是「封禁期间又拦下的一次」，
+        #     所以不计数（计数为 0 时界面不显示 ×N，语义正好对上）。
+        #
+        # 次数只在这里取一次，供后面两处使用（告警文案、升级判断），
+        # 不在告警分支里再查一遍库。
+        if result.disposition == DISPOSITION_BLOCK and existing is not None:
+            blocked_again = True
+            block_hits = count_block_hit(existing, int(time.time() * 1000))
+            _maybe_escalate(rec.ip, existing, block_hits)
+
     # 实时监控页直接读 rec.disposition（它不查库，也不需要知道具体封禁记录）
     rec.disposition = result.disposition
 
@@ -314,6 +428,10 @@ def process_record(
                     "local_port": rec.local_port,
                     # 弹窗/托盘气泡都靠这个字段回答「到底拦没拦」
                     "disposition": result.disposition,
+                    # 「该 IP 本来就封着，这是在封禁期间的又一次命中」：
+                    # 告警方据此保持静默，只累加次数（见 core.alerts.Alerter）
+                    "blocked_again": blocked_again,
+                    "block_hits": block_hits,
                 }
             )
 

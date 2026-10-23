@@ -129,9 +129,14 @@ def due_today() -> bool:
     执行时刻由设置 `maintenance_hour`（0-23，默认 3 点）决定，跨天自动重置。
     首次运行（从没清理过）不受时刻限制，立即跑一次，免得新装用户等一天。
 
+    总开关 `maintenance_enabled`（默认开）：关掉后只剩设置页的手动入口 ——
+    有人就是不想让程序在夜里动数据库，这个开关必须给。
+
     放在这里而不是界面层：逻辑不依赖 Qt，可以直接单测（原实现埋在 QTimer
     回调里，除了跑起来看日志没有别的验证办法）。
     """
+    if not cfg.get_bool("maintenance_enabled", True):
+        return False
     now = time.localtime()
     today = time.strftime("%Y-%m-%d", now)
     last = (cfg.get("maintenance_last_date", "") or "").strip()
@@ -141,6 +146,28 @@ def due_today() -> bool:
         return False
     cfg.set("maintenance_last_date", today)
     return True
+
+
+def apply_retention_preset(days: int) -> Dict[str, int]:
+    """
+    把「全部日志保留 N 天」一次写进四张表各自的设置项。
+
+    用户要的是「1 天 / 3 天 / 7 天」这种一句话选完的档位（2026-10-22），
+    而不是在四个 SpinBox 里逐个填 —— 但四张表的保留期**本质上是四个语义**
+    （见 core.config.DEFAULT_*_RETENTION_DAYS），所以预设只是「一次写入四项」，
+    底下那四项仍然是各自的真实取值，选「自定义」后依然可以分别调。
+
+    返回写入的四个值（供界面回显）。
+    """
+    days = max(1, int(days))
+    values: Dict[str, int] = {
+        "log_retention_days": days,
+        "risk_retention_days": days,
+        "ban_retention_days": days,
+        "audit_retention_days": days,
+    }
+    cfg.set_many(values)
+    return values
 
 
 def cleanup_log_files(days: int = 0) -> int:

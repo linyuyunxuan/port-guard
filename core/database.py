@@ -892,6 +892,8 @@ _BAN_UPDATABLE = {
     "expire_at",
     "error_msg",
     "unblocked_by",
+    "hit_count",
+    "last_hit_at",
 }
 
 
@@ -969,7 +971,85 @@ def _row_to_ban(r: sqlite3.Row) -> BanRecord:
         updated_at=r["updated_at"] or "",
         error_msg=r["error_msg"] or "",
         unblocked_by=(r["unblocked_by"] or "") if "unblocked_by" in keys else "",
+        # hit_count / last_hit_at 是 v5 迁移才加的列：老库或测试里手工建的
+        # 表可能没有，按列名判一次再取，不能让列表页为两列统计信息整个崩掉
+        hit_count=int(r["hit_count"] or 0) if "hit_count" in keys else 0,
+        last_hit_at=(r["last_hit_at"] if "last_hit_at" in keys else None),
     )
+
+
+def bump_ban_hits_sql(conn: sqlite3.Connection, ip: str, now: Optional[int] = None) -> int:
+    """
+    纯执行版本：给 active 封禁累计一次拦截次数，**不建连、不提交**，
+    由调用方（批量写入器）在自己的事务里提交。返回受影响行数。
+
+    ⚠️ 为什么必须有这个版本：`bump_ban_hits` 每次开一条新连接再 close，
+    而 SQLite 在**最后一个连接关闭时**会尝试一次 WAL checkpoint ——
+    本机实测「新连接 + UPDATE + commit + close」单次 **170ms**，
+    同一操作走长连接只要 **2ms**（差 85 倍）。已封禁 IP 反复访问正是
+    攻击期的高频路径，几十次/秒的 170ms 会让采集线程直接堵死。
+    所以热路径走批量写入器（单条长连接、每批一次 fsync）。
+    """
+    ts = now if now is not None else now_ms()
+    cur = conn.execute(
+        "UPDATE ban_list SET hit_count = COALESCE(hit_count, 0) + 1, last_hit_at = ? "
+        "WHERE ip = ? AND status = ?",
+        (ts, ip, STATUS_ACTIVE),
+    )
+    return cur.rowcount or 0
+
+
+def bump_ban_hits(ip: str, now: Optional[int] = None) -> Optional[int]:
+    """
+    给该 IP **当前生效中的**封禁记录累加一次拦截次数，返回累加后的次数。
+
+    语义边界（改之前先读完，这里最容易顺手写错）：
+    · **只打在 active 记录上**。已解封 / 已到期 / 失败的封禁再被命中，说明
+      防火墙那边根本没拦住，那是「没拦下来」而不是「拦下一次」，记进次数里
+      会让「拦了多少次」这个数字失真。
+    · **返回 None 表示「该 IP 当前没有生效中的封禁」**，不是出错。调用方据此
+      判断这是「重复命中」还是「首次拦截」。
+    · 查库异常时同样返回 None：计数只是统计，绝不能因为它失败而阻断告警
+      或封禁主流程（宁可少记一次，也不能把正在被扫的 IP 放过）。
+
+    ⚠️ 这是**同步版本**（自己建连 + 提交 + 关闭，本机实测约 170ms）。
+    只给测试 / 一次性脚本 / 需要立刻拿到次数的场景用；**线上热路径**
+    （`core.pipeline` 的每条重复命中）走 `bump_ban_hits_sql` + 批量写入器。
+    """
+    try:
+        conn = _connect()
+        try:
+            if not bump_ban_hits_sql(conn, ip, now):
+                return None
+            conn.commit()
+            row = conn.execute(
+                "SELECT hit_count FROM ban_list WHERE ip = ? AND status = ? ORDER BY id DESC LIMIT 1",
+                (ip, STATUS_ACTIVE),
+            ).fetchone()
+            return int(row["hit_count"] or 0) if row else None
+        finally:
+            conn.close()
+    except Exception:
+        # 列不存在（未迁移的老库）/ 库被占用：都只记日志，不向上抛
+        log.exception("累加拦截次数失败 ip=%s", ip)
+        return None
+
+
+def sum_ban_hits() -> int:
+    """全部**生效中**封禁累计拦下的次数（状态栏 / 封禁页汇总用）"""
+    try:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(hit_count), 0) s FROM ban_list WHERE status = ?",
+                (STATUS_ACTIVE,),
+            ).fetchone()
+            return int(row["s"] or 0)
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("统计累计拦截次数失败")
+        return 0
 
 
 def query_bans(limit: int = 1000, status: str = "", keyword: str = "") -> List[BanRecord]:

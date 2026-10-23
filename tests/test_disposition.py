@@ -381,6 +381,21 @@ def test_migration_v4_adds_and_backfills_disposition(isolated_env, tmp_path):
             )
             """
         )
+        # v3 时代的真实库里一定已经有 ban_list —— 这里也补一张**最小**表：
+        # 后面的 v5 迁移要给 ban_list 加列，缺表会撞在 `no such table` 上。
+        # 那是夹具不像真实老库，不是迁移写错了（真实路径上 init_db 的
+        # CREATE TABLE IF NOT EXISTS 永远先跑，表一定在）。
+        # 刻意**不带** hit_count / last_hit_at：带上就等于预先加好列，
+        # v5 的 ALTER 会被「duplicate column」静默跳过，栏板变成空转。
+        conn.execute(
+            """
+            CREATE TABLE ban_list (
+                id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip     TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+            )
+            """
+        )
         conn.execute(
             "INSERT INTO risk_event(ip, risk_score, risk_level, handled, event_ts)"
             " VALUES ('1.2.3.4', 90, 'critical', 0, 1)"

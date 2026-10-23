@@ -27,6 +27,7 @@ from core.config import (
     DEFAULT_ESCALATION_FACTOR,
     DEFAULT_ESCALATION_MAX_SEC,
     DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_REPEAT_BLACKLIST_HITS,
     DEFAULT_RISK_RETENTION_DAYS,
     LEVEL_CRITICAL,
     LEVEL_HIGH,
@@ -34,6 +35,7 @@ from core.config import (
     LEVEL_LOW,
     LEVEL_MEDIUM,
     MAX_BAN_DURATION_DEFAULT_SEC,
+    RETENTION_PRESETS,
     XDB_UPSTREAM,
     db_path,
     user_data_dir,
@@ -509,6 +511,25 @@ class SettingsPage(QWidget):
         ban.add("递增封顶", self.sp_esc_max)
         ban.add("最大封禁时长", self.sp_max_ban)
 
+        # ── 惯犯升级：已封禁 IP 反复访问 → 直接列入黑名单（永久）──
+        # 「封 1 小时 → 到期 → 再来 → 再封」是个无限循环，而「封了还在撞」
+        # 本身已经是最明确的恶意信号，不需要人来判断。
+        self.tg_escalate = ToggleSwitch(True)
+        self.sp_escalate_hits = QSpinBox()
+        self.sp_escalate_hits.setRange(1, 9999)
+        self.sp_escalate_hits.setValue(DEFAULT_REPEAT_BLACKLIST_HITS)
+        self.sp_escalate_hits.setSuffix(" 次")
+        self.sp_escalate_hits.setFixedWidth(120)
+        self.sp_escalate_hits.setToolTip(
+            "封禁期间累计被拦下多少次后列入黑名单。\n"
+            "升级后该 IP 变为永久封禁，并在黑名单里留档（重启仍然生效）。"
+        )
+        ban.add(
+            "惯犯升级黑名单",
+            _row_widget(self.tg_escalate, self._sw_label("封了还在撞就永久封"), spacing=10),
+        )
+        ban.add("升级阈值", self.sp_escalate_hits)
+
         hint_strategy = QLabel(
             "时长优先级：规则指定 > 重复封禁递增 > 风险等级分档 > 默认封禁时长。"
             "「不分档」表示该等级沿用默认封禁时长；递增以等级档位为基准，"
@@ -517,6 +538,8 @@ class SettingsPage(QWidget):
             "「最大封禁时长」是硬上限：任何有限时长都会被截断到它以内"
             "（防火墙规则不会自己到期，程序长期不在时没人会解，所以别设太长）；"
             "「永久封禁」（时长填 0）不受这个上限影响。"
+            "「惯犯升级」针对封了还在撞的 IP：达到阈值就直接写进黑名单（永久封禁），"
+            "省掉到期重来的循环；次数记在封禁记录上，动作会进审计。"
         )
         hint_strategy.setObjectName("hint")
         hint_strategy.setWordWrap(True)
@@ -538,6 +561,15 @@ class SettingsPage(QWidget):
         self.sp_merge.setSuffix(" 秒")
         self.sp_merge.setFixedWidth(120)
 
+        # ── 已拦截（该 IP 已在封禁中）的重复命中 ──
+        # 2026-10-22 用户反馈：「已拦截了还弹窗提示或者右下角窗口提示，影响电脑操作」。
+        # 默认开启静默：重复命中只累加 ban_list.hit_count，不弹窗 / 不气泡 /
+        # 不响铃。真正状态变化（升级黑名单）仍会提示一次。
+        self.tg_block_silent = ToggleSwitch(True)
+        self.tg_block_silent.setToolTip(
+            "关闭后，已封禁 IP 的每一次命中都会照常提醒（攻击期会被刷屏）。"
+        )
+
         b_test = QPushButton("测试告警")
         b_test.setObjectName("btn_outline")
         b_test.clicked.connect(self._test_alert)
@@ -545,6 +577,10 @@ class SettingsPage(QWidget):
         alert.add("声音提示", self.tg_sound)
         alert.add("弹窗级别", self.cb_popup)
         alert.add("同 IP 合并窗口", self.sp_merge)
+        alert.add(
+            "已拦截不再提醒",
+            _row_widget(self.tg_block_silent, self._sw_label("只累计拦截次数"), spacing=10),
+        )
 
         # ── 外部推送（Webhook）：无人值守时唯一能「送到人手上」的通道 ──
         self.tg_webhook = ToggleSwitch(False)
@@ -738,6 +774,22 @@ class SettingsPage(QWidget):
         lay.addWidget(xdb)
 
         data = _Panel("数据管理")
+        # ── 自动清理总开关 + 保留期预设 ──
+        # 用户要的是「1 天 / 3 天 / 7 天」这种一句话选完的档位（2026-10-22），
+        # 而不是在下面四个 SpinBox 里逐个填。预设只是**一次写入四项**：
+        # 四项仍是各自的真实取值，选「自定义」后仍可分表微调。
+        self.tg_maint = ToggleSwitch(True)
+        self.tg_maint.setToolTip("关闭后只有本页的「清理过期日志」按钮能触发清理。")
+        self.cb_retention = QComboBox()
+        self.cb_retention.addItems([f"{d} 天" for d in RETENTION_PRESETS] + ["自定义"])
+        self.cb_retention.setFixedWidth(140)
+        self.cb_retention.setToolTip(
+            "一次设定四张表的保留期（访问流水 / 风险事件 / 封禁记录 / 操作审计）。\n"
+            "选「自定义」后可在下面四项里分别调整。"
+        )
+        self.cb_retention.currentIndexChanged.connect(self._on_retention_preset)
+        self._retention_preset_guard = False
+
         # 四张表各自的保留期。**不要合并成一个「统一保留 N 天」** ——
         # 见 core.config 的 DEFAULT_*_RETENTION_DAYS：流水最短、结论次之、
         # 封禁账本最长（要回答「是不是惯犯」），审计自己也要有期限。
@@ -781,6 +833,17 @@ class SettingsPage(QWidget):
             "不给它期限的话，审计表自己就会变成新的无界增长表。"
         )
 
+        # 四项里任意一项被手改 → 预设框回落到「自定义」（反之不成立）。
+        # 用 valueChanged 而不是让预设框单向决定：否则用户改了其中一项，
+        # 下拉框还停在「7 天」，保存时会把四项又拍回 7 —— 静默吞掉改动。
+        for sp in (
+            self.sp_retention,
+            self.sp_risk_retention,
+            self.sp_ban_retention,
+            self.sp_audit_retention,
+        ):
+            sp.valueChanged.connect(self._sync_retention_combo)
+
         self.sp_buffer = QSpinBox()
         self.sp_buffer.setRange(500, 100000)
         self.sp_buffer.setSingleStep(500)
@@ -800,6 +863,11 @@ class SettingsPage(QWidget):
         self.sp_maint_hour.setSuffix(" 点")
         self.sp_maint_hour.setFixedWidth(120)
 
+        data.add(
+            "自动清理",
+            _row_widget(self.tg_maint, self._sw_label("每天到点执行一次"), spacing=10),
+        )
+        data.add("保留期预设", self.cb_retention)
         data.add("访问流水保留", self.sp_retention)
         data.add("风险事件保留", self.sp_risk_retention)
         data.add("封禁记录保留", self.sp_ban_retention)
@@ -1286,6 +1354,11 @@ class SettingsPage(QWidget):
                 cfg.get_int("max_ban_duration_sec", MAX_BAN_DURATION_DEFAULT_SEC) // 86400,
             )
         )
+        # 惯犯升级（封了还在撞 → 直接列入黑名单）
+        self.tg_escalate.setChecked(cfg.get_bool("repeat_blacklist_enabled", True))
+        self.sp_escalate_hits.setValue(
+            cfg.get_int("repeat_blacklist_hits", DEFAULT_REPEAT_BLACKLIST_HITS)
+        )
         self._on_escalation_toggle(self.tg_escalation.isChecked())
 
         # 告警
@@ -1298,6 +1371,7 @@ class SettingsPage(QWidget):
         )
         self.cb_popup.setCurrentIndex(max(0, min(idx, self.cb_popup.count() - 1)))
         self.sp_merge.setValue(cfg.get_int("alert_merge_sec", 60))
+        self.tg_block_silent.setChecked(cfg.get_bool("alert_block_silent", True))
 
         # 外部推送（Webhook）
         self.tg_webhook.setChecked(cfg.get_bool("alert_webhook_enabled", False))
@@ -1320,6 +1394,9 @@ class SettingsPage(QWidget):
             cfg.get_int("audit_retention_days", DEFAULT_AUDIT_RETENTION_DAYS)
         )
         self.sp_maint_hour.setValue(cfg.get_int("maintenance_hour", 3))
+        self.tg_maint.setChecked(cfg.get_bool("maintenance_enabled", True))
+        # 预设回显放在四项都读完之后：它是四项的组合结果
+        self._sync_retention_combo()
         self.sp_buffer.setValue(cfg.get_int("monitor_buffer_size", 5000))
         self.sp_cache.setValue(cfg.get_int("geo_cache_size", 20000))
 
@@ -1355,6 +1432,9 @@ class SettingsPage(QWidget):
                 "ban_escalation_max_sec": self.sp_esc_max.value() * 3600,
                 # 硬上限：所有有限时长都会被截断到它以内（0=永久的黑名单不受限）
                 "max_ban_duration_sec": self.sp_max_ban.value() * 86400,
+                # 惯犯升级：已封禁 IP 反复访问到阈值 → 直接列入黑名单（永久）
+                "repeat_blacklist_enabled": "1" if self.tg_escalate.isChecked() else "0",
+                "repeat_blacklist_hits": self.sp_escalate_hits.value(),
                 "alert_sound": "1" if self.tg_sound.isChecked() else "0",
                 "alert_popup_level": (
                     "none"
@@ -1362,6 +1442,8 @@ class SettingsPage(QWidget):
                     else LEVEL_ITEMS[self.cb_popup.currentIndex() - 1]
                 ),
                 "alert_merge_sec": self.sp_merge.value(),
+                # 已封禁 IP 的重复命中：只累计次数，不再打扰
+                "alert_block_silent": "1" if self.tg_block_silent.isChecked() else "0",
                 "alert_webhook_enabled": "1" if self.tg_webhook.isChecked() else "0",
                 "alert_webhook_url": self.ed_webhook.text().strip(),
                 "alert_webhook_level": (
@@ -1375,6 +1457,7 @@ class SettingsPage(QWidget):
                 "ban_retention_days": self.sp_ban_retention.value(),
                 "audit_retention_days": self.sp_audit_retention.value(),
                 "maintenance_hour": self.sp_maint_hour.value(),
+                "maintenance_enabled": "1" if self.tg_maint.isChecked() else "0",
                 "monitor_buffer_size": self.sp_buffer.value(),
                 "geo_cache_size": self.sp_cache.value(),
                 "xdb_auto_sync": "1" if self.tg_xdb_auto.isChecked() else "0",
@@ -1462,6 +1545,8 @@ class SettingsPage(QWidget):
         """递增关闭时倍数 / 封顶没有意义，置灰避免用户以为改了会生效"""
         self.sp_esc_factor.setEnabled(on)
         self.sp_esc_max.setEnabled(on)
+        # 惯犯升级的阈值同理由这个开关管：关着的时候改阈值不会有任何效果
+        self.sp_escalate_hits.setEnabled(on)
 
     # ═══════════════════════════════════════════════
     #  本机端口观察
@@ -2089,6 +2174,50 @@ class SettingsPage(QWidget):
                 "local_port": 8080,
             }
         )
+
+    # ── 保留期预设 ──
+    def _on_retention_preset(self, idx: int) -> None:
+        """选了某个档位 → 一次写进四个 SpinBox（保存时才落库）"""
+        if self._retention_preset_guard or idx < 0 or idx >= len(RETENTION_PRESETS):
+            return  # 「自定义」：保持四项现值，让用户自己调
+        days = RETENTION_PRESETS[idx]
+        self._retention_preset_guard = True
+        try:
+            for sp in (
+                self.sp_retention,
+                self.sp_risk_retention,
+                self.sp_ban_retention,
+                self.sp_audit_retention,
+            ):
+                sp.setValue(days)
+        finally:
+            self._retention_preset_guard = False
+
+    def _sync_retention_combo(self, *_args: int) -> None:
+        """四个 SpinBox 的组合值若等于某个档位就回显该档位，否则显示「自定义」
+
+        `*_args` 是给 `valueChanged(int)` 用的：PySide2 对「槽的参数比信号少」
+        的处理不如 PySide6 稳定，显式收下再丢掉最省心。
+        """
+        if getattr(self, "_retention_preset_guard", False):
+            return
+        values = {
+            self.sp_retention.value(),
+            self.sp_risk_retention.value(),
+            self.sp_ban_retention.value(),
+            self.sp_audit_retention.value(),
+        }
+        custom = len(RETENTION_PRESETS)
+        if len(values) == 1:
+            only = values.pop()
+            if only in RETENTION_PRESETS:
+                custom = RETENTION_PRESETS.index(only)
+        guard = self._retention_preset_guard
+        self._retention_preset_guard = True
+        try:
+            self.cb_retention.setCurrentIndex(custom)
+        finally:
+            self._retention_preset_guard = guard
 
     # ── 外部推送（Webhook）──
     def _on_webhook_toggle(self, on: bool) -> None:

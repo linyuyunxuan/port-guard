@@ -14,7 +14,7 @@ auto_ban_threshold），实测 17.8 ms/条 的无谓开销；而设置几乎从�
 """
 
 import threading
-from typing import Dict
+from typing import Dict, Mapping
 
 from core import database
 
@@ -96,7 +96,10 @@ def set(key: str, value, persist: bool = True) -> None:
             get_logger(__name__).exception("写入设置失败 key=%s", key)
 
 
-def set_many(items: Dict[str, object]) -> None:
+def set_many(items: Mapping[str, object]) -> None:
+    """批量写入。签名用 Mapping 而不是 Dict：Dict 的值类型是不变的（invariant），
+    传 `Dict[str, int]` 给 `Dict[str, object]` 会被类型检查器拒绝 —— 而调用方
+    手里拿的往往就是具体类型的字典。"""
     for k, v in items.items():
         set(k, v)
 
