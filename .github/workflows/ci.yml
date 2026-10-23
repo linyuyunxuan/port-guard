@@ -1,22 +1,16 @@
 name: CI
 
 # 门禁目标：ruff check + ruff format + mypy + pytest 四项全绿。
+#
+# 布局前提：**本仓库根目录就是项目根目录**（port-guard/ 下的内容直接放在仓库根）。
+# 不要把 paths 过滤写回 `port-guard/**` —— 那样没有任何文件能匹配，工作流会
+# 永远不触发，而且不会报错，只会安静地什么都不做。
 
 on:
   push:
     branches: ["**"]
-    paths:
-      - "port-guard/**"
-      - ".github/workflows/ci.yml"
   pull_request:
-    paths:
-      - "port-guard/**"
-      - ".github/workflows/ci.yml"
   workflow_dispatch:
-
-defaults:
-  run:
-    working-directory: port-guard
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -30,6 +24,9 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+    env:
+      # runner 是无桌面的服务会话：不指定离屏平台，Qt 可能卡在建原生窗口句柄
+      QT_QPA_PLATFORM: offscreen
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +35,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: port-guard/requirements*.txt
+          cache-dependency-path: requirements*.txt
 
       - name: 安装依赖
         run: |
@@ -77,5 +74,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-py${{ matrix.python-version }}
-          path: port-guard/coverage.xml
+          path: coverage.xml
           if-no-files-found: ignore
