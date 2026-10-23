@@ -31,6 +31,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 离线 IP 库（v4 约 11 MB + v6 约 37 MB）**不入版本库**（.gitignore 排除了
+      # data/*.xdb），而归属地解析、在线同步、备份回滚、以及部分规则打分用例都
+      # 需要真实库文件才能跑 —— 新克隆的仓库里没有，直接跑会有十几条用例红。
+      # 这里现场拉一份，路径与 core/config.py 的 XDB_UPSTREAM（data/ 下）一致。
+      - name: 准备离线 IP 库（不入版本库，现场拉取）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path data | Out-Null
+          $base = 'https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data'
+          foreach ($n in @('ip2region_v4.xdb', 'ip2region_v6.xdb')) {
+            $dst = Join-Path 'data' $n
+            if ((Test-Path $dst) -and ((Get-Item $dst).Length -gt 1MB)) { continue }
+            Invoke-WebRequest -Uri "$base/$n" -OutFile $dst -UseBasicParsing -TimeoutSec 180
+            "{0}  {1:N1} MB" -f $n, ((Get-Item $dst).Length / 1MB)
+          }
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
