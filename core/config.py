@@ -11,7 +11,7 @@ import sys
 
 APP_NAME = "PortGuard"
 APP_TITLE = "PortGuard 端口访问防御工具"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.5.0"
 
 # ── 风险等级 ──
 LEVEL_NORMAL = "normal"
