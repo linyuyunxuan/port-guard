@@ -43,7 +43,7 @@ from core.rule_engine import get_engine
 
 app_main._init_backend()
 check("后端初始化（日志/数据库/设置缓存/批量写入器）", cfg.is_warmed())
-check("APP_VERSION", APP_VERSION == "1.6.0", APP_VERSION)
+check("APP_VERSION", APP_VERSION == "1.7.0", APP_VERSION)
 
 # 自检期间必须关掉自动封禁与告警声音：本脚本会喂入「恶意样本」，
 # 若开着自动封禁、又恰好以管理员身份运行，就会真的往系统防火墙上写规则。
