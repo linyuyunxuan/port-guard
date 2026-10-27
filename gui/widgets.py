@@ -270,19 +270,39 @@ CONTENT_MAX_W = 900
 
 BADGE_ROLE = Qt.ItemDataRole.UserRole + 1
 
+#: 徽章右侧的补充文本（事件页用它承载「命中规则」）。
+#: 单独一个 role 而不是塞进 DisplayRole：DisplayRole 一有文字，delegate 就按
+#: 普通文本行排版，徽章与文字会各画一遍、互相压字。
+BADGE_NOTE_ROLE = Qt.ItemDataRole.UserRole + 2
 
-def badge_item(level: str, text: Optional[str] = None) -> QTableWidgetItem:
-    """构造一个「只显示徽章」的单元格：文字不画，等级存在自定义 role 里"""
+#: 徽章组的左右内距与徽章-文本间隙（与 QSS 单元格 padding 对齐）
+BADGE_H_PAD = 10
+BADGE_GAP = 8
+
+
+def badge_item(level: str, text: Optional[str] = None, note: str = "") -> QTableWidgetItem:
+    """构造一个「只显示徽章」的单元格：文字不画，等级存在自定义 role 里。
+
+    note 是画在徽章右侧的补充文本（一行，超出省略，tooltip 看全文）。"""
     from core.config import LEVEL_LABEL
 
     it = QTableWidgetItem("")
     it.setData(BADGE_ROLE, level)
-    it.setToolTip(text if text is not None else LEVEL_LABEL.get(level, level))
+    if note:
+        it.setData(BADGE_NOTE_ROLE, note)
+    if text is None:
+        label = LEVEL_LABEL.get(level, level)
+        text = f"{label}\n命中规则：{note}" if note else label
+    it.setToolTip(text)
     return it
 
 
 class RiskBadgeDelegate(QStyledItemDelegate):
-    """在单元格中央绘制 22px 风险徽章；选中/斑马底仍由基类绘制"""
+    """在单元格中央绘制 22px 风险徽章；选中/斑马底仍由基类绘制。
+
+    带 note（BADGE_NOTE_ROLE）时整组**左对齐**，note 画在徽章右侧：
+    居中会让每行徽章的横坐标随 note 长短漂移，一列徽章扫不成一条竖线。
+    """
 
     HEIGHT = 22
 
@@ -305,14 +325,17 @@ class RiskBadgeDelegate(QStyledItemDelegate):
         fg = "#FFFFFF" if level == "critical" else LEVEL_COLORS.get(str(level), C.text_secondary)
         bg = LEVEL_BADGE_BG.get(str(level), C.bg_hover)
 
-        f = QFont(widget.font() if widget is not None else QFont())
+        base_font = QFont(widget.font() if widget is not None else QFont())
+        f = QFont(base_font)
         f.setPixelSize(12)
         f.setBold(True)
         painter.setFont(f)
         fm = painter.fontMetrics()
         w = max(34, fm.horizontalAdvance(text) + 12)
+        note = str(index.data(BADGE_NOTE_ROLE) or "")
+        x = option.rect.left() + BADGE_H_PAD if note else option.rect.center().x() - w // 2
         r = QRect(
-            option.rect.center().x() - w // 2,
+            x,
             option.rect.center().y() - self.HEIGHT // 2,
             w,
             self.HEIGHT,
@@ -324,6 +347,21 @@ class RiskBadgeDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(r, 4, 4)
         painter.setPen(QPen(QColor(fg)))
         painter.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+
+        if note:
+            nf = QFont(base_font)
+            nf.setPixelSize(12)
+            painter.setFont(nf)
+            fm = painter.fontMetrics()
+            left = r.right() + 1 + BADGE_GAP
+            room = option.rect.right() - BADGE_H_PAD - left + 1
+            if room > 12:
+                painter.setPen(QPen(QColor(C.text_secondary)))
+                painter.drawText(
+                    QRect(left, option.rect.top(), room, option.rect.height()),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    fm.elidedText(note, Qt.TextElideMode.ElideRight, room),
+                )
         painter.restore()
 
     def sizeHint(self, option, index):

@@ -76,7 +76,48 @@ def seed_monitor(win) -> None:
 
     win.page_monitor.append_records(recs)
     win.page_logs.append_access(recs)
-    win.page_monitor.set_stats(41, 27, 0, False, 18080)
+    # set_stats 现在是 (total, risk, bans) —— 早期版本还带「观察中 / 端口」两个参数，
+    # 脚本没跟着改，会在 seed 阶段直接 TypeError（截图一张都出不来）
+    win.page_monitor.set_stats(41, 27, 3)
+
+
+def seed_bans(win) -> None:
+    """给「封禁建议」表灌几条**仅内存**的样本行。
+
+    不写数据库：这台机器上跑的是真实用户的库，截图工具没有资格往里插事件。
+    直接构造 _sug_rows 再调一次 _render_suggestions()，效果与真数据一致
+    （表格渲染只认这几个键），标题里的计数、按钮的启用态也会跟着变 ——
+    空表截图看不出「标题行挤不挤」这种布局问题，等于白截。
+    """
+    import datetime
+
+    page = win.page_bans
+    now_ms = int(datetime.datetime.now().timestamp() * 1000)
+    raw = [
+        ("198.51.100.7", 8080, 95, "critical", "命中暴力破解规则：1 分钟内 42 次登录失败", 12),
+        ("203.0.113.10", 18080, 75, "high", "命中路径穿越规则：/../../etc/passwd", 3),
+        ("45.33.32.156", 9001, 100, "critical", "命中扫描器特征（sqlmap UA）+ 端口探测", 1),
+    ]
+    rows = []
+    for i, (ip, port, score, level, summary, n) in enumerate(raw):
+        rows.append(
+            {
+                "id": 9000 + i,
+                "ip": ip,
+                "local_port": port,
+                "risk_score": score,
+                "risk_level": level,
+                "peak_score": score,
+                "peak_level": level,
+                "summary": summary,
+                "event_ts": now_ms - (i + 1) * 90_000,
+                "group_count": n,
+                "geo": None,
+            }
+        )
+    page._sug_rows = rows
+    page._sug_rows_src = rows
+    page._render_suggestions()
 
 
 # 弹性列的最小宽度判据（02_ux_spec.md P0-2）。按表头文字指定，不按列序号 ——
@@ -101,6 +142,11 @@ NO_ELIDE = {
     "评分": "100",
     "ID": "9999",
     "时长": "永久",
+    # 封禁记录表头是「到期时间 / 创建时间」。早先这里写的是「到期 / 创建」，
+    # 键名与表头不一致 → 时间列从来没被这条判据检查过，于是 124px 把
+    # `2026-10-20 09:27` 裁成 `09…` 一直没人发现。表头改名时这里必须跟着改。
+    "到期时间": "2099-12-31 23:59",
+    "创建时间": "2099-12-31 23:59",
     "到期": "2099-12-31 23:59",
     "创建": "2099-12-31 23:59",
 }
@@ -109,6 +155,9 @@ NO_ELIDE = {
 NO_ELIDE_BY_TABLE = {
     ("监控", "状态"): "999",
     ("事件", "状态"): "未处理",
+    # 事件页原「等级」列 2026-10-27 改名为「等级 / 命中规则」（规则名并进来），
+    # 键名必须跟着改 —— 早先「到期 / 创建」就是这样失配过，那条判据空转了两版。
+    ("事件", "等级 / 命中规则"): "严重",
     ("封禁记录", "状态"): "已封禁",
 }
 # 理论最差值但现实达不到（5 位封禁记录 ID 要攒 10 万条）：只 WARN，不判 FAIL
@@ -119,7 +168,7 @@ SOFT_WORST = {"ID": "99999"}
 # 序号、裁了不影响判断。真要处理时按「破 1 万条」一并做：ID 48→56、来源 76→62。
 # 这两列由 QStyledItemDelegate 自绘 18px 徽章（不是文字），判据是
 # 「徽章文字宽 + 左右 padding 12 ≤ 列宽」，用 elide 判会假阳性。
-BADGE_COLUMNS = {"风险", "等级"}
+BADGE_COLUMNS = {"风险", "等级", "等级 / 命中规则"}
 ELIDE_PAD = 20  # 20 = QSS 左右各 8（共 16）+ Qt 渲染实测损耗 4
 # （1px item frame + 2px elide 给「…」的余量 + hinting 抖动）。
 # ⚠️ 不要按 theme 的 16 改小：协议列 56px 时 HTTPS 实测会裁（8× 放大是 `HTT…`），
@@ -129,14 +178,71 @@ ELIDE_PAD = 20  # 20 = QSS 左右各 8（共 16）+ Qt 渲染实测损耗 4
 # 用户自定义文本列：允许省略（表格 tooltip 兜底），但超过可用宽时打 WARN。
 # 绝不进 exit code —— 它是可变长文本，进硬门禁会逼后来者「加宽列」或「截断规则名」，
 # 前者抢走「请求」的弹性空间，后者丢信息，两个方向都错。
-WARN_ON_ELIDE = ("命中规则",)
+# 2026-10-27：「命中规则」列并进「等级」列后本表为空 —— 规则名的宽度判据改由
+# 下面的 check_badge_note 负责（它按徽章 + 规则名的整组宽度算）。
+WARN_ON_ELIDE: tuple = ()
 # WARN 收窄：同表同列只报一次、全局最多 3 条，避免一台机器上几十条长名刷屏
 WARN_MAX = 3
 
 # 「允许省略」的列（可变长语义文本）。前提是**有 tooltip 兜底**：省略本身可接受，
 # 「省略了又没有途径看全文」才是缺陷 —— 命中规则/路径正是运维判断风险依据的字段。
 # 这条是硬判据：它把「为了过门禁去加宽列」的歪路堵死，正确解法只剩补 tooltip。
-ALLOW_ELIDE = ("请求", "路径", "原因", "归属地", "命中规则", "服务器")
+ALLOW_ELIDE = ("请求", "路径", "原因", "归属地", "服务器")
+
+# 徽章 + 规则名（事件页「等级 / 命中规则」列）的整组预算。
+# 常量与 gui/widgets.py 的 BADGE_H_PAD / BADGE_GAP 对齐；最差规则名取
+# 「管理端口归属地检测 +N」—— 单条最长 9 字 + 多条时的 `+N` 后缀。
+BADGE_NOTE_ROLE = 2  # Qt.ItemDataRole.UserRole + 2
+BADGE_LEFT = 10
+BADGE_GAP = 8
+BADGE_NOTE_WORST = "管理端口归属地检测 +3"
+#: 已知带规则名的列（表里没有样本行时也得按这个判：0 行 ≠ 通过）
+BADGE_NOTE_COLUMNS = {"等级 / 命中规则"}
+
+
+def check_badge_note(table, name: str, width: int, headers: list, failures: list) -> None:
+    """徽章右侧带规则名的列：整组（内距 + 徽章 + 间隙 + 规则名 + 内距）必须放得下。
+
+    这条是 2026-10-27 加的：规则名从独立一列并进等级列后，一旦有人把等级列
+    调窄，被截的就不是「一列长文本」而是**每一行的风险原因**，而且列表里
+    看不出这是缺陷（省略号看起来很像「规则名本来就这么长」）。
+    """
+    from qtcompat import QFontMetrics, Qt
+
+    for col, col_name in enumerate(headers):
+        model = table.model()
+        rows = model.rowCount() if model is not None else 0
+        names = []
+        has_role = False
+        for r in range(min(rows, 60)):
+            val = model.data(model.index(r, col), Qt.ItemDataRole.UserRole + BADGE_NOTE_ROLE)
+            if val:
+                has_role = True
+                names.append(str(val))
+        if not has_role and col_name not in BADGE_NOTE_COLUMNS:
+            continue
+        font = _cell_font(table, col)
+        note_font = type(font)(font)
+        note_font.setPixelSize(12)
+        note_font.setBold(False)
+        fm_note = QFontMetrics(note_font)
+        # 判据取「样本里最宽的一条」与内置最差值中的宽者：按字符数比会被
+        # 「判定风险：r-b8065e47」这类窄字符迷惑（14 字符但比 9 个汉字宽）。
+        names.append(BADGE_NOTE_WORST)
+        note = max(names, key=lambda s: fm_note.horizontalAdvance(s))
+        note_px = fm_note.horizontalAdvance(note)
+        pill = max(34, QFontMetrics(font).horizontalAdvance("严重") + 12)
+        need = BADGE_LEFT + pill + BADGE_GAP + note_px + BADGE_LEFT
+        avail = table.columnWidth(col)
+        ok = need <= avail
+        print(
+            f"    {col_name}（徽章+规则名）: 规则「{note}」整组需{need}px 可用{avail}px"
+            f" {'OK' if ok else '省略'}"
+        )
+        if not ok:
+            failures.append(
+                f'FAIL {width} {name} {col_name} 规则名放不下: "{note}" 需{need}px>可用{avail}px'
+            )
 
 
 def _cell_tooltip(table, row: int, col: int) -> str:
@@ -317,6 +423,10 @@ def report_tables(win, width: int) -> bool:
         except Exception as exc:
             failures.append(f"FAIL {width} {name} 省略检测失败 {type(exc).__name__}: {exc}")
         try:
+            check_badge_note(table, name, width, headers, failures)
+        except Exception as exc:
+            failures.append(f"FAIL {width} {name} 规则名检测失败 {type(exc).__name__}: {exc}")
+        try:
             check_tooltip(table, name, width, headers, failures)
         except Exception as exc:
             failures.append(f"FAIL {width} {name} 兜底检测失败 {type(exc).__name__}: {exc}")
@@ -365,6 +475,7 @@ def main(argv=None) -> int:
     app.processEvents()
 
     seed_monitor(win)
+    seed_bans(win)
 
     if args.width == 1360:
         out_dir = os.path.join(root, "_design", "after")
@@ -376,16 +487,22 @@ def main(argv=None) -> int:
         ("0_shell", None),
         ("1_monitor", 0),
         ("2_events", 1),
-        ("3_bans", 2),
-        ("4_rules", 3),
-        ("5_iplookup", 4),
-        ("6_logs", 5),
-        ("7_settings", 6),
+        ("3_access", 2),
+        ("4_bans", 3),
+        ("5_rules", 4),
+        ("6_iplookup", 5),
+        ("7_logs", 6),
+        ("8_settings", 7),
     ]
     for name, idx in pages:
         if idx is not None:
             win._switch_page(idx)
             app.processEvents()
+            app.processEvents()
+        if idx == 3:
+            # 站内切页会触发 refresh（按真实库重载，把上面灌的样本冲掉），
+            # 所以样本必须在切页**之后**再灌一次，否则截图里是空表
+            seed_bans(win)
             app.processEvents()
         path = os.path.join(out_dir, name + ".png")
         win.grab().save(path)

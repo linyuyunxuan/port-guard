@@ -281,7 +281,12 @@ class _Tray:
 
 
 class _Probe:
-    """Alerter + 记录下来的「弹窗 / 响铃 / 推送」调用，避免在测试机上真的打断人"""
+    """Alerter + 记录下来的「响铃 / 推送」调用，避免在测试机上真的打断人
+
+    2026-10-27 用户要求取消模态弹窗后，`_popup` 已从 Alerter 移除，这里也就没有
+    可替换的弹窗钩子 —— 反向证明「告警路径上不存在 QMessageBox」这件事本身
+    由 `test_no_modal_popup_on_any_level` 守着。
+    """
 
     def __init__(self) -> None:
         self.calls: List[str] = []
@@ -294,12 +299,10 @@ def probe(monkeypatch) -> _Probe:
     from core import alerts as alerts_mod
 
     cfg.set("alert_sound", "1", persist=False)
-    cfg.set("alert_popup_level", "low", persist=False)  # 低门槛：正常路径必定会弹
     cfg.set("alert_block_silent", "1", persist=False)
 
     p = _Probe()
     a = alerts_mod.Alerter(tray=p.tray)
-    monkeypatch.setattr(a, "_popup", lambda *x, **kw: p.calls.append("popup"))
     monkeypatch.setattr(a, "_beep", lambda *x, **kw: p.calls.append("beep"))
     monkeypatch.setattr(a, "_notify_webhook", lambda *x, **kw: p.calls.append("webhook"))
     p.alerter = a
@@ -307,7 +310,7 @@ def probe(monkeypatch) -> _Probe:
 
 
 def test_repeated_block_is_completely_silent(probe):
-    """封禁期间的重复命中：不弹窗、不响铃、不冒气泡 —— 一个都不许有
+    """封禁期间的重复命中：不响铃、不冒气泡 —— 一个都不许有
 
     这是本条需求的核心：防火墙已经挡住了，弹窗说的还是同一句「已拦截」，
     唯一的效果是抢走用户正在打字的焦点。
@@ -321,15 +324,48 @@ def test_first_block_still_notifies(probe):
     """首次拦截照常提示（静默只针对「同一件事又发生一次」，不能把新事件也吞掉）"""
     assert probe.alerter.notify(_alert(blocked_again=False)) is True
     assert "beep" in probe.calls
-    assert "popup" in probe.calls
-    assert probe.tray.msgs
+    assert probe.tray.msgs, "首次拦截必须有右下角气泡，否则用户完全不知道发生过什么"
+
+
+def test_no_modal_popup_on_any_level(probe, monkeypatch):
+    """任何级别、任何处置结论都不再弹模态窗口（用户 2026-10-27 的明确要求）
+
+    从「有没有调用弹窗」反过来验证已经不够 —— 弹窗函数本身被删了。所以这里
+    直接盯住 QMessageBox：只要告警路径碰它一次，测试就红。
+    """
+    import qtcompat
+
+    calls: List[str] = []
+
+    class _Boom:
+        @staticmethod
+        def information(*a, **kw):
+            calls.append("information")
+
+        @staticmethod
+        def warning(*a, **kw):
+            calls.append("warning")
+
+        @staticmethod
+        def critical(*a, **kw):
+            calls.append("critical")
+
+        @staticmethod
+        def question(*a, **kw):
+            calls.append("question")
+
+    monkeypatch.setattr(qtcompat, "QMessageBox", _Boom, raising=False)
+    for level in ("low", "medium", "high", "critical"):
+        probe.alerter._last_alert.clear()
+        probe.alerter.notify(_alert(level=level, blocked_again=False))
+    assert calls == []
+    assert probe.tray.msgs, "气泡才是唯一的提醒通道，不能被一起取消"
 
 
 def test_escalation_is_not_silenced(probe):
     """升级黑名单是「状态真的变了」：即使带重复标记也要提示（但只走气泡）"""
     assert probe.alerter.notify(_alert(blocked_again=True, block_hits=5, escalated=True)) is True
     assert probe.tray.msgs, "升级必须冒一个气泡，否则等于偷偷改了安全策略"
-    assert "popup" not in probe.calls, "升级不弹窗，别打断正在办公的人"
     assert "beep" not in probe.calls, "升级不额外响铃"
 
 
@@ -337,7 +373,7 @@ def test_silence_can_be_turned_off(probe):
     """关掉「静默」开关就回到老行为：重复命中照样提示"""
     cfg.set("alert_block_silent", "0", persist=False)
     assert probe.alerter.notify(_alert(blocked_again=True, block_hits=3)) is True
-    assert "popup" in probe.calls
+    assert probe.tray.msgs
 
 
 # ═══════════════════ 惯犯升级黑名单 ═══════════════════

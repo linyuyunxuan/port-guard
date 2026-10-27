@@ -120,7 +120,9 @@ pb.QMessageBox.warning = staticmethod(lambda *a, **k: None)
 
 win = MainWindow()
 win.show()
-win._switch_page(2)
+# 3 = 封禁管理（NAV_ITEMS 下标）。早先这里写的 2 是「历史访问」，
+# 于是最后存的那张 9_bans_batch.png 拍的根本不是封禁页。
+win._switch_page(3)
 for _ in range(10):
     app.processEvents()
 page = win.page_bans
@@ -130,7 +132,11 @@ for _ in range(20):
 
 sug_rows = page.sug_table.rowCount()
 ban_rows = page.table.rowCount()
-assert sug_rows == 9, f"建议行数不对：{sug_rows}"
+# 9 条样本 = 3 个 IP × 2 个端口，按「IP + 端口」合并后是 6 行（见 gui/event_group.py）。
+# 早先这里按 9 断言，是合并功能上线前的期望值 —— 已过期。
+total_events = sum(int(r.get("group_count") or 1) for r in page._sug_rows)
+assert sug_rows == 6, f"建议行数不对（应合并成 6）：{sug_rows}"
+assert total_events == 9, f"合并后事件总数应为 9：{total_events}"
 assert ban_rows == 14, f"封禁行数不对：{ban_rows}"
 
 # ── 结构断言 ──
@@ -192,14 +198,77 @@ for _ in range(4):
 items = captured.get("items") or []
 assert len(items) == 3, f"应按 IP 去重成 3 个，实际 {len(items)}"
 assert {it["ip"] for it in items} == {"133.118.113.177", "113.118.113.77", "8.8.8.8"}, items
-assert sum(len(it["event_ids"]) for it in items) == sug_rows, "封禁后要能回填全部事件状态"
+# 注意：ask_ban_many 的契约是 {ip, score, reason}（事件回填由 ban_service 按 IP
+# 统一处理），这里不要断言 event_ids —— 早先那版脚本断言过，是已废弃的字段。
+
+# ── 2026-10-27 需求①：对账 / 全部封禁必须直接显示在界面上 ──
+assert page.btn_sync.isVisible(), "「与防火墙对账」要常驻，不能藏在「更多」菜单里"
+assert page.btn_unban_all.isVisible(), "「一键全部解封」同上"
+assert not hasattr(page, "btn_more"), "折叠菜单已移除：动作应一屏直达"
+assert page.btn_sug_ban_all.isVisible(), "「全部封禁」必须在建议卡标题行常驻"
+assert page.btn_sug_ban_all.isEnabled(), "有建议时「全部封禁」应可点"
+assert "全部封禁" in page.btn_sug_ban_all.text(), page.btn_sug_ban_all.text()
+assert "3" in page.btn_sug_ban_all.text(), (
+    f"按钮要写出会动几个 IP（当前 3 个）：{page.btn_sug_ban_all.text()}"
+)
+
+# ── 2026-10-27 需求②：筛选里有「已到期」 ──
+opts = [page.status_filter.itemText(i) for i in range(page.status_filter.count())]
+assert "已到期" in opts, opts
+
+# ── 2026-10-27 需求③：双击行 = 勾选 / 取消勾选 ──
+page.btn_sug_all.click()  # 先清空，从 0 开始数
+for _ in range(4):
+    app.processEvents()
+assert len(page._checked_suggestions()) == 0
+
+idx = page.sug_table.model().index(1, 1)  # 第 2 行、时间列（非操作列）
+page.sug_table.doubleClicked.emit(idx)
+for _ in range(4):
+    app.processEvents()
+assert len(page._checked_suggestions()) == 1, "双击行应勾上这一行"
+assert page.lbl_sug_sel.text() == "已选 1 条", page.lbl_sug_sel.text()
+
+page.sug_table.doubleClicked.emit(idx)
+for _ in range(4):
+    app.processEvents()
+assert len(page._checked_suggestions()) == 0, "再双击应取消"
+
+# 双击**操作列**不接管：那一列有自己的按钮，点了就执行
+page.sug_table.doubleClicked.emit(page.sug_table.model().index(1, pb.COL_SUG_ACTION))
+for _ in range(4):
+    app.processEvents()
+assert len(page._checked_suggestions()) == 0, "操作列的双击应交给行内按钮，不该顺手勾选"
+
+# 记录表同一套语义
+page.table.doubleClicked.emit(page.table.model().index(0, 2))
+for _ in range(4):
+    app.processEvents()
+assert len(page._checked_bans()) == 1, "记录表双击也应勾选"
+page.table.doubleClicked.emit(page.table.model().index(0, 2))
+
+# ── 一键全部封禁：不勾选也能封全部（同一套去重口径）──
+captured.clear()
+page.btn_sug_ban_all.click()
+for _ in range(4):
+    app.processEvents()
+all_items = captured.get("items") or []
+assert len(all_items) == 3, f"「全部封禁」应按 IP 去重成 3 个，实际 {len(all_items)}"
+assert {it["ip"] for it in all_items} == {"133.118.113.177", "113.118.113.77", "8.8.8.8"}
+
+# 恢复全选，后面的「批量忽略」断言依赖它
+page.btn_sug_all.click()
+for _ in range(4):
+    app.processEvents()
 
 # ── 批量忽略：一次事务里把选中 id 全标成 2 ──
 HANDLED.clear()
 page.btn_sug_ignore.click()
 for _ in range(4):
     app.processEvents()
-assert HANDLED and sorted(HANDLED[0][0]) == sorted(2000 + i for i in range(sug_rows)), HANDLED
+assert HANDLED and sorted(HANDLED[0][0]) == sorted(
+    2000 + i for i in range(total_events)
+), HANDLED
 assert HANDLED[0][1] == 2, "批量忽略的 handled 值应为 2"
 
 # ── 记录表：全选后批量删除，只删数据库记录 ──

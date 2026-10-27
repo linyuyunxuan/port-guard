@@ -31,7 +31,7 @@ from core.models import (
 )
 from core.validators import InvalidIP, normalize_ip
 from gui.background import BusyGuard, run_in_background
-from gui.components import PageHeader, build_menu, export_table_csv, row_menu_button
+from gui.components import PageHeader, build_menu, export_table_csv
 from gui.event_detail import EventDetailDialog
 from gui.event_group import flatten_rows, merge_rows
 from gui.row_action import RowAction, RowActionDelegate
@@ -85,7 +85,6 @@ log = get_logger(__name__)
 
 BAN_HEADERS = [
     "",
-    "ID",
     "IP",
     "原因",
     "归属地",
@@ -100,21 +99,20 @@ SUG_HEADERS = ["", "时间", "等级", "IP", "归属地", "端口", "评分", "�
 
 # 第 0 列都是勾选框（32px）。列宽按「实测文字 + 16 padding + 6 余量」定，
 # 两栈取大的那套（PySide2 的 YaHei / Consolas 度量比 PySide6 宽 6~20%）。
-# IP 列 124：`113.118.113.77` 实测 98px；IPv6 完整地址（147px）放不下，
-# 走 tooltip —— 但 IPv4 必须完整。
-# 到期 / 创建列 124：模型输出的是 `YYYY-MM-DD HH:MM`（112px），不能省年份，
-# 封禁最长 365 天会跨年。
 #
-# 2026-10-23 加「归属地」列（用户要求）时，视口 1097 塞不下 12 列，于是
-# **删掉了「时长」列**：到期时间与创建时间并列存在时，「多久」就是两者之差
-# （永久在到期列也单独写着），它是这张表里唯一一条冗余信息。腾出的空间加上
-# 各列收窄，让归属地拿到 122（与建议表同宽，同一套 `region_short` 已实测），
-# 原因列仍保住 240 —— 低于 240 会被 tests/test_ui_layout.py 拦下。
-# 来源列 56：`自动 / 手动 / 黑名单 / 规则`都是两字词，50 时「自动」被渲染成
-# 「自…」（QFontMetrics 量出来够，实际渲染还差省略号的位置）。
-# 状态列 84：要放得下「已封禁 ×128」。拦截次数（`hit_label`）跟在状态后面，
-# 不单开列 —— 视口只有 1097，多一列就要从原因列扣。
-BAN_WIDTHS = [33, 48, 124, 240, 122, 56, 42, 84, 124, 124, 100]
+# 2026-10-27 重排（实测数据见 _design/_measure_ban_cols.py）：
+#   · IP  124→136：`182.118.236.126` 实测 105px，124 的列只剩 108 可用，
+#     渲染成 `182.118.236…` —— IP 是这张表的判断依据，看不全等于没封对人。
+#   · 到期/创建 124→136：`2026-10-20 09:27` 实测 112px，124 会裁成 `09…`，
+#     「哪天到期」只能去猜。
+#   · 归属地 122 保持不动：压到 110 时真机渲染成 `河南省 洛阳…`（实测 76px
+#     的文本在 Qt item 内边距下仍被裁），腾空间不能拿它开刀。
+#   · 操作 100→96、状态 84→88（「已封禁 ×128」实测 86）、评分 42→46。
+#   · **删掉「ID」列（48px）**：它是数据库主键，不是用户概念 —— 既不参与搜索
+#     （搜索框只搜 IP / 原因），也不会被口头引用。48px 换回「IP 与时序可读」，
+#     记录号改挂在 IP 单元格的 tooltip 里，信息没丢，只是不再占位。
+# 固定列合计 1089，原因列（唯一 Stretch）吃掉剩余的 248（下限 240）。
+BAN_WIDTHS = [33, 136, 240, 122, 56, 46, 88, 136, 136, 96]
 
 #: 防火墙开关状态的刷新间隔（秒）。netsh 一次 100~300ms，只在后台探测，
 #: 缓存期间页面刷新直接复用上一次结论（见 _probe_fw_state）
@@ -126,9 +124,14 @@ COL_SUG_LEVEL = 2
 COL_SUG_REASON = 7
 COL_SUG_ACTION = 8
 COL_BAN_CHECK = 0
-COL_BAN_REASON = 3
-COL_BAN_GEO = 4
-COL_BAN_ACTION = 10
+COL_BAN_REASON = 2
+COL_BAN_GEO = 3
+COL_BAN_SOURCE = 4
+COL_BAN_SCORE = 5
+COL_BAN_STATUS = 6
+COL_BAN_EXPIRE = 7
+COL_BAN_CREATED = 8
+COL_BAN_ACTION = 9
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 两张表各一套：都不给勾选列（点了是全选）与操作列（无值）建规则。
@@ -154,8 +157,7 @@ BAN_STATUS_ORDER = {
 }
 
 BAN_SORT_SPECS = {
-    1: ColumnSpec(KIND_NUM, lambda b: b.id),
-    2: ColumnSpec(KIND_TEXT, lambda b: b.ip),
+    1: ColumnSpec(KIND_TEXT, lambda b: b.ip),
     COL_BAN_REASON: ColumnSpec(KIND_TEXT, lambda b: b.reason),
     # 归属地按 `region_short` 文本排（与单元格显示的是同一串字）：
     # 按 geo 对象排就得在排序层认识 GeoInfo，而排序层只该处理「显示的文本」。
@@ -163,11 +165,11 @@ BAN_SORT_SPECS = {
         KIND_TEXT,
         lambda b: b.geo.region_short if b.geo else "",
     ),
-    5: ColumnSpec(KIND_TEXT, lambda b: b.source_label),
-    6: ColumnSpec(KIND_NUM, lambda b: b.risk_score),
-    7: ColumnSpec(KIND_NUM, lambda b: BAN_STATUS_ORDER.get(b.status)),
-    8: ColumnSpec(KIND_MS, lambda b: b.expire_at),
-    9: ColumnSpec(KIND_DATETIME, lambda b: b.created_at),
+    COL_BAN_SOURCE: ColumnSpec(KIND_TEXT, lambda b: b.source_label),
+    COL_BAN_SCORE: ColumnSpec(KIND_NUM, lambda b: b.risk_score),
+    COL_BAN_STATUS: ColumnSpec(KIND_NUM, lambda b: BAN_STATUS_ORDER.get(b.status)),
+    COL_BAN_EXPIRE: ColumnSpec(KIND_MS, lambda b: b.expire_at),
+    COL_BAN_CREATED: ColumnSpec(KIND_DATETIME, lambda b: b.created_at),
 }
 
 
@@ -563,23 +565,34 @@ class BansPage(QWidget):
         self.lbl_sug_sel = QLabel("已选 0 条")
         self.lbl_sug_sel.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
         self.btn_sug_all = self._mini_button("全选", enabled=True)
-        self.btn_sug_ban = self._mini_button("批量封禁", "danger")
-        self.btn_sug_ignore = self._mini_button("批量忽略")
+        # 「封禁选中」= 勾了才可用；「全部封禁」= 一键封禁当前列表全部（用户
+        # 2026-10-27 要求直接显示）。两个都叫「批量封禁」时分不清谁需要先勾选，
+        # 所以文案按「操作对象」命名。
+        self.btn_sug_ban = self._mini_button("封禁选中", "danger")
+        self.btn_sug_ban.setToolTip("封禁已勾选的建议（先勾选，或在行上双击）")
+        self.btn_sug_ignore = self._mini_button("忽略选中")
+        self.btn_sug_ignore.setToolTip("把已勾选的事件标记为已忽略，不再出现在本页")
         # 建议面板没有独立的批量条，导出放标题行末尾：既不额外占高度，
-        # 也与「批量忽略」同属「对这批建议整体做点什么」
+        # 也与「忽略选中」同属「对这批建议整体做点什么」
         self.btn_sug_export = self._mini_button("导出 CSV", enabled=True)
         self.btn_sug_export.setToolTip("导出当前待确认建议，不受勾选影响")
+        # 全部封禁放在最右：它一次动全部 IP，离「勾选 → 封禁选中」这条常用路径
+        # 远一点，滑手误点的机会就少一点（且仍然有批量确认对话框兜底）
+        self.btn_sug_ban_all = self._mini_button("全部封禁", "danger")
+        self.btn_sug_ban_all.setToolTip("一键封禁当前列表里的全部建议 IP（会先弹确认与时长选择）")
         # 勾选列建在表格之后，lambda 延迟取值（不能提前绑定方法）
         self.btn_sug_all.clicked.connect(lambda: self.sug_sel.toggle_all())  # noqa: PLW0108
         self.btn_sug_ban.clicked.connect(self._batch_ban_suggestions)
         self.btn_sug_ignore.clicked.connect(self._batch_ignore_suggestions)
         self.btn_sug_export.clicked.connect(self._export_sug_csv)
+        self.btn_sug_ban_all.clicked.connect(self._ban_all_suggestions)
         for w in (
             self.lbl_sug_sel,
             self.btn_sug_all,
             self.btn_sug_ban,
             self.btn_sug_ignore,
             self.btn_sug_export,
+            self.btn_sug_ban_all,
         ):
             head.addWidget(w)
         lay.addLayout(head)
@@ -616,6 +629,8 @@ class BansPage(QWidget):
         sh.setSectionResizeMode(COL_SUG_REASON, QHeaderView.ResizeMode.Stretch)
         # 点表头排序（数据层重排 + 重渲染，见 gui/table_sort.py）
         self.sug_sort_header = SortHeader(self.sug_table, self.sug_sort, self._apply_sug_sort)
+        # 双击行 = 勾选 / 取消勾选（用户 2026-10-27 要求）
+        self.sug_table.doubleClicked.connect(self._on_sug_double_click)
         lay.addWidget(self.sug_table, 1)
         return self.sug_panel
 
@@ -665,14 +680,26 @@ class BansPage(QWidget):
         btn_manual.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_manual.clicked.connect(lambda: self.ask_ban.emit("", 0, "手动封禁"))
 
+        # 2026-10-27 用户要求「与防火墙对账、一键全部封禁直接显示在界面中」：
+        # 这两个动作原来塞在「更多 ⋯」菜单里，等于二级入口 —— 对账是「界面说的
+        # 和防火墙真实状态不一致」时唯一的修复手段，藏起来等于没有。
+        # 顺序按「读屏终点」排：刷新（无状态）→ 对账（只读修复）→ 全部解封
+        # （破坏性）→ 手动封禁（主操作，最右）。
         btn_refresh = self._mini_button("刷新", enabled=True)
         btn_refresh.clicked.connect(self.refresh)
 
-        self.btn_more = row_menu_button(
-            [("与防火墙对账", self._sync), ("一键全部解封", self._unban_all)], self, size=30
+        self.btn_sync = self._mini_button("与防火墙对账", enabled=True)
+        self.btn_sync.setToolTip(
+            "读回 Windows 防火墙里实际存在的 PortGuard 规则，把对不上的记录改成「已解封」。\n"
+            "规则被手动删掉、或换了机器恢复数据库之后，用它对一次。"
         )
-        self.btn_more.setToolTip("更多操作：与防火墙对账 / 一键全部解封")
-        for w in (btn_manual, btn_refresh, self.btn_more):
+        self.btn_sync.clicked.connect(self._sync)
+
+        self.btn_unban_all = self._mini_button("一键全部解封", "danger", enabled=True)
+        self.btn_unban_all.setToolTip("删除所有 PortGuard_Block_ 规则并标记为已解封（会二次确认）")
+        self.btn_unban_all.clicked.connect(self._unban_all)
+
+        for w in (btn_refresh, self.btn_sync, self.btn_unban_all, btn_manual):
             head.addWidget(w)
         lay.addLayout(head)
 
@@ -687,7 +714,11 @@ class BansPage(QWidget):
         self.search.textChanged.connect(self.refresh)
 
         self.status_filter = QComboBox()
-        self.status_filter.addItems(["全部状态", "已封禁", "已解封", "失败", "处理中"])
+        # 顺序按「用户此刻最想找什么」排：生效中 → 刚到期（该不该续封） → 终态。
+        # 「已到期」是 2026-10-27 用户点名要的：到期但规则没删掉的记录原来只能
+        # 在「全部状态」里翻，而它恰恰是最需要复查的一类（防火墙规则没有到期
+        # 时间，巡检没跑就等于永久封禁）。
+        self.status_filter.addItems(["全部状态", "已封禁", "已到期", "已解封", "失败", "处理中"])
         self.status_filter.setFixedWidth(132)
         self.status_filter.currentIndexChanged.connect(self.refresh)
 
@@ -726,6 +757,13 @@ class BansPage(QWidget):
         bb.addWidget(self.btn_ban_del)
         bb.addWidget(self.btn_ban_export)
         bb.addStretch(1)
+        # 双击勾选是个「藏起来的功能」：不给提示的话没人会去试。
+        self.lbl_dbl_hint = QLabel("双击行可勾选")
+        self.lbl_dbl_hint.setStyleSheet(f"color:{C.text_muted};font-size:12.5px;")
+        self.lbl_dbl_hint.setToolTip(
+            "双击任意一行 = 勾选 / 取消勾选（操作列除外，那里有自己的按钮）"
+        )
+        bb.addWidget(self.lbl_dbl_hint)
         lay.addLayout(bb)
 
         self.empty = EmptyState("尚无封禁记录", "确认封禁后，记录会出现在这里")
@@ -734,7 +772,17 @@ class BansPage(QWidget):
 
         self.table = QTableWidget(0, len(BAN_HEADERS))
         self.table.setHorizontalHeaderLabels(BAN_HEADERS)
-        align_headers(self.table, (1, 5, 6, 7, 8, 9, 10))
+        align_headers(
+            self.table,
+            (
+                COL_BAN_SOURCE,
+                COL_BAN_SCORE,
+                COL_BAN_STATUS,
+                COL_BAN_EXPIRE,
+                COL_BAN_CREATED,
+                COL_BAN_ACTION,
+            ),
+        )
         self._setup_table(self.table)
         self.ban_sel = CheckColumn(self.table, COL_BAN_CHECK)
         self.ban_sel.bind(self._on_ban_sel_changed)
@@ -754,6 +802,8 @@ class BansPage(QWidget):
         h.setSectionResizeMode(COL_BAN_REASON, QHeaderView.ResizeMode.Stretch)
         # 点表头排序（数据层重排 + 重渲染，见 gui/table_sort.py）
         self.ban_sort_header = SortHeader(self.table, self.ban_sort, self._apply_ban_sort)
+        # 双击行 = 勾选 / 取消勾选（与建议表同一套语义）
+        self.table.doubleClicked.connect(self._on_ban_double_click)
         lay.addWidget(self.table, 1)
         return self.ban_panel
 
@@ -765,7 +815,13 @@ class BansPage(QWidget):
             "失败": STATUS_FAILED,
             "处理中": STATUS_PENDING,
         }
+        # 「已到期」刻意不在这里映射成 STATUS_EXPIRED：那只是「到期后已成功解封」
+        # 的记录，而用户真正要找的是「到期时间已过、现在还在封着」的那批
+        # （普通权限下巡检跑不了，它们的状态仍是 active）—— 见 _load_bans。
         return m.get(self.status_filter.currentText(), "")
+
+    def _is_expired_filter(self) -> bool:
+        return self.status_filter.currentText() == "已到期"
 
     def refresh(self) -> None:
         # 重入会叠两次查询 + 两次重排；守卫同时负责「正在刷新…」这行提示。
@@ -842,6 +898,12 @@ class BansPage(QWidget):
         empty = not rows
         self.sug_empty.setVisible(empty)
         self.sug_table.setVisible(not empty)
+        # 「全部封禁」的可用性跟着列表走：没有建议时它是死按钮，点亮只会误导。
+        # 文案带上 IP 数（不是行数：合并行里几行事件可能只是同一个 IP）——
+        # 按下去会动多少条防火墙规则，点之前就该看得见。
+        ips = {str(r.get("ip") or "") for r in rows} - {""}
+        self.btn_sug_ban_all.setEnabled(not empty)
+        self.btn_sug_ban_all.setText(f"全部封禁（{len(ips)}）" if ips else "全部封禁")
         if empty:
             # 0 条时整区折叠成一行提示，把高度让给封禁记录表
             # 折叠态也要装得下「标题行 40 + 一句空态 26 + 下留白 14」
@@ -980,6 +1042,37 @@ class BansPage(QWidget):
             b.setEnabled(n > 0)
         self.btn_ban_all.setText("取消全选" if n and n == len(self._ban_rows) else "全选本页")
 
+    # ── 双击勾选 ──
+    def _on_sug_double_click(self, index) -> None:
+        self._toggle_row_check(self.sug_table, self.sug_sel, index, COL_SUG_ACTION)
+
+    def _on_ban_double_click(self, index) -> None:
+        self._toggle_row_check(self.table, self.ban_sel, index, COL_BAN_ACTION)
+
+    @staticmethod
+    def _toggle_row_check(table: QTableWidget, sel: CheckColumn, index, action_col: int) -> None:
+        """双击整行切换勾选态（2026-10-27 用户要求「增加双击选择功能」）。
+
+        勾选框只有 14px，在 34px 行高里要瞄准它才能选中；而「勾几条 → 批量解封」
+        是这一页最常走的路径。双击任意单元格都能切换，鼠标不用精确定位。
+
+        两个细节：
+        · **操作列不接管**：那一列自绘了「解封」按钮，双击的第一下已经算一次
+          点击（delegate 自己会处理），再叠加一次勾选会让人以为解封没点中；
+        · 直接改 `CheckState` 而不是调 `CheckColumn.set_checked_rows`：单行改动能
+          顺着 `itemChanged` 自动同步表头三态与「已选 N 条」计数，不用重建整列。
+        """
+        if index is None:
+            return
+        row = index.row()
+        if index.column() == action_col or not 0 <= row < table.rowCount():
+            return
+        it = table.item(row, sel.col)
+        if it is None:
+            return
+        checked = it.checkState() == Qt.CheckState.Checked
+        it.setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
+
     def _checked_suggestions(self) -> list:
         return [self._sug_rows[i] for i in self.sug_sel.checked_rows() if i < len(self._sug_rows)]
 
@@ -990,6 +1083,23 @@ class BansPage(QWidget):
         rows = self._checked_suggestions()
         if not rows:
             return
+        self._emit_ban_many(rows)
+
+    def _ban_all_suggestions(self) -> None:
+        """一键封禁当前列表里的全部建议 IP（不需要逐条勾选）。
+
+        2026-10-27 用户要求这个入口直接显示在界面上。攻击期「逐条勾选 → 批量封禁」
+        每一步都在浪费时间，看到列表就该能一把封掉。
+
+        刻意**复用**同一条通道（`ask_ban_many` → 主窗口 `request_ban_many`）：
+        校验逐条做、确认只弹一次、执行串行在同一个后台线程里。这里不自己起线程、
+        不自己弹确认框 —— 封禁入口只能有一处，否则「校验绕不过去」这条前提就破了。
+        """
+        rows = list(self._sug_rows)
+        if rows:
+            self._emit_ban_many(rows)
+
+    def _emit_ban_many(self, rows: list) -> None:
         # 与风险事件页同一套去重口径：一个 IP 可能命中几十条事件，
         # 但防火墙只该多一条规则
         uniq: Dict[str, Any] = {}
@@ -1170,12 +1280,40 @@ class BansPage(QWidget):
         )
 
     def _load_bans(self) -> None:
-        rows = query_bans(status=self._status_filter(), keyword=self.search.text().strip())
+        kw = self.search.text().strip()
+        if self._is_expired_filter():
+            rows = self._query_expired(kw)
+        else:
+            rows = query_bans(status=self._status_filter(), keyword=kw)
         self._attach_geo(rows)
         # 排序状态跨刷新保留：搜索词变了，用户期望的排序方向不变
         self._ban_rows_src = rows
         self._ban_rows = self.ban_sort.apply(rows)
         self._render_bans()
+
+    @staticmethod
+    def _query_expired(keyword: str = "") -> list:
+        """「已到期」= 到期时间已过，且这条封禁还在系统里说得上话。
+
+        `status = expired` 只是**到期巡检成功删掉规则之后**的状态。普通权限运行时
+        巡检根本跑不了，所以「已经到期、但防火墙规则还在拦」的记录状态依旧是
+        `active` —— 界面上写着「已封禁」，左下角却提示「有 N 条已到期」。若筛选只
+        认 `expired`，用户点进去只会看到 0 条，正好漏掉最需要处理的那批。
+
+        所以这里按 expire_at 判定，收 `active`（到期未解封，排最前）与 `expired`
+        （到期且已解封）两类；`unbanned` 是人工主动解封，跟「到期」无关，不收。
+        """
+        now_ms = int(time.time() * 1000)
+        out = []
+        for b in query_bans(keyword=keyword):
+            if b.status not in (STATUS_ACTIVE, STATUS_EXPIRED):
+                continue
+            if not b.expire_at or b.expire_at > now_ms:
+                continue  # 永久封禁（expire_at=0）永远不会「到期」
+            out.append(b)
+        # 还在拦着的排前面：这才是要动手的那批，已解封的是历史
+        out.sort(key=lambda b: (b.status != STATUS_ACTIVE, -(b.expire_at or 0)))
+        return out
 
     @staticmethod
     def _attach_geo(rows) -> None:
@@ -1222,6 +1360,14 @@ class BansPage(QWidget):
 
     def _render_bans(self) -> None:
         rows = self._ban_rows
+        # 空态文案要认得筛选项：筛「已到期」却提示「尚无封禁记录」，
+        # 等于告诉用户「你库是空的」，而事实是「这个筛选下没有」。
+        if self._is_expired_filter():
+            self.empty.title.setText("没有已到期的封禁")
+            self.empty.desc.setText("当前筛选下没有到期时间已过的记录")
+        else:
+            self.empty.title.setText("尚无封禁记录")
+            self.empty.desc.setText("确认封禁后，记录会出现在这里")
         self.empty.setVisible(not rows)
         self.table.setVisible(bool(rows))
         # 计数写在卡片标题里：两块卡片并排上下时，「这块有几条」是定位的第一步
@@ -1242,10 +1388,11 @@ class BansPage(QWidget):
                 }.get(b.status, C.text_secondary)
 
                 self.ban_sel.fill(i)
+                # ID 列已删（列宽预算见 BAN_WIDTHS 注释）：记录号挂进 IP 的
+                # tooltip 与右键菜单，需要引用审计条目时仍然查得到。
                 self.table.setItem(
-                    i, 1, make_item(b.id, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                    i, 1, make_item(b.ip, C.text_link, tip=f"{b.ip}（记录 #{b.id}）")
                 )
-                self.table.setItem(i, 2, make_item(b.ip, C.text_link, tip=b.ip))
                 self.table.setItem(
                     i, COL_BAN_REASON, make_item(b.reason or "-", tip=b.reason or "")
                 )
@@ -1262,10 +1409,14 @@ class BansPage(QWidget):
                     make_item(geo.region_short if geo else "未知", tip=geo_tip),
                 )
                 self.table.setItem(
-                    i, 5, make_item(b.source_label, align=Qt.AlignmentFlag.AlignCenter)
+                    i,
+                    COL_BAN_SOURCE,
+                    make_item(b.source_label, align=Qt.AlignmentFlag.AlignCenter),
                 )
                 self.table.setItem(
-                    i, 6, make_item(b.risk_score, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                    i,
+                    COL_BAN_SCORE,
+                    make_item(b.risk_score, align=Qt.AlignmentFlag.AlignCenter, mono=True),
                 )
                 # 拦截次数跟在状态后面：封了还在撞的 IP 一眼能看出来
                 # （例：已封禁 ×7）。完整说明进 tooltip（见 BanRecord.hit_hint）
@@ -1274,7 +1425,7 @@ class BansPage(QWidget):
                     status_text = f"{b.status_label} {b.hit_label}"
                 self.table.setItem(
                     i,
-                    7,
+                    COL_BAN_STATUS,
                     make_item(
                         status_text,
                         status_color,
@@ -1282,11 +1433,27 @@ class BansPage(QWidget):
                         tip=b.hit_hint if b.hit_label else b.status_label,
                     ),
                 )
+                # 时间列 136 才装得下 `2026-10-20 09:27`（实测 112 + padding）。
+                # tooltip 仍给到秒：判断「是不是刚封的」时差几秒有意义。
                 self.table.setItem(
-                    i, 8, make_item(b.expire_min, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                    i,
+                    COL_BAN_EXPIRE,
+                    make_item(
+                        b.expire_min,
+                        align=Qt.AlignmentFlag.AlignCenter,
+                        mono=True,
+                        tip=ms_to_str(b.expire_at) if b.expire_at else "永久封禁（不会自动解封）",
+                    ),
                 )
                 self.table.setItem(
-                    i, 9, make_item(b.created_min, align=Qt.AlignmentFlag.AlignCenter, mono=True)
+                    i,
+                    COL_BAN_CREATED,
+                    make_item(
+                        b.created_min,
+                        align=Qt.AlignmentFlag.AlignCenter,
+                        mono=True,
+                        tip=b.created_at or "",
+                    ),
                 )
         finally:
             self.ban_sel.end_render()

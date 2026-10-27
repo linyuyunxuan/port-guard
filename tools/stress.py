@@ -495,9 +495,9 @@ def main() -> int:
 
     cfg.warm()
     # 关掉所有「会自动跑起来」的东西：离线库同步会真的去下载 10MB（还带重试），
-    # 弹窗会挂死离屏脚本 —— 这两样都会把压测结果污染成「网络慢」和「什么都没量到」
+    # 声音会占住音频设备 —— 这两样都会把压测结果污染成「网络慢」和「什么都没量到」。
+    # 告警弹窗已取消（2026-10-27），没有需要关的模态窗口了。
     cfg.set("alert_sound", "0", persist=False)  # 压测机上别真的响
-    cfg.set("alert_popup_level", "none", persist=False)
     cfg.set("xdb_auto_sync", "0", persist=False)
     cfg.set("xdb_sync_on_start", "0", persist=False)
     cfg.set("auto_mode", "0", persist=False)  # 别让合成事件触发自动封禁

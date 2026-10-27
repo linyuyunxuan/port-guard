@@ -552,9 +552,11 @@ class SettingsPage(QWidget):
 
         alert = _Panel("告警通知")
         self.tg_sound = ToggleSwitch(True)
-        self.cb_popup = QComboBox()
-        self.cb_popup.addItems(["不弹窗", *LEVEL_LABELS])
-        self.cb_popup.setFixedWidth(140)
+        # 2026-10-27 用户要求「取消这个弹窗，保留右下角弹窗功能」：模态 QMessageBox
+        # 已从 core/alerts.py 移除。这里不再提供「弹窗级别」下拉 —— 留一个改了没
+        # 任何效果的控件，比没有这个控件更让人困惑，所以换成一句固定说明。
+        self.lbl_popup_note = QLabel("仅托盘气泡（右下角），不再弹出窗口")
+        self.lbl_popup_note.setObjectName("hint")
         self.sp_merge = QSpinBox()
         self.sp_merge.setRange(0, 3600)
         self.sp_merge.setValue(60)
@@ -575,7 +577,7 @@ class SettingsPage(QWidget):
         b_test.clicked.connect(self._test_alert)
 
         alert.add("声音提示", self.tg_sound)
-        alert.add("弹窗级别", self.cb_popup)
+        alert.add("提醒方式", self.lbl_popup_note)
         alert.add("同 IP 合并窗口", self.sp_merge)
         alert.add(
             "已拦截不再提醒",
@@ -618,7 +620,8 @@ class SettingsPage(QWidget):
         lay.addWidget(alert)
 
         note = QLabel(
-            "弹窗级别选「不弹窗」时只写日志与发送托盘通知；同 IP 在合并窗口内的多次命中只提醒一次。"
+            "告警一律以托盘气泡（任务栏右下角）提示，不再弹出模态窗口打断操作；"
+            "同 IP 在合并窗口内的多次命中只提醒一次。"
             "外部推送用于无人值守场景（企业微信 / 钉钉群机器人），默认关闭。"
         )
         note.setObjectName("hint")
@@ -1363,13 +1366,6 @@ class SettingsPage(QWidget):
 
         # 告警
         self.tg_sound.setChecked(cfg.get_bool("alert_sound", True))
-        popup = cfg.get("alert_popup_level", LEVEL_CRITICAL)
-        idx = (
-            0
-            if popup == "none"
-            else (LEVEL_ITEMS.index(popup) + 1 if popup in LEVEL_ITEMS else len(LEVEL_ITEMS))
-        )
-        self.cb_popup.setCurrentIndex(max(0, min(idx, self.cb_popup.count() - 1)))
         self.sp_merge.setValue(cfg.get_int("alert_merge_sec", 60))
         self.tg_block_silent.setChecked(cfg.get_bool("alert_block_silent", True))
 
@@ -1436,11 +1432,7 @@ class SettingsPage(QWidget):
                 "repeat_blacklist_enabled": "1" if self.tg_escalate.isChecked() else "0",
                 "repeat_blacklist_hits": self.sp_escalate_hits.value(),
                 "alert_sound": "1" if self.tg_sound.isChecked() else "0",
-                "alert_popup_level": (
-                    "none"
-                    if self.cb_popup.currentIndex() == 0
-                    else LEVEL_ITEMS[self.cb_popup.currentIndex() - 1]
-                ),
+                # alert_popup_level 已废弃（弹窗取消），不再写入：旧值留在库里也无害
                 "alert_merge_sec": self.sp_merge.value(),
                 # 已封禁 IP 的重复命中：只累计次数，不再打扰
                 "alert_block_silent": "1" if self.tg_block_silent.isChecked() else "0",

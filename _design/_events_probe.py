@@ -66,24 +66,42 @@ def fake_query(**kwargs):
                 ),
             }
         )
-    return rows
+    return rows, set()
 
 
-pe.query_risk_events = fake_query
+#: 事件页走的是「列表 + 行内封禁态」的合并查询（一次连接拿两份快照），
+#: 所以这里必须替掉 risk_events_page 而不是单查函数 —— 否则打补丁打在没人
+#: 调用的名字上，页面照样读真实库（探针曾因此只看到 3 条真事件）。
+pe.risk_events_page = fake_query
 
 win = MainWindow()
 win.show()
 win._switch_page(1)
 page = win.page_events
+# 关掉「同类合并」：合并会把 28 条并按「IP+端口+路径+等级+评分+规则+状态」折成
+# 三五组，而本探针要看的是**每一行**的列宽与规则名，合并后样本就散了
+page.merge.setChecked(False)
 page.refresh()
 for _ in range(15):
     app.processEvents()
 
 rows = page.table.rowCount()
 assert rows == 28, f"行数不对：{rows}"
-assert page.table.columnCount() == 11, page.table.columnCount()
+# 2026-10-27：「命中规则」列并进「等级 / 命中规则」列，11 列 → 10 列
+assert page.table.columnCount() == 10, page.table.columnCount()
 assert page.table.item(0, pe.COL_CHECK) is not None, "勾选列没有 item"
 assert page.table.horizontalHeaderItem(pe.COL_CHECK) is not None, "表头没有全选方框"
+
+# 规则名要真的画在徽章右边（BADGE_NOTE_ROLE），不是只写进 tooltip
+from gui.widgets import BADGE_NOTE_ROLE  # noqa: E402
+
+note0 = page.table.item(0, pe.COL_LEVEL).data(BADGE_NOTE_ROLE)
+assert note0 == "管理端口归属地检测", note0
+assert "命中规则" in page.table.item(0, pe.COL_LEVEL).toolTip()
+hdr_level = page.table.horizontalHeaderItem(pe.COL_LEVEL)
+assert int(hdr_level.textAlignment()) & int(pe.Qt.AlignmentFlag.AlignLeft), (
+    "等级列是「徽章 + 规则名」的左对齐一组，表头也必须左对齐"
+)
 
 # 默认：一个都没勾，批量按钮必须禁用
 assert page.lbl_sel.text() == "已选 0 条", page.lbl_sel.text()
@@ -171,6 +189,7 @@ def report_cols(tbl, label: str) -> int:
     print(f"-- {label}: 表宽={tbl.width()} 视口={tbl.viewport().width()}")
     for c in range(tbl.columnCount()):
         widest, sample, tips = 0, "", []
+        note_worst = ""
         for r in range(tbl.rowCount()):
             it = tbl.item(r, c)
             if it is None:
@@ -179,6 +198,15 @@ def report_cols(tbl, label: str) -> int:
             w = QtGui.QFontMetrics(it.font()).horizontalAdvance(it.text())
             if w > widest:
                 widest, sample = w, it.text()
+            note = str(it.data(BADGE_NOTE_ROLE) or "")
+            if len(note) > len(note_worst):
+                note_worst = note
+        if note_worst:
+            # 徽章 + 规则名：整组宽 = 左内距 + 徽章 + 间隙 + 规则名 + 右内距
+            nf = QtGui.QFont(tbl.font())
+            nf.setPixelSize(12)
+            widest = 10 + 36 + 8 + QtGui.QFontMetrics(nf).horizontalAdvance(note_worst) + 10
+            sample = f"[徽章] {note_worst}"
         avail = tbl.columnWidth(c) - pad
         truncated = widest > avail - safety
         elide_ok = c in pe.ELIDE_OK_COLS

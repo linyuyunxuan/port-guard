@@ -45,11 +45,11 @@ app_main._init_backend()
 check("后端初始化（日志/数据库/设置缓存/批量写入器）", cfg.is_warmed())
 check("APP_VERSION", APP_VERSION == "1.6.0", APP_VERSION)
 
-# 自检期间必须关掉自动封禁与弹窗告警：本脚本会喂入「恶意样本」，
+# 自检期间必须关掉自动封禁与告警声音：本脚本会喂入「恶意样本」，
 # 若开着自动封禁、又恰好以管理员身份运行，就会真的往系统防火墙上写规则。
-_backup = {k: cfg.get(k) for k in ("auto_mode", "alert_popup_level", "alert_sound")}
+# 弹窗不再需要关心（2026-10-27 起告警只走托盘气泡，没有模态窗口了）。
+_backup = {k: cfg.get(k) for k in ("auto_mode", "alert_sound")}
 cfg.set("auto_mode", "0")
-cfg.set("alert_popup_level", "none")
 cfg.set("alert_sound", "0")
 check(
     "自检已切到无副作用模式（不自动封禁）",

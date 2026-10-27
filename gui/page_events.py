@@ -14,6 +14,11 @@
 4. **不设「状态」列**：操作列已经写明封没封（「封禁」/「已封禁」），
    再摆一列「未处理/已确认/已忽略」等于同一件事说两遍，还容易被误读成
    「已确认 = 已拦截」。人工处理状态收敛进「处置」列，见 `_disposition_cell`。
+5. **「命中规则」不单独占一列**：规则名画在等级徽章右侧（`BADGE_NOTE_ROLE`）。
+   等级说「多严重」、规则说「为什么」，本就是同一句话；拆成两列时它们又都是
+   可变长文本，窄屏上先崩的必然是路径列（实测只剩 122px，`/api/v1/orders/search`
+   被截成 `/api/v1/orders/…`）。合并后规则名与路径都完整，多条规则只写
+   第一条 + `+N`，全文在 tooltip 与详情页里（导出 CSV 也仍保留整列）。
 """
 
 import datetime
@@ -21,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app import audit
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
-from core.config import LEVEL_ORDER
+from core.config import LEVEL_LABEL, LEVEL_ORDER
 from core.database import (
     delete_risk_events,
     risk_events_page,
@@ -90,13 +95,12 @@ log = get_logger(__name__)
 HEADERS = [
     "",
     "时间",
-    "等级",
+    "等级 / 命中规则",
     "来源 IP",
     "归属地",
     "端口",
     "路径",
     "评分",
-    "命中规则",
     "处置",
     "操作",
 ]
@@ -104,13 +108,27 @@ HEADERS = [
 # 列宽取「实测最宽文字 + 16px padding + 8px 余量」，按 PySide2（交付栈）的字体
 # 度量算——它比 PySide6 宽 6~20%，按开发栈定宽会在客户机上截断。
 # 有界内容（时间 / 等级 / IP / 归属地 / 端口 / 评分 / 处置）一律给足，不许截断：
-# 截了用户就分不清是哪条记录。无界内容（路径 / 命中规则）交给 tooltip 兜底，
+# 截了用户就分不清是哪条记录。无界内容（路径 / 规则名）交给 tooltip 兜底，
 # 第 6 列（路径）同时是唯一的拉伸列。
 # 时间列用 `MM-DD HH:MM:SS`：事件页是事后复盘，同一分钟可能有十几条爆破记录，
 # 秒数是排序的唯一依据，不能省成分钟。同类合并开启时该列还会带 ` ×N` 后缀
 # （N 最大按三位数留量），所以比裸时间戳宽 40px。
 # 评分列 46px：`100` 在等宽加粗下要 21px，太窄会被省略成「1…」—— 分数直接被
 # 读错一个数量级，比列宽值钱。
+#
+# 2026-10-27：把「命中规则」列（178px）**并进「等级」列**。
+# 原来 11 列里有 2 列是可省略的长文本（路径 / 命中规则），窄屏幕上先崩的总是
+# 路径 —— 实测只拿到 122px，`/api/v1/orders/search` 显示成 `/api/v1/orders/…`，
+# 而「请求了什么」正是判定这次攻击性质的第一依据。
+# 合并之所以成立：等级（多严重）与规则（为什么）本来就是同一句话，分两列看
+# 反而要在同一行上来回横跳。合并后等级列 200 = 左右内距 20 + 徽章 36 +
+# 间隙 8 + 规则名 136，最长内置规则名「管理端口归属地检测」(108) 与
+# 「判定风险：河南办公网」这类区域规则(131) 都完整显示；多条规则只写
+# 第一条 + `+N`（全文进 tooltip），避免一行里塞四五个规则名互相挤压。
+# 136 而不是 108：区域规则的显示名是用户自己起的，长度不受控，留出余量后
+# 常见取名（≤10 字）都放得下，超长的才走省略 + tooltip。
+# 腾出的 178px 让路径列从 122 涨到 180（`/api/v1/orders/search` 需 171），
+# 同时归属地 124→112（更长的省市名本来就走省略 + tooltip，没有新增截断）。
 COL_CHECK = 0
 COL_TIME = 1
 COL_LEVEL = 2
@@ -119,16 +137,17 @@ COL_GEO = 4
 COL_PORT = 5
 COL_PATH = 6
 COL_SCORE = 7
-COL_RULE = 8
-COL_DISPOSITION = 9
-COL_ACTION = 10
+COL_DISPOSITION = 8
+COL_ACTION = 9
 
-COL_WIDTHS = [37, 138, 62, 142, 124, 58, 125, 52, 178, 80, 106]
+COL_WIDTHS = [37, 138, 200, 142, 112, 58, 180, 46, 80, 106]
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 勾选列（点了是全选）与操作列（无值）不给规则 —— 点这两列表头不排序。
 # 等级按**语义序**排而不是按中文笔画：等级取 LEVEL_ORDER 的严重度，按本地化
 # 文本排的话「严/高/中/低」是乱序；处置同样按 DISPOSITION_ORDER 的处置先后排。
+# 规则名不再单独排序：它跟着等级走，点「等级」表头排的是严重度 —— 想按规则
+# 归堆看，用搜索框过滤规则名比排一列长文本更直接。
 SORT_SPECS = {
     COL_TIME: ColumnSpec(KIND_MS, lambda r: r.get("event_ts")),
     COL_LEVEL: ColumnSpec(KIND_NUM, lambda r: LEVEL_ORDER.get(str(r.get("risk_level") or ""))),
@@ -137,17 +156,15 @@ SORT_SPECS = {
     COL_PORT: ColumnSpec(KIND_NUM, lambda r: r.get("local_port")),
     COL_PATH: ColumnSpec(KIND_TEXT, lambda r: r.get("path") or "/"),
     COL_SCORE: ColumnSpec(KIND_NUM, lambda r: r.get("risk_score")),
-    COL_RULE: ColumnSpec(
-        KIND_TEXT, lambda r: "、".join(rule_label(x) for x in r.get("matched_rules", [])) or ""
-    ),
     COL_DISPOSITION: ColumnSpec(KIND_NUM, lambda r: DISPOSITION_ORDER.get(disposition_of(r))),
 }
 
 #: 内容无界的列：允许省略号，但必须有 tooltip 兜底
-ELIDE_OK_COLS = (COL_PATH, COL_RULE)
+ELIDE_OK_COLS = (COL_PATH,)
 
-# 居中对齐的列（表头与数据必须一致，否则一列会被读成两根轴）
-CENTER_COLS = (COL_CHECK, COL_LEVEL, COL_PORT, COL_SCORE, COL_DISPOSITION)
+# 居中对齐的列（表头与数据必须一致，否则一列会被读成两根轴）。
+# 等级列例外：它是「徽章 + 规则名」的左对齐一组，居中会让每行徽章横坐标漂移。
+CENTER_COLS = (COL_CHECK, COL_PORT, COL_SCORE, COL_DISPOSITION)
 
 # 时间筛选：右端一律取「次日零点」的左闭右开区间
 RANGE_ALL = "全部时间"
@@ -475,6 +492,14 @@ class EventsPage(QWidget):
         self.table.setHorizontalHeaderLabels(HEADERS)
 
         align_headers(self.table, CENTER_COLS)
+        # 等级列是「徽章 + 规则名」的左对齐一组（由 delegate 自绘），表头必须
+        # 同向；不显式设的话靠 QTableWidget 的默认值，而默认值在 Qt5/Qt6 之间
+        # 不一致（Qt6 是「未设置」，渲染成左，Qt5 有可能居中）。
+        align_headers(
+            self.table,
+            (COL_LEVEL,),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -735,7 +760,20 @@ class EventsPage(QWidget):
                     else "-"
                 )
                 rules = r.get("peak_rules") or r.get("matched_rules") or []
-                matched = "、".join(rule_label(x) for x in rules) or "-"
+                labels = [rule_label(x) for x in rules]
+                # 规则名排在徽章右边：等级说「多严重」，规则说「为什么」，
+                # 是同一句话的两半。多条只写第一条 + `+N`，全文进 tooltip ——
+                # 一行里塞四五个规则名，每个都被省略号截一半，谁也读不出来。
+                if not labels:
+                    note = ""
+                elif len(labels) == 1:
+                    note = labels[0]
+                else:
+                    note = f"{labels[0]} +{len(labels) - 1}"
+                level_label = LEVEL_LABEL.get(level, level)
+                level_tip = (
+                    f"{level_label}\n命中规则：{'、'.join(labels)}" if labels else level_label
+                )
 
                 n = int(r.get("group_count") or 1)
                 if n > 1:
@@ -753,7 +791,7 @@ class EventsPage(QWidget):
 
                 self.sel.fill(i)
                 self.table.setItem(i, COL_TIME, make_item(time_text, mono=True, tip=time_tip))
-                self.table.setItem(i, COL_LEVEL, badge_item(level))
+                self.table.setItem(i, COL_LEVEL, badge_item(level, text=level_tip, note=note))
                 ip_text = str(r.get("ip") or "")
                 self.table.setItem(i, COL_IP, make_item(ip_text, C.text_link, tip=ip_text))
                 geo_text = geo.display if geo else "未知"
@@ -783,7 +821,6 @@ class EventsPage(QWidget):
                         mono=True,
                     ),
                 )
-                self.table.setItem(i, COL_RULE, make_item(matched, tip=matched))
                 disp_text, disp_color, disp_tip = _disposition_cell(r, handled)
                 self.table.setItem(
                     i,

@@ -68,13 +68,42 @@ def test_monitor_disposition_column_fits_three_chars() -> None:
 
 
 def test_events_path_and_action_columns_keep_their_content() -> None:
-    """事件页：路径列 ≥ 110（`/api/v1/orders/search` 的正文），
-    操作列 ≥ 100（行内「封禁」+「⋯」两个按钮，96 时第二个被裁掉）。"""
+    """事件页：路径列 ≥ 150（`/api/v1/orders/search` 实测需 171），
+    操作列 ≥ 100（行内「封禁」+「⋯」两个按钮，96 时第二个被裁掉）。
+
+    150 是 02_ux_spec 的弹性列下限。2026-10-27 之前这里是 122 ——
+    `/api/v1/orders/search` 显示成 `/api/v1/orders/…`，「请求了什么」这条
+    判定攻击性质的第一依据被截掉了。腾空间的办法是把「命中规则」并进等级列，
+    不是从别处硬抠（见下一条用例）。
+    """
     from gui import page_events
 
     path_w = _stretch_width(page_events.COL_WIDTHS, page_events.COL_PATH)
-    assert path_w >= 110, f"路径列只剩 {path_w}px"
+    assert path_w >= 150, f"路径列只剩 {path_w}px"
     assert page_events.COL_WIDTHS[page_events.COL_ACTION] >= 100
+
+
+def test_event_rule_name_lives_next_to_level_badge() -> None:
+    """「命中规则」不再独占一列：规则名画在等级徽章右侧（同一格）。
+
+    判据三条：
+    ① 表头里没有「命中规则」整列 —— 11 列里两列可变长文本时，先崩的总是路径；
+    ② 等级列宽 ≥ 190（左内距 10 + 徽章 34 + 间隙 8 + 最长规则名 108 + 右内距 10
+       = 170，留 20 余量），否则每行的「为什么」被省略号吃掉；
+    ③ badge_item 把规则名写进 BADGE_NOTE_ROLE 且 tooltip 带全文 —— 多条规则
+       时单元格里只有 `+N`，全文只剩这一条出口。
+    """
+    from gui import page_events
+    from gui.widgets import BADGE_NOTE_ROLE, badge_item
+
+    _qapp()
+    assert "命中规则" not in page_events.HEADERS
+    assert page_events.HEADERS[page_events.COL_LEVEL] == "等级 / 命中规则"
+    assert page_events.COL_WIDTHS[page_events.COL_LEVEL] >= 190
+
+    it = badge_item("high", note="管理端口归属地检测")
+    assert it.data(BADGE_NOTE_ROLE) == "管理端口归属地检测"
+    assert "管理端口归属地检测" in it.toolTip()
 
 
 def test_bans_reason_column_fits_auto_reason() -> None:
@@ -88,8 +117,15 @@ def test_bans_reason_column_fits_auto_reason() -> None:
     assert page_bans.BAN_HEADERS[page_bans.COL_BAN_GEO] == "归属地"
     assert page_bans.BAN_WIDTHS[page_bans.COL_BAN_GEO] >= 110, "归属地列放不下「河南省 焦作市」"
     # 来源列 50 时「自动」被渲染成「自…」：QFontMetrics 量出来够，
-    # 实际还差省略号的位置，所以按 56 卡（列索引随归属地列右移）
-    assert page_bans.BAN_WIDTHS[5] >= 56
+    # 实际还差省略号的位置，所以按 56 卡。用常量而不是字面量下标 ——
+    # 2026-10-27 删掉「ID」列后整排索引左移，写死的 5 会去查「评分」列（46），
+    # 断言会在什么都没坏的情况下变红。
+    assert page_bans.BAN_WIDTHS[page_bans.COL_BAN_SOURCE] >= 56
+    # IP 列要放得下 15 字符的 IPv4（`182.118.236.126` 实测 105 + padding 16）
+    assert page_bans.BAN_WIDTHS[1] >= 130, "IP 列会把末两位裁掉，看不出封的是谁"
+    # 到期 / 创建列要放得下 `2026-10-20 09:27`（实测 112 + padding 16）
+    assert page_bans.BAN_WIDTHS[page_bans.COL_BAN_EXPIRE] >= 132
+    assert page_bans.BAN_WIDTHS[page_bans.COL_BAN_CREATED] >= 132
 
 
 # ═══════════════════ 2. 表单内容列限宽 ═══════════════════

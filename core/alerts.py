@@ -1,10 +1,14 @@
 """
 PortGuard — 告警通知
 
-- 托盘气泡（QSystemTrayIcon.showMessage）
+- 托盘气泡（QSystemTrayIcon.showMessage）—— 唯一的人机提醒通道
 - 声音（Windows 内置 winsound，异步播放，不阻塞）
-- 严重级别弹窗（QMessageBox）
 - 同 IP 告警合并节流
+
+**不再有模态弹窗**（2026-10-27 用户要求：「取消这个弹窗，保留右下角弹窗功能」）。
+模态 QMessageBox 会抢走键盘焦点，而它的内容在托盘气泡与风险事件页里完全一样 ——
+攻击期几十条告警就是几十次打断，用户正在打字的那一行会被吃掉。
+告警文案仍由 `_title` / `_body` 生成，供气泡与外部推送共用。
 
 本模块的方法必须由 Qt 主线程调用（由主窗口的事件泵驱动）。
 """
@@ -41,13 +45,12 @@ class Alerter:
         try:
             return {
                 "sound": cfg.get_bool("alert_sound", True),
-                "popup_level": cfg.get("alert_popup_level", "critical") or "none",
                 "merge_sec": cfg.get_int("alert_merge_sec", 60),
                 "block_silent": cfg.get_bool("alert_block_silent", True),
             }
         except Exception:
             log.exception("读取告警设置失败，使用默认值")
-            return {"sound": True, "popup_level": "critical", "merge_sec": 60, "block_silent": True}
+            return {"sound": True, "merge_sec": 60, "block_silent": True}
 
     def set_tray(self, tray) -> None:
         self.tray = tray
@@ -113,22 +116,12 @@ class Alerter:
             except Exception:
                 log.exception("托盘气泡告警失败")
 
-        # 升级提示刻意不响铃、不弹窗：它一天也未必有一次，但弹窗抢焦点
-        # 打断操作的代价是一样的（2026-10-22 用户反馈）。气泡 + 审计足够。
+        # 升级提示刻意不响铃：它一天也未必有一次，但打扰的代价是一样的
+        # （2026-10-22 用户反馈）。
         if s["sound"] and not escalated:
             self._beep(level, disposition)
 
-        popup_level = s.get("popup_level") or ""
-        # 注意 "none" 必须显式排除：它会被 _rank 当成 0，导致「不弹窗」反而每次都弹
-        if (
-            popup_level
-            and popup_level != "none"
-            and not escalated
-            and self._rank(level) >= self._rank(popup_level)
-        ):
-            self._popup(title, body, disposition)
-
-        # 外部推送（可选）：气泡 + 声音 + 弹窗都要求「有人正看着这台机器」，
+        # 外部推送（可选）：气泡 + 声音都要求「有人正看着这台机器」，
         # 而最需要告警的无人值守场景恰恰没人看。默认关闭，见 core/alert_webhook.py
         self._notify_webhook(alert)
 
@@ -143,21 +136,6 @@ class Alerter:
         except Exception:
             # 推送失败绝不能影响本地告警：它只是「额外一条路」
             log.exception("Webhook 推送调度失败")
-
-    def _popup(self, title: str, body: str, disposition: str = "") -> None:
-        if self.parent is None:
-            return
-        try:
-            from qtcompat import QMessageBox
-
-            # 「已拦截」用信息图标：窗口里写的是结论，不是待办。
-            # 用黄色感叹号会让人以为还要去操作一次。
-            if disposition == DISPOSITION_BLOCK:
-                QMessageBox.information(self.parent, title, body)
-            else:
-                QMessageBox.warning(self.parent, title, body)
-        except Exception:
-            log.exception("弹窗告警失败")
 
     def _beep(self, level: str, disposition: str = "") -> None:
         try:
@@ -243,10 +221,6 @@ class Alerter:
         if reason:
             lines.append(f"命中：{reason}")
         return "\n".join(lines)
-
-    @staticmethod
-    def _rank(level: str) -> int:
-        return {"normal": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}.get(level, 0)
 
     def _gc(self, now: float, window: int) -> None:
         if len(self._last_alert) < 2000:

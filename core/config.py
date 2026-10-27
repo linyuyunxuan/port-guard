@@ -282,6 +282,9 @@ DEFAULT_SETTINGS = {
     "max_ban_duration_sec": str(MAX_BAN_DURATION_DEFAULT_SEC),
     # 告警
     "alert_sound": "1",
+    # ⚠️ 已废弃（2026-10-27）：模态弹窗已取消，告警只走托盘气泡 + 声音 + 外部推送。
+    # 键保留只为兼容旧库（旧值 "none"/"critical" 不再被任何代码读取），
+    # 删掉它会让老库里的 rows 变成无主数据，收益为零。
     "alert_popup_level": LEVEL_CRITICAL,
     "alert_merge_sec": "60",  # 同 IP 告警合并窗口
     # ── 已拦截（该 IP 已在封禁名单中）的重复命中 ──
