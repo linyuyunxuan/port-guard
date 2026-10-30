@@ -1,5 +1,7 @@
 """设置缓存、令牌桶、schema 迁移的测试"""
 
+import sqlite3
+
 import pytest
 
 from core import settings as cfg
@@ -57,6 +59,41 @@ def test_missing_key_default_is_not_cached_as_value():
     assert cfg.get_float("unit_missing_x", 1.5) == 1.5
     assert cfg.get_int("unit_missing_x", 7) == 7
     assert cfg.get("unit_missing_x", "abc") == "abc"
+
+
+def test_numeric_ranges_clamp_dirty_values():
+    """P2-2：登记过区间的键，脏值（手工改库/老版本 bug）在读取层夹回合法范围。
+
+    变异：删掉 settings._NUMERIC_RANGES 或 get_int 里的 _clamp_range → 本例变红
+    （999/0/-5 原样穿透）。
+    """
+    init_db()
+    cfg.set("auto_ban_threshold", "999", persist=False)
+    assert cfg.get_int("auto_ban_threshold", 90) == 100
+    cfg.set("auto_ban_threshold", "-5", persist=False)
+    assert cfg.get_int("auto_ban_threshold", 90) == 0
+
+    # 保留期 0 天 = 启动即删光日志，必须被夹到 1
+    cfg.set("log_retention_days", "0", persist=False)
+    assert cfg.get_int("log_retention_days", 30) == 1
+
+    # 维护小时不在 0..23 的钟点不存在
+    cfg.set("maintenance_hour", "99", persist=False)
+    assert cfg.get_int("maintenance_hour", 3) == 23
+
+    # 封禁时长 0 = 「永久」，min 必须是 0，不能被夹成别的值
+    cfg.set("ban_duration_high_sec", "0", persist=False)
+    assert cfg.get_int("ban_duration_high_sec", 3600) == 0
+
+    # 未登记的键（时间戳、测试键）不受影响
+    cfg.set("xdb_last_check_at", "9999999999999", persist=False)
+    assert cfg.get_int("xdb_last_check_at", 0) == 9999999999999
+    cfg.set("unit_int", "42", persist=False)
+    assert cfg.get_int("unit_int") == 42
+
+    # 脏到解析不了的值仍回 default（原有语义不变）
+    cfg.set("auto_ban_threshold", "abc", persist=False)
+    assert cfg.get_int("auto_ban_threshold", 90) == 90
 
 
 # ═══════════════════ 令牌桶 ═══════════════════
@@ -128,6 +165,25 @@ def test_migration_adds_new_column():
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(ban_list)")]
         assert "unblocked_by" in cols
+    finally:
+        conn.close()
+
+
+def test_migration_v6_drops_dead_stats_hourly():
+    """v6：老库里只有建表没有读写的 stats_hourly 必须被删除。
+
+    变异：从 MIGRATIONS[6] 删掉 DROP 语句，或把 SCHEMA_VERSION 退回 5 → 本例变红
+    （表还在）。新库建表语句里也已移除该表，全新 init_db() 同样查不到它。
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE stats_hourly (hour TEXT PRIMARY KEY, total INTEGER DEFAULT 0)")
+        conn.execute("PRAGMA user_version = 5")
+        conn.commit()
+
+        assert migrate(conn) == SCHEMA_VERSION
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "stats_hourly" not in tables
     finally:
         conn.close()
 

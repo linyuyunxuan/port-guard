@@ -32,6 +32,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -46,6 +47,25 @@ log = get_logger(__name__)
 TIMEOUT_SEC = 5.0
 #: 同一 IP 的推送合并窗口（秒）。爆破时同一 IP 一分钟能命中几十次
 THROTTLE_SEC = 60
+
+#: 发送线程池（P2-3）。原来每条告警各起一个 daemon 线程：攻击洪峰下「每 IP
+#: 每合并窗口一条」仍可能同时挂几十个线程各自等 5s 超时。两个线程 + 队列
+#: 上限足够：合并窗口本身已把速率压到每 IP 60s 一条，池满时新任务排队，
+#: 不会丢（futures 队列无界但被 THROTTLE_SEC 天然限速，不可能积压成灾）。
+_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="alert-webhook")
+
+# ── 成功/失败计数（P2-10 可观测性）──
+# 「到底推出去没有」不能只靠翻日志：连续失败意味着接收端挂了，
+# 而告警链路自己没有告警。诊断与测试读 stats() 即可。
+_stats_lock = threading.Lock()
+_stats: Dict[str, int] = {"sent_ok": 0, "sent_fail": 0, "scheduled": 0}
+
+
+def stats() -> Dict[str, int]:
+    """推送计数快照：scheduled=已安排发送，sent_ok/sent_fail=发送结果"""
+    with _stats_lock:
+        return dict(_stats)
+
 
 #: 等级排序（与 core.models.LEVEL_ORDER 同口径，但这里只关心「够不够格推送」）
 _LEVEL_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -207,12 +227,18 @@ def send_async(alert: Dict[str, Any]) -> bool:
 
     def work() -> None:
         good, err = post(url, payload)
+        with _stats_lock:
+            _stats["sent_ok" if good else "sent_fail"] += 1
         if good:
             log.info("Webhook 已推送：%s ip=%s", masked, alert.get("ip"))
         else:
             log.warning("Webhook 推送失败：%s ip=%s %s", masked, alert.get("ip"), err)
 
-    threading.Thread(target=work, daemon=True, name="alert-webhook").start()
+    # 有界线程池代替「每条告警一个线程」（P2-3）：池满自动排队，
+    # 异常在 work() 内部消化不会外溢
+    with _stats_lock:
+        _stats["scheduled"] += 1
+    _POOL.submit(work)
     return True
 
 

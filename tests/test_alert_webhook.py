@@ -342,7 +342,9 @@ def test_send_async_runs_in_background_thread(monkeypatch: pytest.MonkeyPatch) -
         assert _wait_for(lambda: bool(sent)), "推送没有在后台发出"
         assert _wait_for(lambda: bool(logs.lines)), "推送结果没有写日志"
 
-    assert seen == ["alert-webhook"], "推送必须跑在后台线程，不能占界面线程"
+    assert seen and all(n.startswith("alert-webhook") and n != "MainThread" for n in seen), (
+        f"推送必须跑在后台线程池，不能占界面线程：{seen}"
+    )
     assert "113.118.1.1" in sent[0][1].decode("utf-8")
 
     # 日志里只许出现 host，key 绝不能落盘
@@ -415,3 +417,28 @@ def test_webhook_failure_never_blocks_local_alert(monkeypatch: pytest.MonkeyPatc
     alerter = alerts_mod.Alerter()
     # notify 依然要返回 True，异常被 _notify_webhook 吞掉
     assert alerter.notify(_alert(level="critical")) is True
+
+
+def test_send_async_stats_count_success_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2-10 可观测性：stats() 必须如实记下 成功/失败/已安排 三个计数。
+
+    变异：删掉 work() 里的计数分支 → 本例变红（差值全 0）。
+    """
+    _configure()
+    before = dict(alert_webhook.stats())
+
+    monkeypatch.setattr(alert_webhook, "post", lambda *a, **kw: (True, ""))
+    assert alert_webhook.send_async(_alert()) is True
+    assert _wait_for(lambda: alert_webhook.stats()["sent_ok"] > before["sent_ok"])
+
+    monkeypatch.setattr(alert_webhook, "post", lambda *a, **kw: (False, "HTTP 500"))
+    # 换个 IP 绕开 60s 合并窗口
+    assert alert_webhook.send_async(_alert(ip="198.51.100.42")) is True
+    assert _wait_for(lambda: alert_webhook.stats()["sent_fail"] > before["sent_fail"]), (
+        "失败必须计入 sent_fail，接收端挂了要能从计数上看出来"
+    )
+
+    after = alert_webhook.stats()
+    assert after["sent_ok"] == before["sent_ok"] + 1
+    assert after["sent_fail"] == before["sent_fail"] + 1
+    assert after["scheduled"] >= before["scheduled"] + 2

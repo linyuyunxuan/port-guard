@@ -17,7 +17,7 @@ from core.logger import get_logger
 log = get_logger(__name__)
 
 # 当前程序支持的 schema 版本（每加一版 +1 并在下方登记 DDL）
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # version -> DDL 列表（从上一版升级到该版需要执行的语句）
 MIGRATIONS: Dict[int, List[str]] = {
@@ -94,6 +94,14 @@ MIGRATIONS: Dict[int, List[str]] = {
     5: [
         "ALTER TABLE ban_list ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE ban_list ADD COLUMN last_hit_at INTEGER",
+    ],
+    # v6：删除死表 stats_hourly
+    #
+    # 该表只有 CREATE、没有任何读写点（小时聚合实际由界面按 access_log 现算），
+    # 留着只会让读代码的人以为它有消费者。这里 DROP 掉老库里已建的表；
+    # 新库的建表语句里已同步移除，不会再出现。
+    6: [
+        "DROP TABLE IF EXISTS stats_hourly",
     ],
 }
 

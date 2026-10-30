@@ -127,7 +127,7 @@ def test_migration_v5_adds_hit_columns_and_backfills_zero(isolated_env, tmp_path
         conn.execute("PRAGMA user_version = 4")
         conn.commit()
 
-        assert migrate(conn) == SCHEMA_VERSION == 5
+        assert migrate(conn) == SCHEMA_VERSION == 6
 
         cols = {r[1] for r in conn.execute("PRAGMA table_info(ban_list)")}
         assert {"hit_count", "last_hit_at"} <= cols

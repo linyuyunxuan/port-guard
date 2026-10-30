@@ -14,13 +14,63 @@ auto_ban_threshold），实测 17.8 ms/条 的无谓开销；而设置几乎从�
 """
 
 import threading
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Optional, Tuple
 
 from core import database
 
 _lock = threading.RLock()
 _cache: Dict[str, str] = {}
 _warmed = False
+
+# ── 数值型设置的合法区间（闭区间，P2-2）──
+#
+# 为什么在读取层夹：设置表的 value 是 TEXT，手工改库 / 老版本 bug / 恢复了别人
+# 导出的库，都可能写入「保留期 0 天」（启动即删光日志）或「阈值 -5」（每个
+# 连接都算风险）这类脏值。读取层夹回合法范围是最靠近消费者的最后一道闸，
+# 比在每个调用点各写一遍 max/min 可靠得多。
+#
+# 注意边界语义（改范围前先核对 tests/）：
+# - 封禁时长 0 = 「永久」（ban_service.prepare 的既有约定），min 必须是 0；
+# - 时长上限与 MAX_BAN_SECONDS（365 天）对齐，超长值由 ban_service 再夹一次；
+# - 时间戳类键（xdb_last_check_at 等）**不登记**——它们是动态值，不该被夹。
+_NUMERIC_RANGES: Dict[str, Tuple[float, float]] = {
+    "auto_ban_threshold": (0, 100),
+    "default_ban_duration_sec": (0, 365 * 86400),
+    "ban_duration_critical_sec": (0, 365 * 86400),
+    "ban_duration_high_sec": (0, 365 * 86400),
+    "ban_duration_medium_sec": (0, 365 * 86400),
+    "ban_duration_low_sec": (0, 365 * 86400),
+    "max_ban_duration_sec": (60, 365 * 86400),
+    "ban_escalation_factor": (1, 1000),
+    "ban_escalation_max_sec": (60, 365 * 86400),
+    "repeat_blacklist_hits": (1, 10000),
+    "alert_merge_sec": (0, 86400),
+    "log_retention_days": (1, 3650),
+    "risk_retention_days": (1, 3650),
+    "ban_retention_days": (1, 3650),
+    "audit_retention_days": (1, 3650),
+    "maintenance_hour": (0, 23),
+    "monitor_buffer_size": (100, 10_000_000),
+    "geo_cache_size": (1000, 10_000_000),
+    "watch_interval_sec": (1.0, 86400.0),
+    "watch_dedupe_sec": (0, 86400),
+    "xdb_sync_interval_hours": (1, 8760),
+    "log_view_max_lines": (200, 1_000_000),
+    "log_view_tail_ms": (200, 3_600_000),
+    "rate_limit_per_sec": (1, 1_000_000),
+}
+
+
+def _clamp_range(key: str, value: float) -> float:
+    rng: Optional[Tuple[float, float]] = _NUMERIC_RANGES.get(key)
+    if rng is None:
+        return value
+    lo, hi = rng
+    if value < lo:
+        return lo
+    if value > hi:
+        return hi
+    return value
 
 
 def warm() -> int:
@@ -65,16 +115,19 @@ def get(key: str, default: str = "") -> str:
 
 def get_int(key: str, default: int = 0) -> int:
     try:
-        return int(str(get(key, str(default))).strip())
+        v = int(str(get(key, str(default))).strip())
     except (TypeError, ValueError):
         return default
+    # 登记过区间的键夹回合法范围（P2-2）；未登记的键原样返回
+    return int(_clamp_range(key, v))
 
 
 def get_float(key: str, default: float = 0.0) -> float:
     try:
-        return float(str(get(key, str(default))).strip())
+        v = float(str(get(key, str(default))).strip())
     except (TypeError, ValueError):
         return default
+    return _clamp_range(key, v)
 
 
 def get_bool(key: str, default: bool = False) -> bool:

@@ -8,9 +8,16 @@ Qt 主线程用 QTimer 周期性 drain 并刷新界面。
 本模块不依赖 PyQt，可独立测试。
 """
 
+import logging
 import queue
 import threading
 from typing import Any, List, Optional
+
+_log = logging.getLogger(__name__)
+
+#: 丢弃计数每涨这么多条记一条 WARNING：洪峰期丢事件是设计内行为（保护 UI），
+#: 但丢到多少完全静默的话，用户看到「事件页少了几行」会以为程序漏报了。
+_LOG_DROP_EVERY = 1000
 
 
 class EventBus:
@@ -61,6 +68,10 @@ class EventBus:
                 pass
             with self._lock:
                 self._dropped += 1
+                total = self._dropped
+            # 可观测性（P2-10）：不记的话「丢过事件」这件事外界永远看不到
+            if total % _LOG_DROP_EVERY == 0:
+                _log.warning("事件总线丢弃数已达 %d 条（队列持续满载）", total)
 
     # ── 消费（UI 线程调用）──
     @staticmethod

