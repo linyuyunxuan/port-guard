@@ -290,22 +290,35 @@ def rule_exists(name: str) -> bool:
     为什么必须有这一层：`netsh` / `New-NetFirewallRule` 返回 0 只代表命令被接受，
     不代表规则被策略放行。没有复核时，界面会显示「已封禁」而实际拦截不存在 ——
     对安全工具来说这是最坏的一种失败：人以为安全了。
+
+    性能：优先用「精确名探测」``netsh show rule name=X``（单条规则查询，毫秒级），
+    只有查询本身抛异常、或命中却没在输出里找到名字（netsh 本地化/权限的极端情形）
+    才回退到 ``list_rule_names()`` 枚举全部 PortGuard 规则（200~600ms）。自动封禁是
+    热路径，每封一个 IP 会调用两次本函数，**绝不能**在常见路径上做全量枚举。
     """
     if not name:
         return False
-    try:
-        if name in list_rule_names():
-            return True
-    except Exception:
-        log.exception("回读规则列表失败，改用精确名探测 name=%s", name)
-    # 列表可能因权限/解析失败而为空，再按精确名探一次（不解析本地化表头，只找名字）
+    # 优先：精确名探测（单条规则，远快于枚举全部）
     try:
         code, out = _run(["netsh", "advfirewall", "firewall", "show", "rule", f"name={name}"])
     except Exception:
-        log.exception("精确名探测规则失败 name=%s", name)
+        log.exception("精确名探测规则失败 name=%s，回退到列表枚举", name)
+    else:
+        text = out or ""
+        if code == 0 and name.lower() in text.lower():
+            return True
+        if code == 0:
+            # 命令成功但输出里没匹配到名字（极罕见）：用列表兜底确认一次
+            log.debug("精确名探测命中却未在输出找到名字，列表兜底 name=%s", name)
+        else:
+            # code != 0：netsh 明确「无匹配规则」—— 信任它，规则不存在
+            return False
+    # 兜底：列表可能因为权限/解析失败而漏掉，再枚举一次确认
+    try:
+        return name in list_rule_names()
+    except Exception:
+        log.exception("回读规则列表失败 name=%s", name)
         return False
-    text = out or ""
-    return code == 0 and name.lower() in text.lower()
 
 
 def block_ip(ip: str, duration_sec: Optional[int] = None, note: str = "") -> Tuple[bool, str, str]:

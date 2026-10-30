@@ -8,6 +8,7 @@
 """
 
 import os
+import threading
 
 import pytest
 
@@ -323,6 +324,80 @@ def test_start_stop_lifecycle(tmp_path):
     assert w.stats()["running"] is False
 
 
+def test_update_config_while_running_keeps_single_thread(tmp_path):
+    """运行中热更新配置（restart=True）绝不能 stop 再 start：
+
+    stop 一旦超时，旧线程还活着却被判「已停止」，start 会据此起第二个采集线程
+    （双起 → 重复采集 + 重复自动封禁）。正确做法是运行中换配置、不重启线程，
+    主循环每轮都会重读 self.config，新配置下一轮自动生效。
+    """
+    w = _watcher(tmp_path, ports=[], interval_sec=0.05)
+    w.start()
+    try:
+        assert w.running
+        before = w._thread
+        w.update_config(
+            WatchConfig(
+                enabled=True,
+                ports=[3306],
+                interval_sec=0.05,
+                fwlog_path=str(tmp_path / "pfirewall.log"),
+            ),
+            restart=True,
+        )
+        # 线程对象不变 = 没有重启（否则会双起）
+        assert w._thread is before
+        assert w.running
+        # 新配置立即生效（属性走锁读，循环里每轮也重读）
+        assert w.config.ports == [3306]
+        # 全局只允许存在一个采集线程
+        pg_threads = [t for t in threading.enumerate() if t.name == "pg-watch"]
+        assert len(pg_threads) == 1, f"期望 1 个采集线程，实际 {len(pg_threads)}"
+    finally:
+        w.stop()
+        w._thread = None
+
+
+def test_stop_keeps_thread_reference_on_timeout():
+    """stop 超时后不能把 ``_thread`` 置空：
+
+    否则 running 误报 False，后续 start() / update_config 据此起第二个采集线程。
+    必须保持引用，让 running 反映真实状态；线程最终在下一轮循环检查 _stop 时
+    自行退出（daemon，无需强杀）。
+    """
+    w = PortWatcher(WatchConfig(enabled=True, ports=[], interval_sec=1.0))
+    blocker = threading.Event()
+    stuck = threading.Thread(target=blocker.wait, daemon=True)
+    stuck.start()
+    try:
+        w._thread = stuck
+        w._stop.clear()
+        w.stop(timeout=0.2)  # 超时：stuck 仍被 blocker 卡住
+        # 超时不能谎报已停：_thread 保留、running 仍为真
+        assert w._thread is stuck
+        assert w.running is True
+    finally:
+        blocker.set()
+        stuck.join(timeout=2)
+
+
+def test_start_does_not_double_spawn_when_old_thread_alive():
+    """回归护栏：若存在一个仍存活的旧线程，start() 必须拒绝再起一个。"""
+    w = PortWatcher()
+    blocker = threading.Event()
+    alive = threading.Thread(target=blocker.wait, daemon=True)
+    alive.start()
+    try:
+        w._thread = alive
+        w._stop.clear()
+        assert w.running is True
+        w.start()  # 不应创建新线程
+        assert w._thread is alive
+    finally:
+        blocker.set()
+        alive.join(timeout=2)
+
+
 def test_stats_shape(tmp_path):
     w = _watcher(tmp_path)
     st = w.stats()
@@ -364,6 +439,43 @@ def test_get_watcher_is_singleton():
     a = PW.get_watcher()
     b = PW.get_watcher()
     assert a is b
+    PW.set_watcher(None)
+
+
+def test_stop_watcher_keeps_ref_on_timeout():
+    """stop_watcher 超时（线程仍存活）后不能把单例置空：
+
+    否则后续 get_watcher()/start_watcher() 会新建第二个 PortWatcher 并起第二个
+    采集线程，与仍存活的旧 daemon 线程并行 → 双采集、双落库、双自动封禁。
+    """
+    w = PortWatcher(WatchConfig(enabled=True, ports=[], interval_sec=1.0))
+    blocker = threading.Event()
+    stuck = threading.Thread(target=blocker.wait, daemon=True)
+    stuck.start()
+    try:
+        w._thread = stuck
+        w._stop.clear()
+        PW.set_watcher(w)
+        PW.stop_watcher(timeout=0.1)  # 超时：stuck 仍被 blocker 卡住
+        # 单例必须保留，不能变成 None，也不能被替换成新实例
+        assert PW.get_watcher() is w
+        # 再次 start_watcher 不应创建新对象（旧线程仍存活，复用即可，不双起）
+        before = id(PW.get_watcher())
+        PW.start_watcher()
+        assert id(PW.get_watcher()) == before
+    finally:
+        blocker.set()
+        stuck.join(timeout=2)
+        PW.set_watcher(None)
+
+
+def test_stop_watcher_nulls_ref_when_fully_stopped(tmp_path):
+    """干净停止（线程已死）后应清空单例，下次 get_watcher 才重建新实例。"""
+    w = _watcher(tmp_path, ports=[])
+    PW.set_watcher(w)
+    PW.stop_watcher(timeout=0.5)
+    # 未启动的 watcher 视为已停，单例清空 → 下次 get_watcher 新建
+    assert PW.get_watcher() is not w
     PW.set_watcher(None)
 
 

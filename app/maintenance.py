@@ -458,6 +458,22 @@ def restore_db(path: str, backup_current: bool = True) -> Tuple[bool, str]:
 
     writer = db_writer.peek_writer()
     was_running = bool(writer and writer.running)
+    # 恢复前必须把写入队列落盘、并确认写入器真的停稳：否则 stop 超时后旧 writer
+    # 仍持有旧库文件的孤立句柄，会把它排空到已被替换的文件里 → 数据静默丢失；
+    # 两个 writer 还会抢同一把 SQLite 写锁。队列里还有在途数据时直接放弃恢复，
+    # 让原写入器继续写当前库（状态自洽、零丢失），用户稍后重试即可。
+    # 注意：flush 只在 was_running 时调用（没在跑就不该碰写入器）。
+    writer_drained = writer.flush(timeout=10.0) and writer.pending() == 0 if was_running else True
+    if was_running and not writer_drained:
+        log.error(
+            "数据库恢复中止：写入队列未能在超时内清空（pending=%d），取消恢复以免丢失在途数据",
+            writer.pending(),
+        )
+        return (
+            False,
+            "写入队列未能及时清空，已取消恢复以免丢失待写入数据，请稍后（队列清空后）重试",
+        )
+
     db_writer.stop_writer(timeout=10.0)
 
     err = ""

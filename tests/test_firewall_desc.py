@@ -402,3 +402,59 @@ def test_unblock_all_falls_back_to_netsh(monkeypatch):
     assert deletes, f"没有发出 netsh delete：{seen}"
     assert deletes[0][:5] == ["netsh", "advfirewall", "firewall", "delete", "rule"]
     assert deletes[0][5] == f"name={firewall.RULE_PREFIX}*"
+
+
+# --------------------------------------------------------------------------- #
+# rule_exists 精确优先（P0-3：自动封禁热路径不得做全量枚举）
+# --------------------------------------------------------------------------- #
+def test_rule_exists_prefers_precise_query(monkeypatch):
+    calls = {"list": 0}
+
+    monkeypatch.setattr(
+        firewall,
+        "_run",
+        lambda cmd, timeout=30: (0, "Rule Name:                         PortGuard_Block_1.2.3.4\n"),
+    )
+
+    def fake_list():
+        calls["list"] += 1
+        return []
+
+    monkeypatch.setattr(firewall, "list_rule_names", fake_list)
+    assert firewall.rule_exists("PortGuard_Block_1.2.3.4") is True
+    # 正常命中路径不应做全量枚举（200~600ms 的 list_rule_names）
+    assert calls["list"] == 0
+
+
+def test_rule_exists_no_match_trusted(monkeypatch):
+    calls = {"list": 0}
+    monkeypatch.setattr(
+        firewall, "_run", lambda cmd, timeout=30: (1, "No rules match the specified criteria.")
+    )
+
+    def fake_list():
+        calls["list"] += 1
+        return []
+
+    monkeypatch.setattr(firewall, "list_rule_names", fake_list)
+    assert firewall.rule_exists("PortGuard_Block_9.9.9.9") is False
+    # 精确查询明确「无匹配」应被信任，不回退列表
+    assert calls["list"] == 0
+
+
+def test_rule_exists_falls_back_to_list_on_error(monkeypatch):
+    calls = {"list": 0}
+
+    def fake_run(cmd, timeout=30):
+        raise RuntimeError("netsh 不可用")
+
+    monkeypatch.setattr(firewall, "_run", fake_run)
+
+    def fake_list():
+        calls["list"] += 1
+        return ["PortGuard_Block_1.2.3.4"]
+
+    monkeypatch.setattr(firewall, "list_rule_names", fake_list)
+    assert firewall.rule_exists("PortGuard_Block_1.2.3.4") is True
+    # 精确查询异常 → 回退列表枚举一次
+    assert calls["list"] == 1

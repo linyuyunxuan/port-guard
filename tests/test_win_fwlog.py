@@ -17,7 +17,9 @@ from core.win_fwlog import (
     FIELDS,
     FwLogEntry,
     FwLogTailer,
+    enable_logging,
     filter_inbound,
+    is_dropped_logging_enabled,
     logging_enabled,
     parse_line,
     parse_text,
@@ -288,3 +290,58 @@ def test_logging_state_shape():
 
     st = logging_state()
     assert "path" in st and "exists" in st
+
+
+# --------------------------------------------------------------------------- #
+# 丢弃连接日志是否真的在记（P0-2：只开通道但系统层未记 → 扫描漏检）
+# --------------------------------------------------------------------------- #
+def test_is_dropped_logging_enabled_zh(monkeypatch):
+    monkeypatch.setattr(
+        "core.win_fwlog.logging_state",
+        lambda: {"raw": {"记录被丢弃的连接": "启用", "记录成功的连接": "禁用"}},
+    )
+    # 强制绕过 30s 缓存，确保重新探测
+    monkeypatch.setattr("core.win_fwlog._dropped_state_cache", (0.0, False))
+    assert is_dropped_logging_enabled() is True
+
+
+def test_is_dropped_logging_enabled_en(monkeypatch):
+    monkeypatch.setattr(
+        "core.win_fwlog.logging_state",
+        lambda: {"raw": {"Log dropped packets": "Enable", "Log successful connections": "Disable"}},
+    )
+    monkeypatch.setattr("core.win_fwlog._dropped_state_cache", (0.0, False))
+    assert is_dropped_logging_enabled() is True
+
+
+def test_is_dropped_logging_enabled_off(monkeypatch):
+    monkeypatch.setattr(
+        "core.win_fwlog.logging_state",
+        lambda: {"raw": {"记录被丢弃的连接": "禁用", "记录成功的连接": "禁用"}},
+    )
+    monkeypatch.setattr("core.win_fwlog._dropped_state_cache", (0.0, False))
+    assert is_dropped_logging_enabled() is False
+
+
+def test_is_dropped_logging_enabled_unreadable(monkeypatch):
+    def _boom():
+        raise RuntimeError("netsh 不可用")
+
+    monkeypatch.setattr("core.win_fwlog.logging_state", _boom)
+    monkeypatch.setattr("core.win_fwlog._dropped_state_cache", (0.0, False))
+    # 读不到状态：宁可报「未启用」让界面提示，也不要谎报安全
+    assert is_dropped_logging_enabled() is False
+
+
+def test_enable_logging_defaults_to_dropped(monkeypatch):
+    captured = []
+
+    def fake_run(cmd, *a, **k):
+        captured.append(list(cmd))
+        return 0, ""
+
+    monkeypatch.setattr("core.win_fwlog._run", fake_run)
+    ok, _err = enable_logging()
+    assert ok
+    joined = " ".join(" ".join(c) for c in captured)
+    assert "droppedconnections" in joined and "enable" in joined

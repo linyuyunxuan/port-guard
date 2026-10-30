@@ -29,6 +29,7 @@ import datetime
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -508,3 +509,42 @@ def logging_state() -> Dict[str, Any]:
     except Exception:
         pass
     return state
+
+
+# ── 丢弃连接日志是否真的在记（带短暂缓存，避免每次轮询都 spawn netsh） ──
+_dropped_state_cache: Tuple[float, bool] = (0.0, False)
+_DROPPED_STATE_TTL = 30.0
+
+
+def is_dropped_logging_enabled() -> bool:
+    """Windows 防火墙是否真的在记录「被丢弃的连接」（不需要管理员权限）。
+
+    这是 fwlog 通道能否采到扫描/爆破的关键：只开了采集通道、但系统层「丢弃连接」
+    日志没启用，日志文件不会更新，扫描探测类攻击就被漏检。
+
+    ``logging_enabled`` 只看日志**文件是否存在**（旧文件可能一直躺那），不足以判定
+    「当前在记」，故用本函数读 netsh 的 logging 配置。结果带 30s TTL 缓存，适合
+    被 2s 一次的状态刷新反复调用。
+    """
+    global _dropped_state_cache
+    now = time.monotonic()
+    ts, val = _dropped_state_cache
+    if now - ts < _DROPPED_STATE_TTL:
+        return val
+    result = _probe_dropped_logging_enabled()
+    _dropped_state_cache = (now, result)
+    return result
+
+
+def _probe_dropped_logging_enabled() -> bool:
+    try:
+        state = logging_state()
+    except Exception:
+        return False
+    raw = state.get("raw") or {}
+    for k, v in raw.items():
+        key = k.lower()
+        # 兼容中英文 Windows：「记录被丢弃的连接」/「Log dropped packets」
+        if "丢弃" in k or "drop" in key:
+            return "启用" in v or "enable" in v.lower()
+    return False

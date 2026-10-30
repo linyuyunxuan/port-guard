@@ -167,16 +167,28 @@ class PortWatcher:
             return self._cfg
 
     def update_config(self, config: WatchConfig, restart: bool = True) -> None:
-        """热更新配置；正在运行时默认重启采集线程让新配置立即生效"""
-        was_running = self.running
-        if was_running and restart:
-            self.stop()
+        """热更新配置。
+
+        设计要点：采集主循环每轮都重读 ``self.config``，所以**配置热更新不需要
+        重启线程**——旧实现里 ``stop()`` + ``start()`` 的重启路径在 ``stop`` 超时
+        时会起出第二个采集线程（双起 → 重复采集 + 重复自动封禁）。这里改成：
+
+        * 先把新配置换上（在锁内），**不管** ``restart``，运行中线程下一轮自动读到；
+        * ``restart=False`` 时到此为止，绝不改变运行状态（设置页保存前的纯换参）；
+        * ``restart=True`` 时只把「运行状态」对齐到 ``config.enabled``，且**绝不**
+          做「先 stop 再 start」的重启——那样在 stop 超时时会双起线程。
+        """
         with self._lock:
             self._cfg = config
             if self._tailer.path != (config.fwlog_path or win_fwlog.DEFAULT_LOG_PATH):
                 self._tailer.set_path(config.fwlog_path or win_fwlog.DEFAULT_LOG_PATH)
-        if was_running and restart and config.enabled:
+        if not restart:
+            return
+        # restart=True：把运行状态对齐到 config.enabled，不重启线程
+        if config.enabled and not self.running:
             self.start()
+        elif not config.enabled and self.running:
+            self.stop()
 
     # ── 生命周期 ──
     @property
@@ -202,9 +214,17 @@ class PortWatcher:
         t = self._thread
         if t and t.is_alive():
             t.join(timeout=timeout)
-        with self._lock:
-            self._thread = None
-            self._stats["running"] = False
+        # 关键：join 超时也**不**把 _thread 置空。daemon 线程此刻其实还活着
+        # （卡在 win_net / _tailer.read_new / process_record 里），置空会让
+        # running 误报为 False，后续 start()/update_config 据此起第二个采集线程
+        # （双起 → 重复采集 + 重复自动封禁）。保持 _thread 指向存活线程，running
+        # 才是真实值；线程最终会在下一轮循环检查 _stop 时自行退出（daemon，无需强杀）。
+        # 只有确认线程已死，才清掉引用、置 running=False，好让下次 start() 重建。
+        if t is not None and not t.is_alive():
+            with self._lock:
+                if self._thread is t:
+                    self._thread = None
+                self._stats["running"] = False
 
     def stats(self) -> Dict[str, Any]:
         with self._lock:
@@ -408,9 +428,20 @@ def start_watcher() -> PortWatcher:
 
 def stop_watcher(timeout: float = 4.0) -> None:
     global _watcher
-    if _watcher is not None:
-        _watcher.stop(timeout=timeout)
-        _watcher = None
+    w = _watcher
+    if w is None:
+        return
+    w.stop(timeout=timeout)
+    # 关键：stop 超时（后台线程仍存活）后**不**把单例置空。否则后续
+    # get_watcher()/start_watcher() 会据此新建第二个 PortWatcher 并起第二个采集
+    # 线程，与仍存活的旧 daemon 线程并行 → 双采集、双落库、双自动封禁。保留引用，
+    # running 才是真实值；线程最终在下一轮循环检查 _stop 时自行退出，届时 running
+    # 会变回 False，下一次 stop/start 正常处理。只有干净停止（线程已死）才清空，
+    # 让下次 get_watcher 重建新实例。
+    if not w.running:
+        with _watcher_lock:
+            if _watcher is w:
+                _watcher = None
 
 
 def reload_from_settings(restart: bool = True) -> WatchConfig:
