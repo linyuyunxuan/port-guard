@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.config import DEFAULT_SETTINGS, db_path
@@ -37,6 +38,37 @@ log = get_logger(__name__)
 
 _init_lock = threading.Lock()
 _initialized = False
+
+# ── 生效封禁的短 TTL 缓存（P1-1：自动封禁/评分热路径不再逐 IP 建连）──
+# 原来 find_active_ban_by_ip 每条风险记录 / 每个待封 IP 都开一条新连接（~15~20ms），
+# 攻击期不同高危 IP 多时叠加拖慢采集与落库。这里把"当前 active 封禁按 IP 索引"缓存
+# 起来，热路径改查内存字典。缓存仅在封禁状态真正变化时失效（见 invalidate_*），
+# TTL 兜底：万一有路径漏调失效，最多 5s 后自动刷新，不会出现"永久不可见"。
+_active_ban_cache: Dict[str, Any] = {"ts": 0.0, "map": {}}
+_ACTIVE_BAN_CACHE_TTL = 5.0
+_active_ban_cache_lock = threading.Lock()
+
+
+def invalidate_active_ban_cache() -> None:
+    """封禁状态发生变化（封禁/解封/到期/恢复）后调用，迫使下一次查询重新读库。
+
+    不调用此函数的话，TTL 内新封禁对热路径不可见，同 IP 的重复命中可能再触发一次
+    自动封禁（虽然 block_ip 幂等、不会建重复规则，但会多插一条 pending 记录）。
+    """
+    with _active_ban_cache_lock:
+        _active_ban_cache["ts"] = 0.0
+
+
+def _active_ban_map_cached() -> Dict[str, BanRecord]:
+    """带短 TTL 的 active 封禁索引；命中则直接返回内存字典，不碰数据库。"""
+    global _active_ban_cache
+    now = time.monotonic()
+    with _active_ban_cache_lock:
+        if now - _active_ban_cache["ts"] < _ACTIVE_BAN_CACHE_TTL:
+            return _active_ban_cache["map"]
+        m = active_ban_ip_map()
+        _active_ban_cache = {"ts": now, "map": m}
+        return m
 
 
 def _connect() -> sqlite3.Connection:
@@ -141,13 +173,6 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
-
-CREATE TABLE IF NOT EXISTS stats_hourly (
-    hour       TEXT PRIMARY KEY,
-    total      INTEGER DEFAULT 0,
-    risk_count INTEGER DEFAULT 0,
-    unique_ip  INTEGER DEFAULT 0
-);
 """
 
 
@@ -173,6 +198,7 @@ def init_db() -> None:
         finally:
             conn.close()
         _initialized = True
+    invalidate_active_ban_cache()
 
 
 def reset_init_state() -> None:
@@ -187,6 +213,7 @@ def reset_init_state() -> None:
     global _initialized
     with _init_lock:
         _initialized = False
+    invalidate_active_ban_cache()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -443,13 +470,57 @@ def count_today() -> Tuple[int, int]:
     start = int(datetime.datetime(today.year, today.month, today.day).timestamp() * 1000)
     conn = _connect()
     try:
-        total = conn.execute(
-            "SELECT COUNT(*) c FROM access_log WHERE event_ts >= ?", (start,)
+        # 合并为单条查询，避免对今日 access_log 全扫两次
+        row = conn.execute(
+            "SELECT COUNT(*) AS total,"
+            " SUM(CASE WHEN risk_score > 0 THEN 1 ELSE 0 END) AS risk"
+            " FROM access_log WHERE event_ts >= ?",
+            (start,),
+        ).fetchone()
+        return int(row["total"]), int(row["risk"])
+    finally:
+        conn.close()
+
+
+def stats_snapshot(include_today: bool = True) -> Dict[str, int]:
+    """一次性返回仪表盘所需的几个计数，共用一条连接。
+
+    原来 ``_refresh_stats`` 每 1.5s 各开一次连接跑 ``count_today`` /
+    ``count_active_bans`` / ``count_risk_unhandled``（3 次建连，约 45~60ms），
+    还会让 ``count_today`` 对今日 access_log 全扫。合并到一条连接，既省建连，也
+    保证四项读自同一时刻（避免「已解封 3 个」但「另有 2 条已到期」的错位）。
+
+    ``include_today=False`` 跳过今日两项扫描：``today_total``/``today_risk``
+    只被监控页卡片消费，而今日 access_log 全扫是这 2s 一跳里唯一贵的一步 ——
+    监控页不可见时（``_refresh_stats`` 判断）传 False，只保留顶栏/状态栏
+    需要的 active_bans / unhandled 两个廉价索引查询。
+    """
+    today = datetime.date.today()
+    start = int(datetime.datetime(today.year, today.month, today.day).timestamp() * 1000)
+    conn = _connect()
+    try:
+        if include_today:
+            total = conn.execute(
+                "SELECT COUNT(*) c FROM access_log WHERE event_ts >= ?", (start,)
+            ).fetchone()["c"]
+            risk = conn.execute(
+                "SELECT COUNT(*) c FROM access_log WHERE event_ts >= ? AND risk_score > 0",
+                (start,),
+            ).fetchone()["c"]
+        else:
+            total = risk = 0
+        bans = conn.execute(
+            "SELECT COUNT(*) c FROM ban_list WHERE status = ?", (STATUS_ACTIVE,)
         ).fetchone()["c"]
-        risk = conn.execute(
-            "SELECT COUNT(*) c FROM access_log WHERE event_ts >= ? AND risk_score > 0", (start,)
-        ).fetchone()["c"]
-        return int(total), int(risk)
+        unhandled = conn.execute("SELECT COUNT(*) c FROM risk_event WHERE handled = 0").fetchone()[
+            "c"
+        ]
+        return {
+            "today_total": int(total),
+            "today_risk": int(risk),
+            "active_bans": int(bans),
+            "unhandled": int(unhandled),
+        }
     finally:
         conn.close()
 
@@ -938,6 +1009,11 @@ def update_ban(ban_id: Optional[int], **fields) -> None:
     bad = set(fields) - _BAN_UPDATABLE
     if bad:
         raise ValueError(f"不允许更新的列: {sorted(bad)}")
+    # 任何字段更新都让热路径缓存失效，不只 status：缓存里存的是整条 BanRecord，
+    # hit_count / error_msg 等列变了同样不能让 find_active_ban_by_ip 在 TTL 内
+    # 读到旧值（回归：update_ban(hit_count=4) 后立刻查必须拿到 4，P1-1）。
+    # update_ban 本身只在封禁生命周期事件上被调用，不是热路径，多失效没有代价。
+    invalidate_active_ban_cache()
     fields["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn = _connect()
@@ -1052,15 +1128,38 @@ def sum_ban_hits() -> int:
         return 0
 
 
-def query_bans(limit: int = 1000, status: str = "", keyword: str = "") -> List[BanRecord]:
+def query_bans(
+    limit: int = 1000,
+    status: Any = "",
+    keyword: str = "",
+    expire_before: Optional[int] = None,
+    exclude_permanent: bool = False,
+) -> List[BanRecord]:
+    """按条件查封禁记录。
+
+    - status：空串=不过滤；单个状态串=`status = ?`；元组/列表=`status IN (...)`。
+    - keyword：模糊匹配 ip 或 reason。
+    - expire_before + exclude_permanent：下推「已到期」筛选（P1-2），避免把全表拉回
+      内存再过滤 —— 封禁上千条时每次 refresh 都全量拉取会明显变慢。
+    """
     sql = "SELECT * FROM ban_list WHERE 1=1"
     args: List[Any] = []
     if status:
-        sql += " AND status = ?"
-        args.append(status)
+        if isinstance(status, (tuple, list)):
+            placeholders = ", ".join("?" for _ in status)
+            sql += f" AND status IN ({placeholders})"
+            args += list(status)
+        else:
+            sql += " AND status = ?"
+            args.append(status)
     if keyword:
         sql += " AND (ip LIKE ? OR reason LIKE ?)"
         args += [f"%{keyword}%", f"%{keyword}%"]
+    if expire_before is not None:
+        sql += " AND expire_at <= ?"
+        args.append(expire_before)
+        if exclude_permanent:
+            sql += " AND expire_at > 0"
     sql += " ORDER BY id DESC LIMIT ?"
     args.append(limit)
     conn = _connect()
@@ -1080,15 +1179,13 @@ def get_ban(ban_id: int) -> Optional[BanRecord]:
 
 
 def find_active_ban_by_ip(ip: str) -> Optional[BanRecord]:
-    conn = _connect()
-    try:
-        r = conn.execute(
-            "SELECT * FROM ban_list WHERE ip = ? AND status = ? ORDER BY id DESC LIMIT 1",
-            (ip, STATUS_ACTIVE),
-        ).fetchone()
-        return _row_to_ban(r) if r else None
-    finally:
-        conn.close()
+    """该 IP 当前是否在生效封禁中（返回记录或 None）。
+
+    P1-1：改走带短 TTL 的 active 封禁缓存，避免自动封禁/评分热路径每条记录都开
+    一条新连接（~15~20ms）。缓存靠 invalidate_active_ban_cache 在封禁状态变化时
+    失效，TTL 兜底防止漏调失效导致"永久不可见"。
+    """
+    return _active_ban_map_cached().get(ip)
 
 
 def count_bans_by_ip(ip: str, since_ts: Optional[int] = None) -> int:

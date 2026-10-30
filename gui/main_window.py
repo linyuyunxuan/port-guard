@@ -719,6 +719,10 @@ class MainWindow(EventPumpMixin, QMainWindow):
             self.page_iplookup._update_lib_info()
         elif idx == PAGE_SETTINGS:
             self.page_settings.refresh_xdb_state()
+        elif idx == PAGE_MONITOR:
+            # 切回监控页立刻补一次完整统计：不可见期间今日两项被跳过，
+            # 卡片上的数字停在上次可见的时刻，进来就先刷对
+            self._refresh_stats(force=True)
         # PAGE_LOGS 无需特殊处理：QStackedWidget 切页时会触发 showEvent，
         # 日志页在那里自己完成「铺底 + 重绘」
 

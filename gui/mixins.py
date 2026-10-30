@@ -25,7 +25,7 @@ from core.config import (
     DEFAULT_RISK_RETENTION_DAYS,
     LEVEL_LABEL,
 )
-from core.database import count_active_bans, count_risk_unhandled, count_today
+from core.database import stats_snapshot
 from core.event_bus import bus
 from core.logger import get_logger
 from gui.background import BusyGuard, run_in_background
@@ -365,14 +365,21 @@ class EventPumpMixin(_HostBase):
         if not force and now - self._last_stats < 1.5:
             return
         self._last_stats = now
+        # 监控页不可见时跳过今日访问全扫（today_total/today_risk 只被监控页卡片
+        # 消费，是 2s 一跳里唯一贵的一步）；顶栏「已封禁」与状态栏「待处理」
+        # 永远可见，仍随每一次跳保持实时（同一连接里的廉价索引查询）。
         try:
-            total, risk = count_today()
-            bans = count_active_bans()
-            unhandled = count_risk_unhandled()
+            monitor_visible = self.page_monitor.isVisible()
+        except Exception:
+            monitor_visible = True
+        try:
+            s = stats_snapshot(include_today=monitor_visible)
+            bans, unhandled = s["active_bans"], s["unhandled"]
+            if monitor_visible:
+                self.page_monitor.set_stats(s["today_total"], s["today_risk"], bans)
         except Exception:
             log.exception("统计刷新失败")
-            total = risk = bans = unhandled = 0
-        self.page_monitor.set_stats(total, risk, bans)
+            bans = unhandled = 0
         self.lbl_ban_count.setText(f"已封禁 {bans}")
         # 圆点颜色随计数切换：有数 danger / 0 时 success（P2-1）
         self._set_ban_count(bans)

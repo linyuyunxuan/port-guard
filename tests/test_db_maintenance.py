@@ -25,7 +25,14 @@ from app import maintenance
 from core import database, db_writer
 from core import settings as cfg
 from core.config import db_path
-from core.models import AccessRecord, now_ms
+from core.models import (
+    STATUS_ACTIVE,
+    STATUS_EXPIRED,
+    STATUS_UNBANNED,
+    AccessRecord,
+    BanRecord,
+    now_ms,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -322,3 +329,181 @@ def test_restore_reloads_settings_from_restored_db():
     assert ok, msg
     # 设置缓存不刷新的话，界面与业务会一直用「旧库」的值
     assert cfg.get("listen_port") == "18080"
+
+
+def test_stats_snapshot_returns_counts_with_single_connection():
+    """stats_snapshot 必须一条连接返回四项计数，且数值正确（替代原来每 1.5s
+    开 3 次连接的 count_today / count_active_bans / count_risk_unhandled）。"""
+    _insert(4, tag="s")
+    conn = database._connect()
+    try:
+        conn.execute("UPDATE access_log SET risk_score=80 WHERE id=1")
+        conn.execute(
+            "INSERT INTO risk_event (ip, risk_score, risk_level, event_ts) "
+            "VALUES ('1.2.3.4', 80, 'high', ?)",
+            (now_ms(),),
+        )
+        conn.execute(
+            "INSERT INTO risk_event (ip, risk_score, risk_level, handled, event_ts) "
+            "VALUES ('1.2.3.5', 40, 'medium', 1, ?)",
+            (now_ms(),),
+        )
+        conn.execute("INSERT INTO ban_list (ip, status) VALUES ('9.9.9.9', 'active')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    s = database.stats_snapshot()
+    assert s["today_total"] == 4
+    assert s["today_risk"] == 1  # 仅 id=1 被改成 risk_score>0
+    assert s["active_bans"] == 1
+    assert s["unhandled"] == 1  # 两条 risk_event 中仅 1 条未处理
+
+
+def test_stats_snapshot_light_mode_skips_today_scan():
+    """P1-4：include_today=False 时跳过今日两项全扫，仍返回顶栏/状态栏需要的
+    active_bans / unhandled；今日两项置 0（调用方在监控页不可见时不消费）。"""
+    _insert(4, tag="s")
+    conn = database._connect()
+    try:
+        conn.execute("INSERT INTO ban_list (ip, status) VALUES ('9.9.9.9', 'active')")
+        conn.execute(
+            "INSERT INTO risk_event (ip, risk_score, risk_level, event_ts) "
+            "VALUES ('1.2.3.4', 80, 'high', ?)",
+            (now_ms(),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    s = database.stats_snapshot(include_today=False)
+    assert s["today_total"] == 0
+    assert s["today_risk"] == 0
+    assert s["active_bans"] == 1
+    assert s["unhandled"] == 1
+    # 默认仍是全量（既有调用方语义不变）
+    s2 = database.stats_snapshot()
+    assert s2["today_total"] == 4
+    assert s2["active_bans"] == 1
+
+
+def test_count_today_merges_risk_and_total_in_one_scan():
+    """P1-5：count_today 必须用单条查询同时拿到今日总数与风险数，不得对今日
+    access_log 全扫两次（攻击期仪表盘每 1.5s 都跑，两次全扫是纯浪费）。"""
+    database.init_db()
+    base = now_ms()
+    database.insert_access_log(AccessRecord(ip="1.1.1.1", event_ts=base, risk_score=50))
+    database.insert_access_log(AccessRecord(ip="2.2.2.2", event_ts=base, risk_score=0))
+    database.insert_access_log(AccessRecord(ip="3.3.3.3", event_ts=base, risk_score=10))
+    # 昨天的，不应计入今日
+    database.insert_access_log(
+        AccessRecord(ip="4.4.4.4", event_ts=base - 86400 * 1000, risk_score=99)
+    )
+    total, risk = database.count_today()
+    assert total == 3
+    assert risk == 2
+
+
+def test_find_active_ban_by_ip_uses_cache(monkeypatch):
+    """P1-1：find_active_ban_by_ip 必须走内存缓存，同一 TTL 窗口内多次查询只回源
+    （active_ban_ip_map）一次，而不是每条记录都开一条新连接。"""
+    database.init_db()
+    calls = {"n": 0}
+    real_map = database.active_ban_ip_map
+
+    def counting_map():
+        calls["n"] += 1
+        return real_map()
+
+    monkeypatch.setattr(database, "active_ban_ip_map", counting_map)
+    database.insert_ban(BanRecord(ip="5.5.5.5", status=STATUS_ACTIVE, source="auto"))
+    database.invalidate_active_ban_cache()
+    # 同一窗口内多次查询（含不存在的 IP）只回源一次
+    a = database.find_active_ban_by_ip("5.5.5.5")
+    b = database.find_active_ban_by_ip("6.6.6.6")
+    assert a is not None and a.ip == "5.5.5.5"
+    assert b is None
+    assert calls["n"] == 1
+
+
+def test_find_active_ban_cache_invalidated_on_status_change(monkeypatch):
+    """封禁状态变化（update_ban 带 status）必须让缓存失效，下一次查询重新回源。"""
+    database.init_db()
+    calls = {"n": 0}
+    real_map = database.active_ban_ip_map
+
+    def counting_map():
+        calls["n"] += 1
+        return real_map()
+
+    monkeypatch.setattr(database, "active_ban_ip_map", counting_map)
+    database.invalidate_active_ban_cache()
+    assert database.find_active_ban_by_ip("7.7.7.7") is None
+    assert calls["n"] == 1
+    # 状态变更触发失效（这里用不存在的 id 只验证失效逻辑，不影响断言）
+    database.update_ban(999, status=STATUS_ACTIVE)
+    assert database.find_active_ban_by_ip("7.7.7.7") is None
+    assert calls["n"] == 2
+
+
+def test_query_bans_pushes_status_in_and_expire_down():
+    """P1-2：query_bans 必须支持多状态 IN 与 expire_before 下推，让封禁页
+    「已到期」筛选在数据库侧完成，而不是把全表拉回内存逐行过滤。"""
+    database.init_db()
+    now = now_ms()
+    database.insert_ban(
+        BanRecord(ip="1.1.1.1", status=STATUS_ACTIVE, expire_at=now - 1000, source="auto")
+    )
+    database.insert_ban(
+        BanRecord(ip="2.2.2.2", status=STATUS_EXPIRED, expire_at=now - 2000, source="auto")
+    )
+    database.insert_ban(
+        BanRecord(ip="3.3.3.3", status=STATUS_ACTIVE, expire_at=now + 86400000, source="auto")
+    )
+    database.insert_ban(
+        BanRecord(ip="4.4.4.4", status=STATUS_UNBANNED, expire_at=now - 3000, source="auto")
+    )
+    database.insert_ban(
+        BanRecord(ip="5.5.5.5", status=STATUS_ACTIVE, expire_at=0, source="auto")
+    )  # 永久
+    rows = database.query_bans(
+        status=(STATUS_ACTIVE, STATUS_EXPIRED),
+        expire_before=now,
+        exclude_permanent=True,
+    )
+    assert {r.ip for r in rows} == {"1.1.1.1", "2.2.2.2"}
+
+
+def test_restore_aborts_when_writer_queue_not_drained(monkeypatch):
+    """队列里还有在途数据时恢复：旧 writer 仍持有旧库文件的孤立句柄，会把它
+    排空到已被替换的文件里 → 数据静默丢失；两个 writer 还会抢同一把写锁。
+
+    必须放弃恢复、保持当前库不变、绝不允许 _replace_with_retry 发生。
+    """
+    _insert(2)
+    ok, bak = maintenance.backup_db()
+    assert ok, bak
+
+    old = db_writer.start_writer()
+    assert old.running
+    try:
+        # 让 flush 直接报告「没排空」，模拟队列无法在超时内清空
+        monkeypatch.setattr(old, "flush", lambda timeout=10.0: False)
+
+        replace_called = []
+        real_replace = maintenance._replace_with_retry
+
+        def fake_replace(src: str, dst: str, attempts: int = 20) -> None:
+            replace_called.append(1)
+            real_replace(src, dst, attempts)
+
+        monkeypatch.setattr(maintenance, "_replace_with_retry", fake_replace)
+
+        ok, msg = maintenance.restore_db(bak, backup_current=False)
+        assert not ok
+        assert "取消恢复" in msg or "丢失" in msg
+        assert not replace_called, "队列未清空时绝不允许替换文件（会丢数据）"
+        # 当前库保持不变
+        assert database.count_access_logs() == 2
+    finally:
+        db_writer.stop_writer(timeout=30)
