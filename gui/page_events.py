@@ -56,6 +56,7 @@ from gui.components import (
 from gui.event_detail import EventDetailDialog
 from gui.event_group import flatten_rows, merge_rows
 from gui.row_action import RowAction, RowActionDelegate
+from gui.table_base import BaseTablePage
 from gui.table_select import CheckColumn
 from gui.table_sort import KIND_MS, KIND_NUM, KIND_TEXT, ColumnSpec, SortSpec, TableSort
 from gui.theme import C, small_button_style
@@ -70,7 +71,6 @@ from gui.widgets import (
     make_item,
 )
 from qtcompat import (
-    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDate,
@@ -278,7 +278,7 @@ def _event_snapshot(rows: List[Dict]) -> List[Dict]:
     ]
 
 
-class EventsPage(QWidget):
+class EventsPage(BaseTablePage):
     """风险事件列表（支持勾选批量处理与时间筛选）"""
 
     ask_ban = Signal(str, int, str)
@@ -500,18 +500,9 @@ class EventsPage(QWidget):
             (COL_LEVEL,),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
-        self.table.setWordWrap(False)
-        self.table.setTabKeyNavigation(False)
-        self.table.verticalHeader().setVisible(False)
-        # 常显竖滚动条：滚动条出现/消失会让表格可视宽在 15↔25px 之间跳，
-        # 结果列宽度每次翻页都变，读数时眼睛要重新找位置
-        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        # 通用观感（含「常显竖滚动条」：滚动条出现/消失会让表格可视宽在
+        # 15↔25px 之间跳，结果列宽度每次翻页都变，读数时眼睛要重新找位置）
+        self.setup_table(self.table)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.setItemDelegateForColumn(COL_LEVEL, RiskBadgeDelegate(self.table))
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -844,7 +835,7 @@ class EventsPage(QWidget):
         self.btn_sel_all.setText("取消全选" if n and n == len(self._rows) else "全选本页")
 
     def _checked_rows(self) -> List[Dict]:
-        return [self._rows[i] for i in self.sel.checked_rows() if i < len(self._rows)]
+        return self.checked_rows(self.sel, self._rows)
 
     def _apply_sort(self, _state: Optional[SortSpec]) -> None:
         """按新排序重渲染：行号与数据下标始终一致，勾选按业务 key（事件 id）回放。
@@ -852,10 +843,9 @@ class EventsPage(QWidget):
         key 必须是 id 而不是行号 —— 排序后行号已经换人，按行号回放会把勾选
         落到别的记录上，紧接着的「一键封禁」就封错了。
         """
-        keys = {r.get("id") for r in self._checked_rows()}
-        self._rows = self.sort.apply(self._src)
-        self._render(self._rows)
-        self.sel.set_checked_rows(i for i, r in enumerate(self._rows) if r.get("id") in keys)
+        self._rows = self.sort_and_replay(
+            self.sel, self.sort, self._rows, self._src, self._render, lambda r: r.get("id")
+        )
 
     # ── 批量动作 ──
     def _batch_handled(self, handled: int) -> None:

@@ -40,13 +40,14 @@ from core.config import (
     db_path,
     user_data_dir,
 )
-from core.database import clear_all_logs, count_audit, db_size, query_audit
+from core.database import clear_all_logs, db_size
 from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.background import run_in_background
 from gui.components import PageHeader
+from gui.settings_audit import AuditPanel
 from gui.theme import C
-from gui.widgets import CONTENT_MAX_W, ToggleSwitch, WarnBanner, align_headers, make_item
+from gui.widgets import CONTENT_MAX_W, ToggleSwitch, WarnBanner, make_item
 from qtcompat import (
     QAbstractItemView,
     QApplication,
@@ -97,27 +98,6 @@ DB_TASK_TEXT = {
 
 #: 任务名（拼「✗ xx 失败」用）
 DB_TASK_NAME = {"vacuum": "整理数据库", "reindex": "重建索引", "backup": "备份", "restore": "恢复"}
-
-# ── 操作审计表 ──
-AUDIT_HEADERS = ["时间", "操作者", "操作", "对象", "摘要", "结果"]
-AUDIT_WIDTHS = [170, 150, 115, 104, 483, 69]
-AUDIT_CENTER_COLS = [0, 2, 3, 5]
-COL_AUDIT_SUMMARY = 4
-AUDIT_RESULT_LABEL = {
-    "ok": "成功",
-    "fail": "失败",
-    "skipped": "未执行",
-}
-
-
-def _audit_target(row: Dict[str, Any]) -> str:
-    """审计记录的「对象」列：类型 + id，缺一补一，都没有就 `-`"""
-    t = str(row.get("target_type") or "")
-    i = row.get("target_id")
-    i = "" if i is None else str(i)
-    if t and i:
-        return f"{t} #{i}"
-    return t or i or "-"
 
 
 def _xdb_label(name: str) -> str:
@@ -251,7 +231,8 @@ class SettingsPage(QWidget):
         self.tabs.addTab(self._tab_service(), "服务与采集")
         self.tabs.addTab(self._tab_guard(), "防护与告警")
         self.tabs.addTab(self._tab_data(), "数据与离线库")
-        self.tabs.addTab(self._tab_audit(), "操作审计")
+        self.audit_panel = AuditPanel()
+        self.tabs.addTab(self.audit_panel, "操作审计")
         # 审计表只在切到该 tab 时才查：它可能在别的 tab 上被大量写入
         # （封禁 / 保存设置都会记），常驻刷新是白烧 IO。
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -1029,202 +1010,14 @@ class SettingsPage(QWidget):
         panel.add("", self.btn_db_restore)
 
     # ── Tab 4：操作审计 ──
-    def _tab_audit(self) -> QWidget:
-        """
-        审计留痕查看：分页 + 按操作者 / 操作类型过滤。
-
-        这个 tab **只读**，且刻意不放任何「删除 / 清空」按钮 —— 审计表的价值
-        就在于它不能被使用者自己抹掉，想删只能靠保留期（`audit_retention_days`）
-        到期被定期清理带走。
-        """
-        page = QWidget()
-        self.tab_audit = page
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 8, 8, 8)
-        lay.setSpacing(8)
-
-        self._audit_page = 0
-        #: 每页条数。审计一次操作一条，量不大，但也别一次拉全表
-        self._audit_size = 50
-
-        # ── 过滤条 ──
-        bar = QHBoxLayout()
-        bar.setSpacing(8)
-        self.cb_audit_actor = QComboBox()
-        self.cb_audit_actor.setFixedWidth(150)
-        self.cb_audit_actor.currentIndexChanged.connect(self._on_audit_filter)
-
-        self.cb_audit_action = QComboBox()
-        self.cb_audit_action.setFixedWidth(150)
-        self.cb_audit_action.addItem("全部操作", "")
-        for act in audit.ACTIONS:
-            self.cb_audit_action.addItem(audit.action_label(act), act)
-        self.cb_audit_action.currentIndexChanged.connect(self._on_audit_filter)
-
-        self.ed_audit_kw = QLineEdit()
-        self.ed_audit_kw.setPlaceholderText("搜索摘要 / 对象 / 详情")
-        self.ed_audit_kw.setFixedWidth(220)
-        self.ed_audit_kw.returnPressed.connect(self._on_audit_filter)
-
-        b_search = QPushButton("筛选")
-        b_search.setObjectName("btn_outline")
-        b_search.setFixedWidth(72)
-        b_search.clicked.connect(self._on_audit_filter)
-
-        b_refresh = QPushButton("刷新")
-        b_refresh.setObjectName("btn_primary")
-        b_refresh.setFixedWidth(72)
-        b_refresh.clicked.connect(self._refresh_audit)
-
-        bar.addWidget(QLabel("操作者"))
-        bar.addWidget(self.cb_audit_actor)
-        bar.addSpacing(6)
-        bar.addWidget(QLabel("操作"))
-        bar.addWidget(self.cb_audit_action)
-        bar.addSpacing(6)
-        bar.addWidget(self.ed_audit_kw)
-        bar.addWidget(b_search)
-        bar.addWidget(b_refresh)
-        bar.addStretch(1)
-        lay.addLayout(bar)
-
-        # ── 表格 ──
-        self.tbl_audit = QTableWidget(0, len(AUDIT_HEADERS))
-        self.tbl_audit.setHorizontalHeaderLabels(AUDIT_HEADERS)
-        self.tbl_audit.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.tbl_audit.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tbl_audit.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.tbl_audit.setAlternatingRowColors(True)
-        self.tbl_audit.setShowGrid(False)
-        self.tbl_audit.setWordWrap(False)
-        self.tbl_audit.setTabKeyNavigation(False)
-        self.tbl_audit.verticalHeader().setVisible(False)
-        self.tbl_audit.verticalHeader().setDefaultSectionSize(30)
-        self.tbl_audit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        align_headers(self.tbl_audit, AUDIT_CENTER_COLS)
-        hh = self.tbl_audit.horizontalHeader()
-        for i, w in enumerate(AUDIT_WIDTHS):
-            hh.resizeSection(i, w)
-        # 摘要是唯一拉伸列：其余列都是定长（时间 / 人名 / 枚举），
-        # 横向滚动是硬约束 —— 表格不许出现横向滚动条
-        hh.setSectionResizeMode(COL_AUDIT_SUMMARY, QHeaderView.ResizeMode.Stretch)
-        lay.addWidget(self.tbl_audit, 1)
-
-        # ── 分页 ──
-        pager = QHBoxLayout()
-        pager.setSpacing(8)
-        self.btn_audit_prev = QPushButton("上一页")
-        self.btn_audit_prev.setObjectName("btn_outline")
-        self.btn_audit_prev.setFixedWidth(80)
-        self.btn_audit_prev.clicked.connect(lambda: self._goto_audit_page(self._audit_page - 1))
-        self.btn_audit_next = QPushButton("下一页")
-        self.btn_audit_next.setObjectName("btn_outline")
-        self.btn_audit_next.setFixedWidth(80)
-        self.btn_audit_next.clicked.connect(lambda: self._goto_audit_page(self._audit_page + 1))
-        self.lbl_audit_page = QLabel("共 0 条，第 1/1 页")
-        self.lbl_audit_page.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
-        pager.addWidget(self.btn_audit_prev)
-        pager.addWidget(self.btn_audit_next)
-        pager.addSpacing(6)
-        pager.addWidget(self.lbl_audit_page)
-        pager.addStretch(1)
-        lay.addLayout(pager)
-
-        self.lbl_audit_hint = QLabel(
-            "记录谁在何时做了什么：本机操作记 Windows 用户名，"
-            "程序自动（到期巡检 / 定期清理 / 自动封禁）记 system，"
-            "老库里还留着 1.1.0 之前 HTTP 上报触发的 http:<来源IP>。"
-        )
-        self.lbl_audit_hint.setObjectName("form_hint")
-        self.lbl_audit_hint.setWordWrap(True)
-        lay.addWidget(self.lbl_audit_hint)
-        return page
-
-    # ── 审计 tab 数据 ──
     def _on_tab_changed(self, idx: int) -> None:
-        if self.tabs.widget(idx) is self.tab_audit:
-            self._refresh_audit_actors()
-            self._refresh_audit()
+        if self.tabs.widget(idx) is self.audit_panel:
+            self.audit_panel.refresh_actors()
+            self.audit_panel.refresh()
         elif self.tabs.widget(idx) is self.tab_data:
             # 数据库大小会随着运行一直变，切过来时重读一次（不常驻轮询：
             # 每次刷新都要 stat 三个文件 + 列一遍备份目录，白烧 IO）
             self.refresh_db_state()
-
-    def _on_audit_filter(self, *_args: Any) -> None:
-        # 条件变了必须回第 1 页：在第 7 页改过滤条件，原 offset 会指向空页
-        self._audit_page = 0
-        self._refresh_audit()
-
-    def _goto_audit_page(self, page: int) -> None:
-        self._audit_page = max(0, int(page))
-        self._refresh_audit()
-
-    def _refresh_audit(self) -> None:
-        """按当前条件重查一页审计记录"""
-        actor = self.cb_audit_actor.currentData() or ""
-        action = self.cb_audit_action.currentData() or ""
-        kw = self.ed_audit_kw.text().strip()
-        try:
-            total = count_audit(actor=actor, action=action, keyword=kw)
-            rows = query_audit(
-                limit=self._audit_size,
-                offset=self._audit_page * self._audit_size,
-                actor=actor,
-                action=action,
-                keyword=kw,
-            )
-        except Exception:
-            log.exception("查询审计记录失败")
-            self.lbl_audit_page.setText("查询失败")
-            return
-
-        # 末尾页被删空时退回最后一页（否则用户看到空表以为数据没了）
-        pages = max(1, (total + self._audit_size - 1) // self._audit_size)
-        if self._audit_page >= pages:
-            self._audit_page = max(0, pages - 1)
-            if self._audit_page and not rows:
-                self._refresh_audit()
-                return
-
-        self.tbl_audit.setRowCount(len(rows))
-        for i, r in enumerate(rows):
-            self._set_audit_row(i, r)
-        self.btn_audit_prev.setEnabled(self._audit_page > 0)
-        self.btn_audit_next.setEnabled(self._audit_page + 1 < pages)
-        self.lbl_audit_page.setText(f"共 {total} 条，第 {self._audit_page + 1}/{pages} 页")
-
-    def _set_audit_row(self, row: int, r: Dict[str, Any]) -> None:
-        result = str(r.get("result") or "")
-        color = C.danger if result == audit.RESULT_FAIL else None
-        cells = [
-            make_item(audit.fmt_ts(r.get("ts")), mono=True),
-            make_item(audit.actor_label(r.get("actor") or ""), tip=r.get("actor") or ""),
-            make_item(audit.action_label(r.get("action") or "")),
-            make_item(_audit_target(r)),
-            make_item(r.get("summary") or "", color=color, tip=r.get("detail") or ""),
-            make_item(AUDIT_RESULT_LABEL.get(result, result), color=color),
-        ]
-        for col, it in enumerate(cells):
-            self.tbl_audit.setItem(row, col, it)
-
-    def _refresh_audit_actors(self) -> None:
-        """重载「操作者」下拉框。保留当前选中项，避免刷新把筛选条件打回全部"""
-        from core.database import list_audit_actors
-
-        current = self.cb_audit_actor.currentData() or ""
-        try:
-            actors = list_audit_actors()
-        except Exception:
-            log.exception("读取审计操作者列表失败")
-            actors = []
-        self.cb_audit_actor.blockSignals(True)
-        self.cb_audit_actor.clear()
-        self.cb_audit_actor.addItem("全部操作者", "")
-        for a in actors:
-            self.cb_audit_actor.addItem(audit.actor_label(a), a)
-        idx = self.cb_audit_actor.findData(current)
-        self.cb_audit_actor.setCurrentIndex(idx if idx >= 0 else 0)
-        self.cb_audit_actor.blockSignals(False)
 
     # ── 小工具 ──
     @staticmethod
@@ -1407,8 +1200,9 @@ class SettingsPage(QWidget):
         self.tg_autostart.setChecked(cfg.get_bool("autostart_enabled", False))
         self._refresh_autostart_state()
 
-        # 操作审计：下拉框 + 首屏数据
-        self._refresh_audit_actors()
+        # 操作审计：下拉框 + 首屏数据（AuditPanel 构造时已拉过一次 actors，
+        # 这里在 load 链路末尾再刷一次，与拆分前行为一致）
+        self.audit_panel.refresh_actors()
         self._set_dirty(False)
 
     def save(self) -> None:
@@ -1626,8 +1420,11 @@ class SettingsPage(QWidget):
                 bits = ["未启动"]
                 if not win_net.available():
                     bits.append(f"（TCP 连接表不可用：{win_net.unavailable_reason()}）")
-                if not win_fwlog.logging_enabled():
-                    bits.append("（防火墙日志未开启）")
+                methods = (cfg.get("watch_methods", "table,fwlog") or "").replace(" ", "")
+                if "fwlog" in methods and not win_fwlog.is_dropped_logging_enabled():
+                    bits.append(
+                        "（防火墙日志未开启：丢弃连接记录未启用，扫描可能漏检，点「启用防火墙日志记录」）"
+                    )
                 self.lbl_watch_state.setText(" ".join(bits))
                 self.lbl_watch_state.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
         except Exception:

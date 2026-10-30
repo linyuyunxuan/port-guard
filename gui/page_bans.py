@@ -35,6 +35,7 @@ from gui.components import PageHeader, build_menu, export_table_csv
 from gui.event_detail import EventDetailDialog
 from gui.event_group import flatten_rows, merge_rows
 from gui.row_action import RowAction, RowActionDelegate
+from gui.table_base import BaseTablePage
 from gui.table_select import CheckColumn
 from gui.table_sort import (
     KIND_DATETIME,
@@ -58,7 +59,6 @@ from gui.widgets import (
     make_item,
 )
 from qtcompat import (
-    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -240,7 +240,7 @@ class ManualBanDialog(QDialog):
         )
 
 
-class BansPage(QWidget):
+class BansPage(BaseTablePage):
     """封禁建议 + 封禁列表（两张表都支持勾选批量处理）"""
 
     ask_ban = Signal(str, int, str)
@@ -523,20 +523,6 @@ class BansPage(QWidget):
         self.request_refresh_stats.emit()
         QMessageBox.information(self, "防火墙已启用", "\n".join(lines))
 
-    @staticmethod
-    def _setup_table(table: QTableWidget) -> None:
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        table.setAlternatingRowColors(True)
-        table.setShowGrid(False)
-        table.setWordWrap(False)
-        table.setTabKeyNavigation(False)
-        table.verticalHeader().setVisible(False)
-        table.verticalHeader().setDefaultSectionSize(34)
-        # 常显竖滚动条：滚动条出现/消失会让可视宽在 15↔25px 之间跳，列宽跟着抖
-        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-
     def _build_sug_panel(self) -> QFrame:
         """待确认建议：有数据时 216 高，0 条时折叠成 56 的一行提示"""
         self.sug_panel = QFrame()
@@ -607,7 +593,7 @@ class BansPage(QWidget):
         self.sug_table = QTableWidget(0, len(SUG_HEADERS))
         self.sug_table.setHorizontalHeaderLabels(SUG_HEADERS)
         align_headers(self.sug_table, (2, 5, 6))
-        self._setup_table(self.sug_table)
+        self.setup_table(self.sug_table)
         self.sug_table.setItemDelegateForColumn(COL_SUG_LEVEL, RiskBadgeDelegate(self.sug_table))
         self.sug_sel = CheckColumn(self.sug_table, COL_SUG_CHECK)
         self.sug_sel.bind(self._on_sug_sel_changed)
@@ -783,7 +769,7 @@ class BansPage(QWidget):
                 COL_BAN_ACTION,
             ),
         )
-        self._setup_table(self.table)
+        self.setup_table(self.table)
         self.ban_sel = CheckColumn(self.table, COL_BAN_CHECK)
         self.ban_sel.bind(self._on_ban_sel_changed)
         self._ban_check_delegate = CheckMarkDelegate(self.table)
@@ -872,11 +858,13 @@ class BansPage(QWidget):
 
     def _apply_sug_sort(self, _state: Optional[SortSpec]) -> None:
         """按新排序重渲染建议表：勾选按业务 key（事件 id）回放，不是按行号"""
-        keys = {r.get("id") for r in self._checked_suggestions()}
-        self._sug_rows = self.sug_sort.apply(self._sug_rows_src)
-        self._render_suggestions()
-        self.sug_sel.set_checked_rows(
-            i for i, r in enumerate(self._sug_rows) if r.get("id") in keys
+        self._sug_rows = self.sort_and_replay(
+            self.sug_sel,
+            self.sug_sort,
+            self._sug_rows,
+            self._sug_rows_src,
+            lambda _rows: self._render_suggestions(),
+            lambda r: r.get("id"),
         )
 
     def _render_suggestions(self) -> None:
@@ -1044,40 +1032,16 @@ class BansPage(QWidget):
 
     # ── 双击勾选 ──
     def _on_sug_double_click(self, index) -> None:
-        self._toggle_row_check(self.sug_table, self.sug_sel, index, COL_SUG_ACTION)
+        self.toggle_row_check(self.sug_table, self.sug_sel, index, COL_SUG_ACTION)
 
     def _on_ban_double_click(self, index) -> None:
-        self._toggle_row_check(self.table, self.ban_sel, index, COL_BAN_ACTION)
-
-    @staticmethod
-    def _toggle_row_check(table: QTableWidget, sel: CheckColumn, index, action_col: int) -> None:
-        """双击整行切换勾选态（2026-10-27 用户要求「增加双击选择功能」）。
-
-        勾选框只有 14px，在 34px 行高里要瞄准它才能选中；而「勾几条 → 批量解封」
-        是这一页最常走的路径。双击任意单元格都能切换，鼠标不用精确定位。
-
-        两个细节：
-        · **操作列不接管**：那一列自绘了「解封」按钮，双击的第一下已经算一次
-          点击（delegate 自己会处理），再叠加一次勾选会让人以为解封没点中；
-        · 直接改 `CheckState` 而不是调 `CheckColumn.set_checked_rows`：单行改动能
-          顺着 `itemChanged` 自动同步表头三态与「已选 N 条」计数，不用重建整列。
-        """
-        if index is None:
-            return
-        row = index.row()
-        if index.column() == action_col or not 0 <= row < table.rowCount():
-            return
-        it = table.item(row, sel.col)
-        if it is None:
-            return
-        checked = it.checkState() == Qt.CheckState.Checked
-        it.setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
+        self.toggle_row_check(self.table, self.ban_sel, index, COL_BAN_ACTION)
 
     def _checked_suggestions(self) -> list:
-        return [self._sug_rows[i] for i in self.sug_sel.checked_rows() if i < len(self._sug_rows)]
+        return self.checked_rows(self.sug_sel, self._sug_rows)
 
     def _checked_bans(self) -> list:
-        return [self._ban_rows[i] for i in self.ban_sel.checked_rows() if i < len(self._ban_rows)]
+        return self.checked_rows(self.ban_sel, self._ban_rows)
 
     def _batch_ban_suggestions(self) -> None:
         rows = self._checked_suggestions()
@@ -1302,18 +1266,19 @@ class BansPage(QWidget):
 
         所以这里按 expire_at 判定，收 `active`（到期未解封，排最前）与 `expired`
         （到期且已解封）两类；`unbanned` 是人工主动解封，跟「到期」无关，不收。
+        筛选下推到 SQL（status IN (...) AND expire_at <= ? AND expire_at > 0），
+        不再把全表拉回内存逐行过滤（P1-2）。
         """
         now_ms = int(time.time() * 1000)
-        out = []
-        for b in query_bans(keyword=keyword):
-            if b.status not in (STATUS_ACTIVE, STATUS_EXPIRED):
-                continue
-            if not b.expire_at or b.expire_at > now_ms:
-                continue  # 永久封禁（expire_at=0）永远不会「到期」
-            out.append(b)
+        rows = query_bans(
+            keyword=keyword,
+            status=(STATUS_ACTIVE, STATUS_EXPIRED),
+            expire_before=now_ms,
+            exclude_permanent=True,
+        )
         # 还在拦着的排前面：这才是要动手的那批，已解封的是历史
-        out.sort(key=lambda b: (b.status != STATUS_ACTIVE, -(b.expire_at or 0)))
-        return out
+        rows.sort(key=lambda b: (b.status != STATUS_ACTIVE, -(b.expire_at or 0)))
+        return rows
 
     @staticmethod
     def _attach_geo(rows) -> None:
@@ -1353,10 +1318,14 @@ class BansPage(QWidget):
 
     def _apply_ban_sort(self, _state: Optional[SortSpec]) -> None:
         """按新排序重渲染封禁记录表：勾选按业务 key（记录 id）回放，不是按行号"""
-        keys = {b.id for b in self._checked_bans()}
-        self._ban_rows = self.ban_sort.apply(self._ban_rows_src)
-        self._render_bans()
-        self.ban_sel.set_checked_rows(i for i, b in enumerate(self._ban_rows) if b.id in keys)
+        self._ban_rows = self.sort_and_replay(
+            self.ban_sel,
+            self.ban_sort,
+            self._ban_rows,
+            self._ban_rows_src,
+            lambda _rows: self._render_bans(),
+            lambda b: b.id,
+        )
 
     def _render_bans(self) -> None:
         rows = self._ban_rows
