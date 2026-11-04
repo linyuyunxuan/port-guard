@@ -35,7 +35,7 @@ app = QApplication(sys.argv)
 import main as app_main
 from core import db_writer, xdb_updater
 from core import settings as cfg
-from core.config import APP_VERSION
+from core.config import APP_AUTHOR, APP_CONTACT, APP_VERSION
 from core.database import count_today, query_access_logs, query_risk_events
 from core.geo_locator import get_locator
 from core.models import STATUS_PENDING, AccessRecord
@@ -43,7 +43,8 @@ from core.rule_engine import get_engine
 
 app_main._init_backend()
 check("后端初始化（日志/数据库/设置缓存/批量写入器）", cfg.is_warmed())
-check("APP_VERSION", APP_VERSION == "1.8.0", APP_VERSION)
+check("APP_VERSION", APP_VERSION == "1.9.0", APP_VERSION)
+check("作者信息已配置", bool(APP_AUTHOR and APP_CONTACT), f"{APP_AUTHOR} / {APP_CONTACT}")
 
 # 自检期间必须关掉自动封禁与告警声音：本脚本会喂入「恶意样本」，
 # 若开着自动封禁、又恰好以管理员身份运行，就会真的往系统防火墙上写规则。

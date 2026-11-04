@@ -358,6 +358,9 @@ def test_stats_snapshot_returns_counts_with_single_connection():
     assert s["today_risk"] == 1  # 仅 id=1 被改成 risk_score>0
     assert s["active_bans"] == 1
     assert s["unhandled"] == 1  # 两条 risk_event 中仅 1 条未处理
+    # 待确认建议 = 未处理 + 高危 + 该 IP 还没被封（侧栏「封禁管理」角标用它）。
+    # 这里的 1.2.3.4/high 命中，1.2.3.5 已处理 → 只剩 1 条
+    assert s["suggestions"] == 1
 
 
 def test_stats_snapshot_light_mode_skips_today_scan():

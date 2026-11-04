@@ -6,7 +6,14 @@ import time
 from typing import Any, Dict, Optional
 
 from app import audit, ban_service
-from app.export_csv import BAN_CSV_HEADERS, SUG_CSV_HEADERS, iter_ban_rows, iter_sug_rows
+from app.export_csv import (
+    BAN_CSV_HEADERS,
+    SUG_CSV_HEADERS,
+    collect_ip_lines,
+    export_ip_list,
+    iter_ban_rows,
+    iter_sug_rows,
+)
 from core import firewall
 from core import settings as cfg
 from core.config import LEVEL_CRITICAL, LEVEL_HIGH, LEVEL_ORDER
@@ -62,6 +69,7 @@ from qtcompat import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -247,6 +255,7 @@ class BansPage(BaseTablePage):
     # [(ip, score, reason, event_ids), ...] —— 批量确认封禁交给主窗口统一执行
     ask_ban_many = Signal(list)
     ask_lookup = Signal(str)
+    ask_history = Signal(str)
     request_refresh_stats = Signal()
     # 批量解封在后台线程跑，结束后把结果送回 GUI 线程
     batch_unban_done = Signal(int, int)  # (成功数, 失败数)
@@ -736,12 +745,20 @@ class BansPage(BaseTablePage):
         self.btn_ban_export = self._mini_button("导出 CSV", enabled=True)
         self.btn_ban_export.setToolTip("导出当前筛选的封禁记录，不受勾选影响")
         self.btn_ban_export.clicked.connect(self._export_ban_csv)
+        # 纯 IP 列表：给「别的机器 / 别的防火墙」用的。CSV 是给人看的，
+        # 这份是给机器读的 —— 一行一个，无表头、无 BOM（见 app.export_csv）
+        self.btn_ban_ips = self._mini_button("导出 IP 列表", enabled=True)
+        self.btn_ban_ips.setToolTip(
+            "把封禁中的 IP 导出成纯文本（一行一个，无表头），\n可直接导入其它防火墙 / 黑名单系统"
+        )
+        self.btn_ban_ips.clicked.connect(self._export_ip_menu)
         bb.addWidget(self.lbl_ban_sel)
         bb.addWidget(self.btn_ban_all)
         bb.addSpacing(6)
         bb.addWidget(self.btn_ban_unban)
         bb.addWidget(self.btn_ban_del)
         bb.addWidget(self.btn_ban_export)
+        bb.addWidget(self.btn_ban_ips)
         bb.addStretch(1)
         # 双击勾选是个「藏起来的功能」：不给提示的话没人会去试。
         self.lbl_dbl_hint = QLabel("双击行可勾选")
@@ -794,6 +811,11 @@ class BansPage(BaseTablePage):
         return self.ban_panel
 
     # ── 数据 ──
+    def search_input(self):
+        """Ctrl+F 的落点：本页有两处搜索需求，但只有「封禁记录」这一处有搜索框，
+        建议表的筛选入口在事件页 —— 不去猜用户想搜哪张表，直接落在唯一存在的框上。"""
+        return self.search
+
     def _status_filter(self) -> str:
         m = {
             "已封禁": STATUS_ACTIVE,
@@ -990,6 +1012,7 @@ class BansPage(BaseTablePage):
                 (f"查看详情（{n} 条事件）" if n > 1 else "查看详情", lambda: self._sug_detail(r)),
                 ("忽略该建议", lambda: self._ignore(r)),
                 ("查询该 IP 归属地", lambda: self.ask_lookup.emit(ip)),
+                ("查看该 IP 的历史访问", lambda: self.ask_history.emit(ip)),
             ],
             self,
         ).exec(global_pos)
@@ -1243,6 +1266,53 @@ class BansPage(BaseTablePage):
             scope_hint=f"导出范围：当前筛选结果，共 {len(self._ban_rows)} 条。",
         )
 
+    # ── 导出 IP 列表（纯文本，给别的机器用）──
+    def _export_ip_menu(self) -> None:
+        """先选范围再选文件。
+
+        两个范围差别很大，不能替用户猜：筛到「已解封」时若默默导出全部，
+        拿到的是几周前的旧 IP；反过来「全部封禁中」若被筛选条件限制住，
+        会漏掉真正还在防火墙里生效的那批。
+        """
+        menu = build_menu(
+            [
+                (f"全部封禁中的 IP（{count_active_bans()} 条记录）", self._export_active_ips),
+                (f"当前筛选结果（{len(self._ban_rows)} 条记录）", self._export_filtered_ips),
+            ],
+            self,
+        )
+        menu.exec(self.btn_ban_ips.mapToGlobal(self.btn_ban_ips.rect().bottomLeft()))
+
+    def _export_active_ips(self) -> None:
+        rows = query_bans(status=STATUS_ACTIVE)
+        self._write_ip_list([b.ip for b in rows], "全部封禁中的 IP")
+
+    def _export_filtered_ips(self) -> None:
+        self._write_ip_list([b.ip for b in self._ban_rows], "当前筛选结果")
+
+    def _write_ip_list(self, ips, scope: str) -> None:
+        """写纯文本 IP 列表（一行一个）。去重与换行口径见 app.export_csv。"""
+        lines = collect_ip_lines(ips)
+        if not lines:
+            QMessageBox.information(self, "没有可导出的 IP", "这个范围里还没有任何封禁记录。")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 IP 列表", "portguard_banned_ips.txt", "文本文件 (*.txt)"
+        )
+        if not path:
+            return
+        try:
+            n = export_ip_list(path, lines)
+        except Exception as e:  # 导出失败必须让用户看见，不能静默吞掉
+            QMessageBox.warning(self, "导出失败", str(e))
+            return
+        QMessageBox.information(
+            self,
+            "导出成功",
+            f"{scope}：已写入 {n} 个 IP（去重后）。\n{path}\n\n"
+            "文件是纯文本、一行一个、无表头，可直接导入其它防火墙 / 黑名单系统。",
+        )
+
     def _load_bans(self) -> None:
         kw = self.search.text().strip()
         if self._is_expired_filter():
@@ -1349,8 +1419,13 @@ class BansPage(BaseTablePage):
             self.table.setRowCount(0)
             self.table.setRowCount(len(rows))
             for i, b in enumerate(rows):
+                # 状态色按「处置结论」而不是按「危险」着色（2026-11-04 降噪）：
+                # 「已封禁」是**这件事已经处置完了**，与风险事件页「已拦截 = 绿色」
+                # 是同一句话。此前这里给 active 上 danger 红，一屏十几条封禁记录
+                # 就是十几处红字 —— 红色一旦铺满，真正的「失败」反而看不见了
+                # （theme.py 顶部「颜色只表达语义、红色必须稀缺」同一条理由）。
                 status_color = {
-                    STATUS_ACTIVE: C.danger,
+                    STATUS_ACTIVE: C.success,
                     STATUS_UNBANNED: C.text_muted,
                     STATUS_FAILED: C.danger,
                     STATUS_PENDING: C.info,
@@ -1460,6 +1535,9 @@ class BansPage(BaseTablePage):
         build_menu(
             [
                 ("查询该 IP 归属地", lambda: self.ask_lookup.emit(b.ip)),
+                # 封禁记录只回答「这个 IP 被封过」，要回答「它到底干了什么」
+                # 得看历史访问（含未命中规则的那些流水）
+                ("查看该 IP 的历史访问", lambda: self.ask_history.emit(b.ip)),
                 ("复制 IP", lambda: self._copy(b.ip)),
                 None,
                 ("删除记录…", lambda: self._delete(b)),

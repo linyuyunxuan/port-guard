@@ -79,6 +79,69 @@ class Dot(QWidget):
         p.end()
 
 
+class NavButton(QPushButton):
+    """侧栏导航按钮 + 右侧计数角标（自绘）。
+
+    为什么把角标画在按钮自己身上、而不是叠一个子 QLabel：
+    · 导航项由 QSS `#nav_btn` 定高（42px）定内距（0 16px），子控件要跟着 QSS 的
+      padding 走，而 Qt5 / Qt6 对子控件几何的计算时机不同，实机容易错位；
+    · `paintEvent` 里只多画一个圆角矩形 + 一行小字，位置完全由按钮自身矩形决定，
+      与 QSS、字体度量都解耦。
+
+    角标语义：只表达「有多少件在等你」，不表达风险等级 —— 具体颜色由调用方
+    （MainWindow）按「未处理事件 = warning / 待确认建议 = danger」传入。
+    `0` 时不画，避免侧栏常驻一堆 0。
+    """
+
+    #: 角标高度与圆角半径（18 / 9 是 11px 数字一行 + 左右各 5px 内距）
+    BADGE_H = 18
+    #: 距按钮右边缘的距离。QSS 的 padding 是 16px，角标再内收 2px 视觉上才与文字对齐
+    BADGE_RIGHT = 14
+    #: 超过这个数显示 `99+`（三位数会把 4 字导航项挤到换行）
+    BADGE_CAP = 99
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self._badge = 0
+        self._badge_color = C.danger_solid
+
+    def set_badge(self, n: int, color: Optional[str] = None) -> None:
+        """设置角标数量。`n <= 0` 隐藏；颜色只在显式传入时改（避免每跳都重设）"""
+        n = max(0, int(n or 0))
+        if color:
+            self._badge_color = color
+        if n == self._badge:
+            return
+        self._badge = n
+        # 数字长短会改变绘制宽度，必须重绘；按钮本身尺寸不变，不触发重新布局
+        self.update()
+
+    def badge(self) -> int:
+        return self._badge
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        if self._badge <= 0:
+            return
+        text = f"{self.BADGE_CAP}+" if self._badge > self.BADGE_CAP else str(self._badge)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        f = QFont(self.font())
+        f.setPixelSize(11)
+        f.setBold(True)
+        p.setFont(f)
+        fm = p.fontMetrics()
+        w = max(self.BADGE_H, fm.horizontalAdvance(text) + 10)
+        r = QRect(self.width() - self.BADGE_RIGHT - w, (self.height() - self.BADGE_H) // 2, w, 0)
+        r.setHeight(self.BADGE_H)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(self._badge_color)))
+        p.drawRoundedRect(r, self.BADGE_H / 2, self.BADGE_H / 2)
+        p.setPen(QColor(C.accent_on))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+        p.end()
+
+
 class ToggleSwitch(QWidget):
     """开关控件（44×24）：轨道 primary / 关闭态 border_strong
 

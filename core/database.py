@@ -515,11 +515,25 @@ def stats_snapshot(include_today: bool = True) -> Dict[str, int]:
         unhandled = conn.execute("SELECT COUNT(*) c FROM risk_event WHERE handled = 0").fetchone()[
             "c"
         ]
+        # 待确认封禁建议：未处理 + 高危 + 该 IP 还没被封。
+        # 与 `PageBans._load_suggestions` 的筛选口径逐条对齐（它按 IP 隐藏已封禁项），
+        # 否则侧栏角标会说「3 项待确认」，点进去只有 1 项 —— 用户第一反应是建议丢了。
+        # 索引：risk_event(handled) + ban_list(status)，两张表都在清理任务里按天收敛，
+        # 这条查询在 2 秒一跳里可忽略。
+        suggestions = conn.execute(
+            "SELECT COUNT(*) c FROM risk_event r WHERE r.handled = 0 "
+            "AND r.risk_level IN ('high', 'critical') "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM ban_list b WHERE b.ip = r.ip AND b.status = ?"
+            ")",
+            (STATUS_ACTIVE,),
+        ).fetchone()["c"]
         return {
             "today_total": int(total),
             "today_risk": int(risk),
             "active_bans": int(bans),
             "unhandled": int(unhandled),
+            "suggestions": int(suggestions),
         }
     finally:
         conn.close()

@@ -43,6 +43,11 @@ SEED = [
 ]
 
 
+# 与 SEED 等长的进程名样本：监控页 2026-11-04 起第 11 列是「进程」，
+# 截图里全是「-」就看不出列宽够不够
+PROC = ["nginx.exe", "svchost.exe", "mysqld.exe", "java.exe", "python.exe", "TermService.exe"]
+
+
 def seed_monitor(win) -> None:
     """灌入样本访问记录（仅用于截图，不落库）"""
     import datetime
@@ -65,7 +70,13 @@ def seed_monitor(win) -> None:
             status_code=status or None,
             user_agent="Mozilla/5.0 (Windows NT 10.0)",
             size=1024 * (i + 1),
-            server_name="web-01",
+            # 进程名走 tags（与真机一致）：1.2.0 起 server_name 恒为空，
+            # 监控页那一列已经改成「进程」
+            tags={
+                "source": "local-watch",
+                "channel": "table",
+                "process": PROC[i % len(PROC)],
+            },
             event_ts=now_ms - (24 - i) * 7000,
         )
         r.geo = loc.lookup(ip)
@@ -131,7 +142,7 @@ ELASTIC_MIN = {
 
 # 逐格省略检测：这些列一旦出现省略号就是缺陷（判据值 = 该列的「最差值」，
 # 不依赖当前样本；实际还会和样本里最长的那条取较大者，样本换了也不会漏）。
-# 路径 / 请求 / 原因 / 归属地 / 命中规则 / 服务器 允许 Qt elide，不在此表内。
+# 路径 / 请求 / 原因 / 归属地 / 命中规则 / 进程 允许 Qt elide，不在此表内。
 NO_ELIDE = {
     "时间": "23:59:59",
     "风险": "严重",
@@ -187,7 +198,7 @@ WARN_MAX = 3
 # 「允许省略」的列（可变长语义文本）。前提是**有 tooltip 兜底**：省略本身可接受，
 # 「省略了又没有途径看全文」才是缺陷 —— 命中规则/路径正是运维判断风险依据的字段。
 # 这条是硬判据：它把「为了过门禁去加宽列」的歪路堵死，正确解法只剩补 tooltip。
-ALLOW_ELIDE = ("请求", "路径", "原因", "归属地", "服务器")
+ALLOW_ELIDE = ("请求", "路径", "原因", "归属地", "进程")
 
 # 徽章 + 规则名（事件页「等级 / 命中规则」列）的整组预算。
 # 常量与 gui/widgets.py 的 BADGE_H_PAD / BADGE_GAP 对齐；最差规则名取

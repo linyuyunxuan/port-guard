@@ -1,0 +1,46 @@
+# -*- mode: python ; coding: utf-8 -*-
+# PortGuard — Windows 可执行文件版本资源（exe 右键「属性 → 详细信息」里显示的内容）
+#
+# 为什么单独一个文件而不是写进 spec：
+#   1. PyInstaller 只认这个 VSVersionInfo 语法，它不是 Python 代码，混在 spec 里
+#      会把 spec 的可读性打散；
+#   2. 版本号 / 作者在 core/config.py 里已有一份，打包脚本会先按它校验本文件
+#      （tests/test_version_info.py），防止「程序里写 1.9.0、文件属性里写 1.8.0」。
+#
+# 语言表键 `080404B0` = 简体中文(0x0804) + Unicode(0xB0=1200)；与末尾
+# VarStruct 的 Translation [2052, 1200] 必须成对。改语言时两处一起改。
+VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=(1, 9, 0, 0),
+        prodvers=(1, 9, 0, 0),
+        mask=0x3F,
+        flags=0x0,
+        OS=0x40004,
+        fileType=0x1,
+        subtype=0x0,
+        date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo(
+            [
+                StringTable(
+                    "080404B0",
+                    [
+                        StringStruct("CompanyName", "林玉云轩"),
+                        StringStruct("FileDescription", "PortGuard 端口访问防御工具"),
+                        StringStruct("FileVersion", "1.9.0"),
+                        StringStruct("InternalName", "PortGuard"),
+                        StringStruct("LegalCopyright", "Copyright (C) 2026 林玉云轩"),
+                        StringStruct("OriginalFilename", "PortGuard.exe"),
+                        StringStruct("ProductName", "PortGuard"),
+                        StringStruct("ProductVersion", "1.9.0"),
+                        StringStruct(
+                            "Comments", "作者：林玉云轩　联系方式：1416161819"
+                        ),
+                    ],
+                )
+            ]
+        ),
+        VarFileInfo([VarStruct("Translation", [2052, 1200])]),
+    ],
+)

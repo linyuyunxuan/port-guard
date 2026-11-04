@@ -133,6 +133,9 @@ class EventPumpMixin(_HostBase):
     def _set_ban_count(self, n: int) -> None:
         raise NotImplementedError
 
+    def _set_nav_badges(self, unhandled: int, suggestions: int) -> None:
+        raise NotImplementedError
+
     def _maybe_poll_firewall(self) -> None:
         raise NotImplementedError
 
@@ -375,12 +378,16 @@ class EventPumpMixin(_HostBase):
         try:
             s = stats_snapshot(include_today=monitor_visible)
             bans, unhandled = s["active_bans"], s["unhandled"]
+            suggestions = int(s.get("suggestions", 0))
             if monitor_visible:
                 self.page_monitor.set_stats(s["today_total"], s["today_risk"], bans)
         except Exception:
             log.exception("统计刷新失败")
-            bans = unhandled = 0
+            bans = unhandled = suggestions = 0
         self.lbl_ban_count.setText(f"已封禁 {bans}")
+        # 侧栏角标：未处理事件 / 待确认建议。0 时角标自己隐藏（见 widgets.NavButton）
+        with contextlib.suppress(Exception):
+            self._set_nav_badges(unhandled, suggestions)
         # 圆点颜色随计数切换：有数 danger / 0 时 success（P2-1）
         self._set_ban_count(bans)
         if unhandled:

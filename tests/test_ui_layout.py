@@ -280,3 +280,55 @@ def test_ban_geo_is_attached_for_ip_and_network() -> None:
     assert rows[1].geo_is_network is True
     # 渲染取的是 region_short；查不到时它给「未知」而不是空串
     assert isinstance(rows[0].geo.region_short, str) and rows[0].geo.region_short
+
+
+# ═══════════════════ 5. 侧栏计数角标 ═══════════════════
+
+
+def test_nav_button_badge_semantics() -> None:
+    """角标只在 >0 时可见，超过 99 显示 `99+`。
+
+    「0 也画一个 0」是这类角标最常见的退化：侧栏天天挂着一排 `0`，
+    用户很快就学会无视它们 —— 那就等于没做。
+    """
+    _qapp()
+    from gui.widgets import NavButton
+
+    btn = NavButton("风险事件")
+    assert btn.badge() == 0
+
+    btn.set_badge(7, "#C53030")
+    assert btn.badge() == 7
+
+    btn.set_badge(0)
+    assert btn.badge() == 0
+
+    btn.set_badge(150)
+    assert btn.badge() == 150  # 计数本身不截断，绘制时才显示 99+
+
+
+# ═══════════════════ 6. 「查看该 IP 的历史访问」跳转 ═══════════════════
+
+
+def test_focus_ip_widens_range_and_fills_search() -> None:
+    """从监控 / 事件 / 封禁页跳过来时，必须把时间范围放宽到「全部时间」。
+
+    默认停在「今天」时，点一个昨天来过的 IP 会得到一张空表 —— 用户会以为
+    这个 IP 从没来过（这是这个功能最容易做错、也最难自查的一处）。
+    """
+    _qapp()
+    from core import database
+    from gui import page_access
+
+    database.init_db()
+    page = page_access.AccessPage()
+    page.range.setCurrentText(page_access.RANGE_TODAY)
+
+    page.focus_ip("203.0.113.7")
+
+    assert page.search.text() == "203.0.113.7"
+    assert page.range.currentText() == page_access.RANGE_ALL
+    # 重复跳同一个 IP 不能让列表卡在上一页
+    page._page = 3
+    page.focus_ip("203.0.113.7")
+    assert page._page == 0

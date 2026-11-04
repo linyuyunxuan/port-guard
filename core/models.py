@@ -187,6 +187,17 @@ class AccessRecord:
 
         return "、".join(rule_label(r) for r in self.matched_rules)
 
+    @property
+    def process(self) -> str:
+        """本机采集到的进程名（`tags["process"]`），没有则为空串。
+
+        `tags` 是 JSON 落库的，回读历史记录时照样能取到 —— 所以界面与 CSV
+        都走这一个属性，不要各自去 `tags.get("process")`（漏一处就会有一处
+        显示「-」，而数据其实在）。
+        """
+        tags = self.tags or {}
+        return str(tags.get("process") or "")
+
 
 # ═══════════════════════════════════════════════════════════
 #  处置结论（disposition）

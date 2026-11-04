@@ -439,6 +439,34 @@ class AccessPage(QWidget):
         return b
 
     # ── 筛选 ──
+    def search_input(self):
+        """Ctrl+F 的落点（见 gui/main_window._focus_search）"""
+        return self.search
+
+    def focus_ip(self, ip: str) -> None:
+        """从别的页面「查看该 IP 的历史访问」跳进来：填搜索词并立即查询。
+
+        时间范围刻意放宽到「全部时间」：从监控页点进来的 IP 往往发生在昨天，
+        而本页默认停在「今天」时，跳进来会得到一张空表 —— 用户会以为这个 IP
+        从没来过。放宽是安全的：搜索框只填了一个 IP，扫描面受 IP 前缀约束。
+        """
+        ip = (ip or "").strip()
+        if not ip:
+            return
+        if self.range.currentText() != RANGE_ALL:
+            self.range.blockSignals(True)
+            self.range.setCurrentIndex(0)
+            self.range.blockSignals(False)
+            for w in (self.dt_from, self.lbl_to, self.dt_to):
+                w.setVisible(False)
+        self._page = 0
+        if self.search.text() == ip:
+            # 文案没变时 textChanged 不触发，得自己刷一次
+            self.refresh()
+        else:
+            self.search.setText(ip)  # textChanged → _on_filter_changed → refresh
+        self.search.setFocus()
+
     def _on_filter_changed(self, *_args: Any) -> None:
         # 条件变了必须回到第 1 页：在第 7 页改关键词，原 offset 会指向空页
         self._page = 0

@@ -348,6 +348,10 @@ class LogsPage(QWidget):
     # ═══════════════════════════════════════════════
     #  交互
     # ═══════════════════════════════════════════════
+    def search_input(self):
+        """Ctrl+F 的落点（见 gui/main_window._focus_search）"""
+        return self.search
+
     def _on_source_changed(self, idx: int) -> None:
         # 级别过滤只对程序日志有意义
         self.level.setEnabled(idx == SOURCE_APP)
@@ -438,7 +442,8 @@ def _access_row(rec: AccessRecord) -> _Row:
     else:
         # 1.1.0 之前业务系统可通过 HTTP 上报；这些历史记录仍要能正常显示
         origin = "历史记录·旧版上报"
-    proc = tags.get("process")
+    # 进程名的唯一读取口径是 AccessRecord.process（tags["process"] 的封装）
+    proc = rec.process
     if proc:
         origin += f"·{proc}"
 

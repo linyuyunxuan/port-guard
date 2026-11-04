@@ -70,7 +70,7 @@ HEADERS = [
     "状态",
     "命中规则",
     "处置",
-    "服务器",
+    "进程",
 ]
 
 # 列宽基线：固定列合计 894，请求列（唯一 Stretch 列）吃掉剩余 ——
@@ -90,7 +90,11 @@ HEADERS = [
 #               152 → 147 只是让省略发生在同一个位置）
 #   处置 70（装「仅提醒 / 已拦截 / 待确认」三个三字词；56 与 62 都会被截成
 #            「仅…」—— Qt 的 item 内边距比 QSS 写的 10px 更大，按实测需求 + 10 才稳）
-#   服务器 112（`web-prod-01` 需 108 —— 旧版 92 一直在截断）
+#   进程 112（`svchost.exe` / `nginx.exe` 这类服务进程名实测 ≤ 96，长名走省略 +
+#            tooltip。**这一格是 2026-11-04 用「服务器」列换来的**：1.2.0 移除 HTTP
+#            上报接收服务后，server_name 永远为空，那一列天天显示「-」；
+#            而进程名是本机采集两条通道都能拿到的实时信息，同一个像素预算下
+#            明显更值钱。列宽不变 → 请求列（唯一 Stretch）的预算也没变）
 # 请求列宽度是这里最贵的一格：旧配置固定列合计 1151 > 视口 1099，请求列被挤到
 # 121px，`POST /admin/login` 显示成 `POST /admi…`，右键菜单之外根本看不出访问了什么。
 COL_WIDTHS = [96, 52, 138, 112, 58, 57, 209, 52, 147, 70, 112]
@@ -233,7 +237,11 @@ class AccessTableModel(QAbstractTableModel):
             # 而不是硬编「已放行」—— 没判定过和判定为放行是两件事
             return disposition_label(rec.disposition) if rec.disposition else "-"
         if col == 10:
-            return rec.server_name or rec.host or "-"
+            # 进程名：本机采集两条通道都能提供（连接表走 PID 反查、防火墙日志
+            # 走日志最后一列）。取不到就写「-」—— 留空会被当成「这一列没数据」。
+            # 老记录（1.1.0 的 HTTP 上报）没有进程概念，此时退回 server_name，
+            # 让历史缓冲里那批记录仍然有可读的归属信息。
+            return rec.process or rec.server_name or rec.host or "-"
         return ""
 
     def _tooltip(self, rec: AccessRecord, row: int = -1) -> str:
@@ -246,6 +254,7 @@ class AccessTableModel(QAbstractTableModel):
             f"状态码：{rec.status_code if rec.status_code else '-'}",
             f"大小：{_fmt_size(rec.size)}",
             f"User-Agent：{rec.user_agent or '(空)'}",
+            f"进程：{rec.process or '-'}",
             f"风险：{rec.risk_score} 分 / {LEVEL_LABEL.get(rec.risk_level, rec.risk_level)}",
         ]
         if rec.matched_rules:
@@ -444,6 +453,10 @@ class AccessTableModel(QAbstractTableModel):
                     rec.user_agent or "",
                     rec.server_name or "",
                     rec.host or "",
+                    # 进程名进搜索：攻击期最常问的一句是「哪个服务在被扫」，
+                    # 而「按进程过滤」的操作入口就是直接把进程名填进搜索框
+                    # （见右键菜单「按此进程筛选」）。
+                    rec.process,
                 ]
             ).lower()
             if kw not in hay:
@@ -488,6 +501,7 @@ class MonitorPage(QWidget):
     ask_blacklist = Signal(str)  # 请求把 IP 加进「拦截」规则（原黑名单入口）
     ask_ban = Signal(str, int, str)  # 请求封禁 ip / score / reason
     ask_settings = Signal()  # 请求跳到设置页（空态「去启动」）
+    ask_history = Signal(str)  # 请求跳到「历史访问」页并只看这个 IP
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -524,7 +538,7 @@ class MonitorPage(QWidget):
         bar = QHBoxLayout()
         bar.setSpacing(8)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索 IP / 路径 / User-Agent / 服务器…")
+        self.search.setPlaceholderText("搜索 IP / 路径 / 进程 / User-Agent…")
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(330)
         self.search.textChanged.connect(self._on_filter)
@@ -613,6 +627,10 @@ class MonitorPage(QWidget):
         self._update_count()
 
     # ── 交互 ──
+    def search_input(self):
+        """Ctrl+F 的落点（见 gui/main_window._focus_search）"""
+        return self.search
+
     def _on_pause(self, checked: bool) -> None:
         self._paused = checked
         self.pause_banner.setVisible(checked)
@@ -657,8 +675,11 @@ class MonitorPage(QWidget):
         menu = QMenu(self)
         a_detail = QAction(f"查看详情（{n} 次连接）" if n > 1 else "查看详情", self)
         a_lookup = QAction("查询该 IP 归属地", self)
+        a_history = QAction("查看该 IP 的历史访问", self)
         a_copy = QAction("复制 IP", self)
         a_copy_ua = QAction("复制 User-Agent", self)
+        a_filter_ip = QAction("按此 IP 筛选", self)
+        a_filter_proc = QAction("按此进程筛选", self)
         a_black = QAction("加入拦截规则", self)
         a_ban = QAction("封禁该 IP…", self)
         # 已封禁的 IP 把封禁项置灰并说明原因：不然点下去只会弹「已处于封禁状态」，
@@ -670,24 +691,42 @@ class MonitorPage(QWidget):
         if ban is not None:
             a_ban.setText("已在封禁中")
             a_ban.setEnabled(False)
+        # 没有进程名时不摆一个点了没反应的菜单项（防火墙日志通道常取不到进程）
+        a_filter_proc.setEnabled(bool(rec.process))
         menu.addAction(a_detail)
         menu.addSeparator()
         menu.addAction(a_lookup)
+        menu.addAction(a_history)
+        menu.addSeparator()
         menu.addAction(a_copy)
         menu.addAction(a_copy_ua)
+        menu.addAction(a_filter_ip)
+        menu.addAction(a_filter_proc)
         menu.addSeparator()
         menu.addAction(a_black)
         menu.addAction(a_ban)
 
         a_detail.triggered.connect(lambda: self._show_detail(idx.row()))
         a_lookup.triggered.connect(lambda: self.ask_lookup.emit(rec.ip))
+        a_history.triggered.connect(lambda: self.ask_history.emit(rec.ip))
         a_copy.triggered.connect(lambda: self._copy(rec.ip))
         a_copy_ua.triggered.connect(lambda: self._copy(rec.user_agent or ""))
+        a_filter_ip.triggered.connect(lambda: self._set_search(rec.ip))
+        a_filter_proc.triggered.connect(lambda: self._set_search(rec.process))
         a_black.triggered.connect(lambda: self.ask_blacklist.emit(rec.ip))
         a_ban.triggered.connect(
             lambda: self.ask_ban.emit(rec.ip, rec.risk_score, rec.matched_str or "手动封禁")
         )
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _set_search(self, text: str) -> None:
+        """把搜索框设成某个值（右键「按此 IP / 进程筛选」）。
+
+        直接改 search 而不是另建筛选项：搜索框已经支持 IP 与进程名（见
+        `_match`），再加一层「按进程筛选」的状态会让「清空筛选」变成两件事。
+        """
+        if text:
+            self.search.setText(text)
 
     def _copy(self, text: str) -> None:
         from qtcompat import QApplication

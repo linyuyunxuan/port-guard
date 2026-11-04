@@ -23,7 +23,15 @@ import platform
 import sys
 from typing import List, Optional, Tuple
 
-from core.config import APP_NAME, APP_TITLE, APP_VERSION, db_path, user_data_dir
+from core.config import (
+    APP_AUTHOR,
+    APP_CONTACT,
+    APP_NAME,
+    APP_TITLE,
+    APP_VERSION,
+    db_path,
+    user_data_dir,
+)
 from core.geo_locator import get_locator
 from core.logger import log_file
 from core.models import ms_to_str
@@ -56,6 +64,10 @@ from qtcompat import (
 
 #: 帮助 / 关于页的全局快捷键
 HELP_SHORTCUT_KEY = "F1"
+#: 「定位到当前页搜索框」。与 gui.main_window.FIND_SHORTCUT_KEY 同一值 ——
+#: 这里不 import main_window（会成环，见 build_shortcut_rows 的注释），
+#: 两边各写一份字面量，由 tests/test_about_dialog.py 锁住一致。
+FIND_SHORTCUT_KEY = "Ctrl+F"
 
 #: 信息面板的标签列宽（与设置页面板对齐，控件左缘才落在同一条竖线上）
 _LABEL_W = 96
@@ -117,6 +129,8 @@ def build_shortcut_rows(nav_items: List[Tuple[str, str]]) -> List[Tuple[str, str
     链绑在一起 —— 任一页面模块 import 失败，关于页就打不开，而它跟那些页面毫无关系。
     """
     rows = [(f"Ctrl+{i + 1}", f"切换到「{item[0]}」") for i, item in enumerate(nav_items)]
+    # 全局快捷键（不只是切页）：搜索框在 6 个页面上各有位置，Ctrl+F 是唯一一致的入口
+    rows.append((FIND_SHORTCUT_KEY, "定位到当前页的搜索框（打字即替换）"))
     rows.append((HELP_SHORTCUT_KEY, "打开「关于 / 快捷键帮助」"))
     return rows
 
@@ -167,6 +181,8 @@ def about_summary_text() -> str:
         [
             f"{APP_TITLE}",
             f"版本        : v{APP_VERSION}",
+            f"作者        : {APP_AUTHOR}",
+            f"联系方式    : {APP_CONTACT}",
             f"图形界面    : {BINDING_DESC}",
             f"Python      : {python_text()}",
             f"操作系统    : {os_text()}",
@@ -339,6 +355,13 @@ class AboutDialog(QDialog):
     # ── 关于 ──
     def _tab_about(self) -> QWidget:
         area, lay = _scroll_page()
+
+        # 作者信息放最上面：这一页的第一件事是「这是谁做的、出问题找谁」，
+        # 版本 / 路径是排障信息，排在它后面
+        who = _InfoPanel("作者")
+        who.add("作者", APP_AUTHOR)
+        who.add("联系方式", APP_CONTACT)
+        lay.addWidget(who)
 
         env = _InfoPanel("运行环境")
         env.add("程序版本", f"v{APP_VERSION}")

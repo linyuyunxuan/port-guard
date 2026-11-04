@@ -16,7 +16,7 @@ from app.xdb_service import get_service as get_xdb_service
 from core import firewall
 from core import settings as cfg
 from core.alerts import Alerter
-from core.config import APP_TITLE, APP_VERSION
+from core.config import APP_AUTHOR, APP_CONTACT, APP_TITLE, APP_VERSION
 from core.database import find_active_ban_by_ip, init_db
 from core.event_bus import bus
 from core.geo_locator import get_locator
@@ -34,7 +34,7 @@ from gui.page_monitor import MonitorPage
 from gui.page_rules import RulesPage
 from gui.page_settings import SettingsPage
 from gui.theme import GLOBAL_STYLE, C
-from gui.widgets import Dot
+from gui.widgets import Dot, NavButton
 from qtcompat import (
     QAction,
     QApplication,
@@ -101,6 +101,10 @@ NAV_GROUPS = [
     PAGE_LOGS,
     PAGE_SETTINGS,
 ) = range(8)
+
+#: Ctrl+F「定位到当前页搜索框」的按键串。与 about_dialog 的快捷键表共用同一份口径，
+#: 不写两遍 —— 那张帮助页是用户唯一能查到快捷键的地方。
+FIND_SHORTCUT_KEY = "Ctrl+F"
 
 
 def _make_icon(color: Optional[str] = None, size: int = 64) -> QIcon:
@@ -535,6 +539,10 @@ class MainWindow(EventPumpMixin, QMainWindow):
         # 槽一律走 _nav_slot() 工厂：带默认参数的 lambda 在 PySide2 上按 0 参调用，
         # 点击会静默失效（见 _nav_slot 文档）。
         self.nav_buttons: List[QPushButton] = []
+        # 带角标的两个导航项：风险事件 = 未处理事件数，封禁管理 = 待确认建议数。
+        # 这两项回答的都是「现在还有多少件在等我」，而状态栏那句「有 N 条风险事件
+        # 待处理」只在用户看状态栏时才存在。导航项是常驻的，角标才能被余光扫到。
+        self.nav_badges: Dict[int, NavButton] = {}
         for group, indexes in NAV_GROUPS:
             # 分组标题上留 12px：否则 11px 的标题与 13px 的导航项视觉同级，
             # 7 个导航会被读成「8 个平级项」（视觉走查结论）。
@@ -545,7 +553,7 @@ class MainWindow(EventPumpMixin, QMainWindow):
             sl.addWidget(gl)
             for idx in indexes:
                 name = NAV_ITEMS[idx][0]
-                btn = QPushButton(name)
+                btn = NavButton(name)
                 btn.setObjectName("nav_btn")
                 btn.setCheckable(True)
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -553,6 +561,8 @@ class MainWindow(EventPumpMixin, QMainWindow):
                 btn.clicked.connect(self._nav_slot(idx))
                 sl.addWidget(btn)
                 self.nav_buttons.append(btn)
+                if idx in (PAGE_EVENTS, PAGE_BANS):
+                    self.nav_badges[idx] = btn
         self.nav_buttons[0].setChecked(True)
 
         sl.addStretch(1)
@@ -582,23 +592,49 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.lbl_version.setObjectName("sidebar_footer")
         self.lbl_version.setContentsMargins(16, 0, 16, 12)
         self.lbl_version.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lbl_version.setToolTip("关于 PortGuard / 快捷键帮助（F1）")
+        self.lbl_version.setToolTip(
+            f"关于 PortGuard / 快捷键帮助（F1）\n作者：{APP_AUTHOR}　联系方式：{APP_CONTACT}"
+        )
         self.lbl_version.clicked.connect(self._show_about)
         sl.addWidget(self.lbl_version)
         return self.sidebar
 
     def _setup_shortcuts(self) -> None:
-        """Ctrl+1…8 切页（与侧栏顺序一致，导航项 tooltip 已标出）+ F1 关于/帮助"""
+        """Ctrl+1…8 切页 + Ctrl+F 定位本页搜索框 + F1 关于/帮助"""
         self._shortcuts: List[QShortcut] = []
         for idx in range(len(NAV_ITEMS)):
             sc = QShortcut(QKeySequence(f"Ctrl+{idx + 1}"), self)
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(self._nav_slot(idx))
             self._shortcuts.append(sc)
+        # Ctrl+F：把焦点送到「当前页的搜索框」。
+        # 7 个页面的搜索框分散在各自的筛选栏里，鼠标要先找到那一片再点输入框；
+        # 键盘用户（尤其是攻击期连续查几个 IP）实际上是「切页 → 输入 → 回车」
+        # 三步，Ctrl+F 省掉的是中间那步。
+        self._sc_find = QShortcut(QKeySequence(FIND_SHORTCUT_KEY), self)
+        self._sc_find.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._sc_find.activated.connect(self._focus_search)
         # F1：QShortcut 在 Qt5 属于 QtWidgets、Qt6 属于 QtGui，
         # 统一由 gui.about_dialog.register_about_shortcut 从 qtcompat 取。
         self._sc_help = register_about_shortcut(self)
         self._sc_help.activated.connect(self._show_about)
+
+    def _focus_search(self) -> None:
+        """Ctrl+F：聚焦当前页的搜索框（并全选，直接打字即替换上次的关键字）。
+
+        页面自己声明 `search_input()` 就优先用它；没声明的页面（规则 / 设置）
+        没有可搜的内容，静默忽略比弹一句「本页不支持」更不打扰。
+        用 `QLineEdit` 的 setFocus 而不是枚举页面类型：新增页面只要实现
+        `search_input()`，快捷键自动可用。
+        """
+        page = self.stack.currentWidget()
+        getter = getattr(page, "search_input", None)
+        box = getter() if callable(getter) else None
+        if box is None:
+            return
+        box.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        with contextlib.suppress(Exception):
+            box.selectAll()
 
     def _show_about(self) -> None:
         """关于 / 快捷键帮助：侧栏版本号、托盘菜单、F1 三个入口共用这一种实现"""
@@ -687,6 +723,29 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.lbl_ban_count.setText(f"已封禁 {n}")
         self.ban_dot.set_color(C.danger if n > 0 else C.success)
 
+    def _set_nav_badges(self, unhandled: int, suggestions: int) -> None:
+        """侧栏角标：风险事件 = 未处理事件数（琥珀），封禁管理 = 待确认建议数（红）。
+
+        两个数口径不同，颜色也刻意不同：
+        · 未处理事件是「积压」，本身不代表必须动手 → warning；
+        · 待确认建议是「规则已经判定要封、只差你点头」→ danger。
+        红色在这套界面里只给「需要立即处置」的东西，角标也不例外。
+        """
+        events = self.nav_badges.get(PAGE_EVENTS)
+        if events is not None:
+            events.set_badge(unhandled, C.warning)
+            events.setToolTip(
+                f"风险事件（Ctrl+{PAGE_EVENTS + 1}）"
+                + (f" · {unhandled} 条未处理" if unhandled else "")
+            )
+        bans = self.nav_badges.get(PAGE_BANS)
+        if bans is not None:
+            bans.set_badge(suggestions, C.danger_solid)
+            bans.setToolTip(
+                f"封禁管理（Ctrl+{PAGE_BANS + 1}）"
+                + (f" · {suggestions} 条待确认建议" if suggestions else "")
+            )
+
     def _nav_slot(self, idx: int) -> Callable[..., None]:
         """导航按钮槽工厂。
 
@@ -732,7 +791,9 @@ class MainWindow(EventPumpMixin, QMainWindow):
 
     def _setup_tray(self) -> None:
         self.tray = QSystemTrayIcon(self._app_icon, self)
-        self.tray.setToolTip(f"{APP_TITLE} v{APP_VERSION}")
+        self.tray.setToolTip(
+            f"{APP_TITLE} v{APP_VERSION}\n作者：{APP_AUTHOR}　联系方式：{APP_CONTACT}"
+        )
         menu = QMenu()
         a_show = QAction("显示主窗口", self)
         a_show.triggered.connect(self._show_window)
@@ -769,8 +830,10 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.page_monitor.ask_lookup.connect(self._goto_lookup)
         self.page_monitor.ask_blacklist.connect(self._add_blacklist)
         self.page_monitor.ask_ban.connect(self.request_ban)
+        self.page_monitor.ask_history.connect(self._goto_history)
         self.page_events.ask_ban.connect(self.request_ban)
         self.page_events.ask_ban_many.connect(self.request_ban_many)
+        self.page_events.ask_history.connect(self._goto_history)
         # 手动刷新过 = 解除「事件激增时暂停自动刷新」（见 gui/mixins.py）
         self.page_events.refreshed_manually.connect(self._resume_events_auto_refresh)
         self.page_access.ask_ban.connect(self.request_ban)
@@ -778,6 +841,7 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.page_bans.ask_ban.connect(self.request_ban)
         self.page_bans.ask_ban_many.connect(self.request_ban_many)
         self.page_bans.ask_lookup.connect(self._goto_lookup)
+        self.page_bans.ask_history.connect(self._goto_history)
         self.page_monitor.ask_settings.connect(self._goto_settings)
         self.page_bans.request_refresh_stats.connect(lambda: self._refresh_stats(force=True))
         self.page_rules.rules_saved.connect(self._on_rules_saved)
@@ -795,6 +859,15 @@ class MainWindow(EventPumpMixin, QMainWindow):
     def _goto_lookup(self, ip: str) -> None:
         self._switch_page(PAGE_LOOKUP)
         self.page_iplookup.lookup_and_show(ip)
+
+    def _goto_history(self, ip: str) -> None:
+        """「查看该 IP 的历史访问」：切到历史访问页并只看这个 IP。
+
+        交给 `AccessPage.focus_ip` 而不是在这里改搜索框：那边还要把时间范围
+        放宽到「全部时间」（默认停在「今天」时，昨天来的 IP 会查到一张空表）。
+        """
+        self._switch_page(PAGE_ACCESS)
+        self.page_access.focus_ip(ip)
 
     def _add_blacklist(self, ip: str) -> None:
         """监控页右键「拦截该 IP」：写一条拦截规则并立即封禁。

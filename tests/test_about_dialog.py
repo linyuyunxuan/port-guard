@@ -26,6 +26,7 @@ import pytest
 
 from core.config import APP_VERSION, db_path, user_data_dir
 from gui.about_dialog import (
+    FIND_SHORTCUT_KEY,
     HELP_SHORTCUT_KEY,
     AboutDialog,
     ClickableLabel,
@@ -87,6 +88,9 @@ class _Host(QWidget):
     def _show_window(self) -> None:
         pass
 
+    def _focus_search(self) -> None:
+        """Ctrl+F 的落点。替身只需要能被接线（_setup_shortcuts 会 connect 它）"""
+
     def _toggle_server(self) -> None:
         pass
 
@@ -111,13 +115,39 @@ def test_summary_text_carries_the_facts_support_asks_for():
     assert "Python" in text and "图形界面" in text
 
 
+def test_about_summary_includes_author():
+    """「复制版本信息」贴给支持方时必须带上作者与联系方式（用户找的就是这个）"""
+    from core.config import APP_AUTHOR, APP_CONTACT
+
+    text = about_summary_text()
+    assert f"作者        : {APP_AUTHOR}" in text
+    assert f"联系方式    : {APP_CONTACT}" in text
+
+
+def test_about_dialog_shows_author_panel(qapp):
+    """关于页第一栏就是作者与联系方式（版本 / 路径是排障信息，排在它后面）"""
+    from core.config import APP_AUTHOR, APP_CONTACT
+
+    dlg = AboutDialog(NAV_ITEMS)
+    try:
+        texts = [lb.text() for lb in dlg.findChildren(QLabel)]
+        assert APP_AUTHOR in texts
+        # 联系方式允许带分隔（手机号可能被排版成 1416 161 819），按去空格比较
+        assert any(
+            APP_CONTACT in t or APP_CONTACT.replace(" ", "") in t.replace(" ", "") for t in texts
+        )
+    finally:
+        dlg.close()
+
+
 def test_shortcut_rows_match_nav_items():
     rows = build_shortcut_rows(NAV_ITEMS)
 
-    # N 个导航项 + F1 帮助
-    assert len(rows) == len(NAV_ITEMS) + 1
+    # N 个导航项 + Ctrl+F（本页搜索）+ F1 帮助
+    assert len(rows) == len(NAV_ITEMS) + 2
     for i, (name, _short) in enumerate(NAV_ITEMS):
         assert rows[i] == (f"Ctrl+{i + 1}", f"切换到「{name}」")
+    assert rows[-2][0] == FIND_SHORTCUT_KEY, "Ctrl+F 必须出现在 F1 之前"
     assert rows[-1][0] == HELP_SHORTCUT_KEY
 
 
@@ -127,8 +157,20 @@ def test_shortcut_rows_grow_when_nav_grows():
     grown = build_shortcut_rows([*NAV_ITEMS, ("审计日志", "审计")])
 
     assert len(grown) == len(base) + 1
-    assert grown[-2] == ("Ctrl+9", "切换到「审计日志」")
+    assert grown[-3] == ("Ctrl+9", "切换到「审计日志」")
+    assert grown[-2][0] == FIND_SHORTCUT_KEY
     assert grown[-1][0] == HELP_SHORTCUT_KEY, "F1 必须留在最后一条"
+
+
+def test_find_shortcut_key_is_single_source():
+    """帮助页与真实注册的快捷键必须是同一个按键串。
+
+    两处各写一份字面量（about_dialog 不能 import main_window，会成环），
+    这条用例就是那两份字面量的一致性锁 —— 只改一边会当场红。
+    """
+    from gui import main_window
+
+    assert FIND_SHORTCUT_KEY == main_window.FIND_SHORTCUT_KEY
 
 
 def test_diag_text_is_reusable():

@@ -43,6 +43,21 @@ METHOD_LABEL = {
     METHOD_FWLOG: "防火墙日志",
 }
 
+
+def _proc_from_path(path: str) -> str:
+    """防火墙日志的进程列 -> 可执行文件名。
+
+    日志里是完整路径（`C:\\Program Files\\...\\nginx.exe`），而界面上进程列
+    只有 112px：整条路径会被省略成 `C:\\Prog…`，什么也认不出来。只留文件名
+    （与 `win_net.process_name` 的口径一致，两条通道显示同一串字）。
+    `-` / 空 / 只有目录名的情况一律返回空串，由界面显示「-」。
+    """
+    p = (path or "").strip().strip('"')
+    if not p or p == "-":
+        return ""
+    return p.rsplit("\\", 1)[-1] or ""
+
+
 # 采集方式在设置里存成 "table,fwlog" 这种逗号串
 DEFAULT_PORTS = [3389, 1433, 3306, 6379, 18080]
 
@@ -326,6 +341,10 @@ class PortWatcher:
                 size=e.size,
                 channel=METHOD_FWLOG,
                 action=e.action,
+                # 防火墙日志最后一列是**本机进程路径**（`C:\Program Files\…`），
+                # 只取文件名：表格列宽按进程名实测（112px），整条路径会直接省略成
+                # `C:\Prog…`，反而认不出是哪个程序。取不到（为空 / `-`）就留空。
+                process=_proc_from_path(e.path),
                 extra={"tcpflags": e.tcpflags} if e.tcpflags else None,
                 ts=e.event_ts or now_ms(),
             )

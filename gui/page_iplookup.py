@@ -198,6 +198,10 @@ class IpLookupPage(QWidget):
         ("scope", "范围"),
     )
 
+    def search_input(self):
+        """Ctrl+F 的落点：本页的「搜索框」就是单条查询输入框"""
+        return self.single
+
     def _build_single_fields(self) -> QWidget:
         """单条查询结果：固定四格「标签 → 值」。
 

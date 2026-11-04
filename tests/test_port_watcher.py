@@ -196,6 +196,23 @@ def test_poll_fwlog_emits_only_watched_ports(tmp_path):
     assert rec.tags["tcpflags"] == "S"
 
 
+def test_poll_fwlog_carries_process_name(tmp_path):
+    """防火墙日志通道也要给出进程名，且只留文件名（2026-11-04 进程列一等化）。
+
+    日志最后一列是完整路径（这里刻意带空格，验证"最后一列吞空格"的老坑不会
+    把路径切断）；整条路径塞进 112px 的进程列会被省略成 `C:\\Prog…`。
+    """
+    line = (
+        "2026-10-16 09:00:07 DROP TCP 45.155.205.233 192.168.1.251 40000 3389 "
+        r"40 S 0 0 8192 - - - RECEIVE C:\Program Files\nginx\nginx.exe"
+    )
+    _fwlog(tmp_path, [line])
+    w = _watcher(tmp_path, ports=(3389,), methods=["fwlog"])
+    assert w._poll_fwlog(w.config) == 1
+    rec = bus.drain_access()[0]
+    assert rec.process == "nginx.exe"
+
+
 def test_poll_fwlog_dedupes_repeated_drops(tmp_path):
     """同一来源反复重试扫描时只报一条，否则日志会被同一次扫描刷爆"""
     _fwlog(tmp_path, [DROP_18080, DROP_18080, DROP_18080])

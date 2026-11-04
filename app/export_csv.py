@@ -303,3 +303,49 @@ def iter_sug_rows(rows: Sequence[Any]) -> Iterator[List[Any]]:
             r.get("risk_score", 0),
             r.get("summary") or "命中风险规则",
         ]
+
+
+# ═══════════════════════════════════════════════════════════
+#  纯 IP 列表导出（不是 CSV：一行一个，直接导给别的防火墙 / 黑名单系统）
+# ═══════════════════════════════════════════════════════════
+
+
+def collect_ip_lines(ips: Iterable[Any]) -> List[str]:
+    """去空、去重、保序。返回可直接逐行写出的 IP 字符串列表。
+
+    为什么去重：ban_list 允许同一 IP 有多条历史记录（过期后又封一次），
+    而导入到别的系统时重复行毫无意义，还会让「导出了多少个 IP」这个数字失真。
+    保序：让导出文件的顺序与表格一致，肉眼核对时能对得上。
+    """
+    out: List[str] = []
+    seen = set()
+    for raw in ips:
+        ip = str(raw or "").strip()
+        if not ip or ip in seen:
+            continue
+        seen.add(ip)
+        out.append(ip)
+    return out
+
+
+def export_ip_list(path: Any, ips: Iterable[Any]) -> int:
+    """把 IP 列表写成纯文本（一行一个），返回写入条数。
+
+    与 CSV 的三处刻意不同：
+    1. **不带 BOM**：这份文件是给其它程序读的，BOM 会粘在第一个 IP 上，
+       对方解析出来就是 `\\ufeff1.2.3.4`；
+    2. **换行固定 `\\n`**：`open(..., "w")` 在 Windows 上会把 `\\n` 翻译成
+       `\\r\\n`，而多数导入脚本只 trim 空格不 trim `\\r` —— 显式 `newline="\\n"`
+       让文件内容与平台无关；
+    3. **不写表头 / 注释**：任何以 `#` 开头的行都可能被导入方当成非法数据。
+       范围说明由调用方在对话框里交代。
+    """
+    target = _check_path(path)
+    lines = collect_ip_lines(ips)
+    try:
+        with open(target, "w", newline="\n", encoding="utf-8") as f:
+            for ip in lines:
+                f.write(ip + "\n")
+    except OSError as e:
+        raise ExportError(f"无法写入文件（{e.strerror or e}）：{target}") from e
+    return len(lines)

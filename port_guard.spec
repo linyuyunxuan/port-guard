@@ -153,6 +153,9 @@ exe = EXE(
     disable_windowed_traceback=False,
     icon="assets/icon.ico" if os.path.exists("assets/icon.ico") else None,
     manifest="app.manifest",
+    # exe 的「属性 → 详细信息」：作者 / 联系方式 / 版本。内容与 core/config.py
+    # 的一致性由 tests/test_version_info.py 守着（改版本只改一处会红）。
+    version="version_info.txt" if os.path.exists("version_info.txt") else None,
     uac_admin=True,
 )
 

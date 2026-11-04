@@ -285,6 +285,7 @@ class EventsPage(BaseTablePage):
     # [(ip, score, reason), ...] —— 批量封禁交给主窗口统一确认与执行
     ask_ban_many = Signal(list)
     ask_lookup = Signal(str)
+    ask_history = Signal(str)
     ask_settings = Signal()
     #: 用户手动刷新过（主窗口据此解除「自动刷新暂停」，见 gui/mixins.py）
     refreshed_manually = Signal()
@@ -823,6 +824,11 @@ class EventsPage(BaseTablePage):
             self.sel.end_render()
             self.table.setUpdatesEnabled(True)
 
+    # ── 交互 ──
+    def search_input(self):
+        """Ctrl+F 的落点（见 gui/main_window._focus_search）"""
+        return self.search
+
     # ── 勾选 ──
     def _on_sel_changed(self, n: int) -> None:
         self.lbl_sel.setText(f"已选 {n} 条")
@@ -1026,6 +1032,9 @@ class EventsPage(BaseTablePage):
             *_handled_entries(handled, lambda v: self._set_handled(r, v)),
             None,
             ("查询该 IP 归属地", lambda: self.ask_lookup.emit(ip)),
+            # 「这件事之前还来过几次」—— 事件表只显示命中规则的那几条，
+            # 回溯全部访问必须去历史页（那里才有每一条原始流水）
+            ("查看该 IP 的历史访问", lambda: self.ask_history.emit(ip)),
             ("复制 IP", lambda: self._copy(ip)),
             None,
             ("查看详情", lambda: EventDetailDialog(r, self).exec()),
