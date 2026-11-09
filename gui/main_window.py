@@ -31,6 +31,7 @@ from gui.page_events import EventsPage
 from gui.page_iplookup import IpLookupPage
 from gui.page_logs import LogsPage
 from gui.page_monitor import MonitorPage
+from gui.page_overview import OverviewPage
 from gui.page_rules import RulesPage
 from gui.page_settings import SettingsPage
 from gui.theme import GLOBAL_STYLE, C
@@ -101,6 +102,12 @@ NAV_GROUPS = [
     PAGE_LOGS,
     PAGE_SETTINGS,
 ) = range(8)
+
+#: 总览台是 self.stack 的第 9 个 widget（index 8）。刻意**不**进 NAV_ITEMS、
+#: 不进 nav_buttons：8 个业务页下标、_switch_page 的 elif 分支、Ctrl+1..8
+#: 与 selftest 的导航回归锁全部保持原样；总览可见时事件泵按对象身份判断
+#: 会跳过明细刷新，兑现「高峰期首屏零流水行」。
+PAGE_OVERVIEW = 8
 
 #: Ctrl+F「定位到当前页搜索框」的按键串。与 about_dialog 的快捷键表共用同一份口径，
 #: 不写两遍 —— 那张帮助页是用户唯一能查到快捷键的地方。
@@ -403,7 +410,8 @@ class MainWindow(EventPumpMixin, QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+        # 面包屑条挪到顶部：root 改竖向，第一行是横条导航，第二行是内容列。
+        root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -460,6 +468,13 @@ class MainWindow(EventPumpMixin, QMainWindow):
         ):
             self.stack.addWidget(p)
 
+        # 总览台是第 9 个 widget（index 8），独立于 NAV_ITEMS / nav_buttons。
+        # 默认落地到总览；启动时显式预热一次只读数据，让首屏不留空卡。
+        self.page_overview = OverviewPage(self._switch_page)
+        self.stack.addWidget(self.page_overview)
+        self.stack.setCurrentIndex(PAGE_OVERVIEW)
+        self.page_overview.refresh()
+
         # 底部状态栏只留「左瞬时消息 + 右 IP 库 / 定位库」：
         # 服务与观察的运行态已上移到顶部状态条，不再重复（P0-8）。
         sb = QStatusBar()
@@ -499,105 +514,84 @@ class MainWindow(EventPumpMixin, QMainWindow):
         return sep
 
     def _build_sidebar(self) -> QFrame:
-        self.sidebar = QFrame()
-        self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(200)
-        sl = QVBoxLayout(self.sidebar)
-        sl.setContentsMargins(0, 0, 0, 0)
-        sl.setSpacing(0)
+        """顶部面包屑条：品牌 + 总览首页 + 9 个短词功能入口 + 右端状态。
 
-        # ── 品牌区（高 64）：自绘盾牌 + 竖排两行 ──
-        brand = QWidget()
-        brand.setObjectName("sidebar_brand")
-        brand.setFixedHeight(68)
-        bl = QHBoxLayout(brand)
-        bl.setContentsMargins(16, 0, 16, 0)
-        bl.setSpacing(8)
-        bl.addWidget(ShieldMark(20), 0, Qt.AlignmentFlag.AlignVCenter)
+        ⚠️ 本方法体被 tests/test_about_dialog.py 的 _Host 替身当普通函数调用，
+        替身只提供 7 个回调，没有 stack / page_* / 自定义槽 —— 因此这里只能用
+        这 7 个回调、模块级常量与控件类，不得引用 self.stack 或任何页面对象。
+        """
+        bar = QFrame()
+        bar.setObjectName("breadcrumb")
+        bar.setFixedHeight(52)
+        hl = QHBoxLayout(bar)
+        hl.setContentsMargins(16, 0, 16, 0)
+        hl.setSpacing(6)
 
-        # 两行文字用「上 stretch + 两行 + 下 stretch」在自己的竖排里居中：
-        # QLabel 的纵向 policy 是 Preferred（可扩展），若只把它们塞进 QVBoxLayout，
-        # 布局会把 64px 余量分给标签，文字贴顶 → 出现「盾牌偏低、文字偏高」
-        # （视觉走查实测：盾牌中心 32、主名中心 9.5，偏差 22.5px）。
-        names = QVBoxLayout()
-        names.setContentsMargins(0, 0, 0, 0)
-        names.setSpacing(0)
-        names.addStretch(1)
+        # 品牌盾牌 + PortGuard
+        hl.addWidget(ShieldMark(20), 0, Qt.AlignmentFlag.AlignVCenter)
         logo = QLabel("PortGuard")
         logo.setObjectName("sidebar_logo")
-        sub = QLabel("端口访问防御工具")
-        sub.setObjectName("sidebar_sub")
-        names.addWidget(logo)
-        names.addWidget(sub)
-        names.addStretch(1)
-        bl.addLayout(names)
-        bl.addStretch(1)
-        sl.addWidget(brand)
-        sl.addSpacing(8)
+        hl.addWidget(logo, 0, Qt.AlignmentFlag.AlignVCenter)
+        hl.addSpacing(12)
 
-        # ── 导航（分组标题 28 + 导航项 38）──
-        # 槽一律走 _nav_slot() 工厂：带默认参数的 lambda 在 PySide2 上按 0 参调用，
-        # 点击会静默失效（见 _nav_slot 文档）。
+        # 「总览」首页按钮：独立，不进 nav_buttons；槽走现成的 _nav_slot(8)。
+        home = QPushButton("总览")
+        home.setObjectName("quick_link")
+        home.setCursor(Qt.CursorShape.PointingHandCursor)
+        home.setToolTip("总览台（Ctrl+0）")
+        home.setAccessibleName("总览台")
+        home.clicked.connect(self._nav_slot(PAGE_OVERVIEW))
+        hl.addWidget(home, 0, Qt.AlignmentFlag.AlignVCenter)
+        hl.addSpacing(6)
+
+        # 9 个功能入口：前 8 个按 NAV_ITEMS 顺序，仍是 nav_buttons 的成员。
+        # 短词化后给全名留 tooltip / accessibleName，压测也据此直接定位。
+        short = ("实时", "风险", "历史", "封禁", "规则", "IP", "日志", "设置", "关于")
         self.nav_buttons: List[QPushButton] = []
-        # 带角标的两个导航项：风险事件 = 未处理事件数，封禁管理 = 待确认建议数。
-        # 这两项回答的都是「现在还有多少件在等我」，而状态栏那句「有 N 条风险事件
-        # 待处理」只在用户看状态栏时才存在。导航项是常驻的，角标才能被余光扫到。
         self.nav_badges: Dict[int, NavButton] = {}
-        for group, indexes in NAV_GROUPS:
-            # 分组标题上留 12px：否则 11px 的标题与 13px 的导航项视觉同级，
-            # 7 个导航会被读成「8 个平级项」（视觉走查结论）。
-            sl.addSpacing(12)
-            gl = QLabel(group)
-            gl.setObjectName("nav_group")
-            gl.setFixedHeight(30)
-            sl.addWidget(gl)
-            for idx in indexes:
-                name = NAV_ITEMS[idx][0]
-                btn = NavButton(name)
-                btn.setObjectName("nav_btn")
-                btn.setCheckable(True)
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.setToolTip(f"{name}（Ctrl+{idx + 1}）")
-                btn.clicked.connect(self._nav_slot(idx))
-                sl.addWidget(btn)
-                self.nav_buttons.append(btn)
-                if idx in (PAGE_EVENTS, PAGE_BANS):
-                    self.nav_badges[idx] = btn
-        self.nav_buttons[0].setChecked(True)
+        for idx in range(len(NAV_ITEMS)):
+            name = NAV_ITEMS[idx][0]
+            btn = NavButton(short[idx])
+            btn.setObjectName("nav_btn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(f"{name}（Ctrl+{idx + 1}）")
+            btn.setAccessibleName(name)
+            btn.clicked.connect(self._nav_slot(idx))
+            hl.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            self.nav_buttons.append(btn)
+            if idx in (PAGE_EVENTS, PAGE_BANS):
+                self.nav_badges[idx] = btn
 
-        sl.addStretch(1)
+        # 第 9 个「关于」独立按钮（不进 nav_buttons），槽用现成的 _show_about。
+        about = QPushButton(short[8])
+        about.setObjectName("nav_btn")
+        about.setCursor(Qt.CursorShape.PointingHandCursor)
+        about.setToolTip("关于 PortGuard / 快捷键帮助（F1）")
+        about.setAccessibleName("关于")
+        about.clicked.connect(self._show_about)
+        hl.addWidget(about, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # ── 底部：已封禁 N（圆点承担语义）+ 版本 ──
-        fsep = QFrame()
-        fsep.setObjectName("sidebar_sep")
-        fsep.setFixedHeight(1)
-        sl.addWidget(fsep)
+        hl.addStretch(1)
 
-        ban_row = QWidget()
-        brl = QHBoxLayout(ban_row)
-        brl.setContentsMargins(16, 10, 16, 10)
-        brl.setSpacing(8)
+        # 右端：已封禁（圆点承担语义）+ 版本号（关于 / 快捷键帮助入口）。
         self.ban_dot = Dot(C.success, 6)
+        hl.addWidget(self.ban_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         self.lbl_ban_count = QLabel("已封禁 0")
         self.lbl_ban_count.setObjectName("sidebar_ban")
-        brl.addWidget(self.ban_dot, 0, Qt.AlignmentFlag.AlignVCenter)
-        brl.addWidget(self.lbl_ban_count, 0, Qt.AlignmentFlag.AlignVCenter)
-        brl.addStretch(1)
-        sl.addWidget(ban_row)
-
-        # 底部版本号 = 「关于 / 快捷键帮助」的入口之一。
-        # 侧栏底部是全程序唯一还留着版本信息的地方，让它可点，
-        # 用户不必再去托盘里找；QLabel 没有 clicked 信号，用子类（见 ClickableLabel）。
+        hl.addWidget(self.lbl_ban_count, 0, Qt.AlignmentFlag.AlignVCenter)
+        hl.addSpacing(12)
         self.lbl_version = ClickableLabel(f"v{APP_VERSION} · ip2region")
         self.lbl_version.setObjectName("sidebar_footer")
-        self.lbl_version.setContentsMargins(16, 0, 16, 12)
         self.lbl_version.setCursor(Qt.CursorShape.PointingHandCursor)
         self.lbl_version.setToolTip(
             f"关于 PortGuard / 快捷键帮助（F1）\n作者：{APP_AUTHOR}　联系方式：{APP_CONTACT}"
         )
         self.lbl_version.clicked.connect(self._show_about)
-        sl.addWidget(self.lbl_version)
-        return self.sidebar
+        hl.addWidget(self.lbl_version, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.sidebar = bar
+        return bar
 
     def _setup_shortcuts(self) -> None:
         """Ctrl+1…8 切页 + Ctrl+F 定位本页搜索框 + F1 关于/帮助"""
@@ -607,6 +601,11 @@ class MainWindow(EventPumpMixin, QMainWindow):
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(self._nav_slot(idx))
             self._shortcuts.append(sc)
+        # Ctrl+0 回总览台。只加在真实注册里，不动 about_dialog 的快捷键表行数
+        # （tests/test_about_dialog.py 锁了 len(rows) == len(NAV_ITEMS) + 2）。
+        self._sc_overview = QShortcut(QKeySequence("Ctrl+0"), self)
+        self._sc_overview.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._sc_overview.activated.connect(self._nav_slot(PAGE_OVERVIEW))
         # Ctrl+F：把焦点送到「当前页的搜索框」。
         # 7 个页面的搜索框分散在各自的筛选栏里，鼠标要先找到那一片再点输入框；
         # 键盘用户（尤其是攻击期连续查几个 IP）实际上是「切页 → 输入 → 回车」
@@ -663,6 +662,11 @@ class MainWindow(EventPumpMixin, QMainWindow):
         「已封禁」三个字成立的前提，不能只在封禁页里出现一次。
         读不出来（None）时说「未知」而不是「未开启」—— 未知不等于关闭。
         """
+        # 结论只在后台线程读完 netsh 后回主线程推给总览台；总览卡自己绝不在
+        # UI 线程同步调 profiles_state()。unknown 由 state_verdict 保留，不判 off。
+        overview = getattr(self, "page_overview", None)
+        if overview is not None:
+            overview.set_fw_state(firewall.state_verdict(state))
         self._fw_polling = False
         if not state:
             self._set_fw_state("防火墙 未知", C.text_muted, "读不出防火墙开关状态（netsh 无输出）")
@@ -782,6 +786,8 @@ class MainWindow(EventPumpMixin, QMainWindow):
             # 切回监控页立刻补一次完整统计：不可见期间今日两项被跳过，
             # 卡片上的数字停在上次可见的时刻，进来就先刷对
             self._refresh_stats(force=True)
+        elif idx == PAGE_OVERVIEW:
+            self.page_overview.refresh()
         # PAGE_LOGS 无需特殊处理：QStackedWidget 切页时会触发 showEvent，
         # 日志页在那里自己完成「铺底 + 重绘」
 

@@ -24,50 +24,50 @@ if TYPE_CHECKING:  # 仅用于类型标注，运行时不需要 Qt
 class Color:
     # ── 强调与语义色 ──
     # 浅底上必须自己压深：白字配 #6C7CF5 只有 3.4:1，够不着 4.5:1
-    primary: str = "#4B5CE0"  # 哨兵靛：主动作、选中条、focus、文字强调
-    primary_hover: str = "#3F4FD4"
-    primary_pressed: str = "#3543BE"
-    primary_light: str = "#EDF0FF"
+    primary: str = "#3349B8"  # 哨兵靛：主动作、选中条、focus、文字强调
+    primary_hover: str = "#2A3DA6"
+    primary_pressed: str = "#22328E"
+    primary_light: str = "#EDF1FC"
     primary_soft: str = "#E5E9FF"  # 表格/列表选中行底
-    success: str = "#0F8055"
-    success_light: str = "#E6F6EF"
-    danger: str = "#C9302C"  # 高危语义（文字 / 描边）
-    danger_solid: str = "#C53030"  # 满底危险（配白字 5.4:1）
-    danger_light: str = "#FDEDEC"
-    warning: str = "#A96400"
-    warning_light: str = "#FFF4E0"
-    critical: str = "#C62828"  # 严重语义的深红
-    critical_light: str = "#FDECEC"
-    info: str = "#2563EB"
-    info_light: str = "#E9F0FE"
+    success: str = "#0B6B4A"
+    success_light: str = "#E3F3EC"
+    danger: str = "#C0392B"  # 高危语义（文字 / 描边）
+    danger_solid: str = "#B02A20"  # 满底危险（配白字 6.6:1）
+    danger_light: str = "#FBE9E7"
+    warning: str = "#8A5200"
+    warning_light: str = "#FFF3DF"
+    critical: str = "#8E1B14"  # 严重语义的深红
+    critical_light: str = "#FBE8E6"
+    info: str = "#1B4FD1"
+    info_light: str = "#E6EEFC"
 
     # ── 表面层级（由浅到深）──
-    bg_body: str = "#F4F6FA"  # 页面底
+    bg_body: str = "#ECF1F8"  # 页面底
     bg_input: str = "#FFFFFF"  # 输入框 / 下拉 / 日志区
     bg_card: str = "#FFFFFF"  # 卡片 / 表格
-    bg_card_alt: str = "#F8FAFC"  # 抬升面：对话框 / 菜单 / 表头 / tooltip
-    bg_zebra: str = "#FAFBFD"
+    bg_card_alt: str = "#F2F5FA"  # 抬升面：对话框 / 菜单 / 表头 / tooltip
+    bg_zebra: str = "#F7F9FC"
     bg_hover: str = "#EDF1F7"
-    bg_sidebar: str = "#FFFFFF"
-    bg_sidebar_hover: str = "#F2F5FA"
-    bg_sidebar_active: str = "#EDF0FF"
-    bg_disabled: str = "#F2F4F8"
+    bg_sidebar: str = "#FAFBFD"
+    bg_sidebar_hover: str = "#F0F4FA"
+    bg_sidebar_active: str = "#E7EEFC"
+    bg_disabled: str = "#F0F2F6"
 
     # ── 描边 ──
-    border: str = "#DDE3EC"
-    border_light: str = "#EDF0F5"
-    border_strong: str = "#C9D1DE"
-    border_hover: str = "#A9B4C6"
+    border: str = "#D7DEEA"
+    border_light: str = "#EDF1F7"
+    border_strong: str = "#C4CCDA"
+    border_hover: str = "#9AA7BC"
 
     # ── 文字 ──
-    text_primary: str = "#1E2430"
-    text_secondary: str = "#566074"
+    text_primary: str = "#18202E"
+    text_secondary: str = "#46536A"
     # 弱化文字（表头、提示、页脚）在浅底上不能低于 4.5:1 —— 用户明确说过「看不清」，
     # 这里按 WCAG 卡死：#737D8D 在 bg_card_alt 上只有 3.98:1，已换深一档。
-    text_muted: str = "#666F7F"
+    text_muted: str = "#53627A"
     text_on_dark: str = "#121722"  # 名字沿用：这里指「最强的一档字」（标题 / 悬停）
-    text_link: str = "#4453CF"
-    text_disabled: str = "#A8B0BF"
+    text_link: str = "#2F42BE"
+    text_disabled: str = "#9AA3B2"
     accent_on: str = "#FFFFFF"  # 实心填充上的文字
 
 
@@ -120,7 +120,7 @@ LEVEL_BG = {
 
 # 风险等级 -> 徽章底色
 LEVEL_BADGE_BG = {
-    "normal": C.bg_hover,
+    "normal": C.bg_sidebar_active,
     "low": C.info_light,
     "medium": C.warning_light,
     "high": C.danger_light,
@@ -720,6 +720,50 @@ QSplitter::handle:vertical {{ height: 10px; }}
 /* ══════════ 消息框 ══════════ */
 QMessageBox {{ background-color: {C.bg_card}; }}
 QMessageBox QLabel {{ color: {C.text_primary}; font-size: 15px; min-width: 300px; }}
+
+/* ══════════ 总览台（Overview Grid）══════════
+   只追加、不前插：test_theme 用 GLOBAL_STYLE.index(selector) 取首次出现，
+   前插会改掉被钉住块的命中位置。这里只放颜色 / 间距 / 单值圆角 / 字号。 */
+#breadcrumb {{
+    background-color: {C.bg_card};
+    border-bottom: 1px solid {C.border_light};
+    font-size: 13.5px;
+}}
+#quick_link {{
+    background-color: transparent;
+    color: {C.text_secondary};
+    border: none;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 14px;
+}}
+#quick_link:hover {{
+    background-color: {C.bg_hover};
+    color: {C.text_primary};
+}}
+#quick_link:checked {{
+    background-color: {C.bg_sidebar_active};
+    color: {C.text_on_dark};
+    font-weight: bold;
+}}
+#card_number {{
+    font-family: "Consolas", "Microsoft YaHei UI", monospace;
+    font-size: 34px;
+    font-weight: bold;
+    color: {C.text_on_dark};
+}}
+#barstrip_container {{
+    background-color: {C.bg_card};
+    border: 1px solid {C.border_light};
+    border-radius: 6px;
+    font-size: 12.5px;
+}}
+QFrame#panel {{
+    background-color: {C.bg_card};
+    border: 1px solid {C.border_light};
+    border-radius: 8px;
+    font-size: 15px;
+}}
 """
 
 
