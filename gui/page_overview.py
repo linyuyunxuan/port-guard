@@ -171,9 +171,10 @@ class OverviewPage(QWidget):
             ("system", "系统与离线库", PAGE_SETTINGS, "离线 xdb 版本 / 加载状态", "正在刷新…"),
         ]
         self._refs: Dict[str, Tuple[QLabel, QLabel, QLabel]] = {}
+        self._detail_refs: Dict[str, QLabel] = {}
         for i, (key, title, target, note, foot) in enumerate(specs):
             extra = self._barstrip if key == "traffic" else None
-            card, num, note_lbl, foot_lbl = self._make_card(title, target, note, foot, extra)
+            card, num, note_lbl, foot_lbl = self._make_card(key, title, target, note, foot, extra)
             grid.addWidget(card, i // 3, i % 3)
             self._refs[key] = (num, note_lbl, foot_lbl)
 
@@ -181,6 +182,7 @@ class OverviewPage(QWidget):
 
     def _make_card(
         self,
+        key: str,
         title: str,
         target: int,
         note: str,
@@ -210,6 +212,12 @@ class OverviewPage(QWidget):
         if extra is not None:
             lay.addWidget(extra)
 
+        detail = QLabel("")
+        detail.setObjectName("card_detail")
+        detail.setWordWrap(True)
+        lay.addWidget(detail)
+        self._detail_refs[key] = detail
+
         lay.addStretch(1)
 
         foot_lbl = QLabel(foot)
@@ -224,6 +232,11 @@ class OverviewPage(QWidget):
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignRight)
 
         return card, num, note_lbl, foot_lbl
+
+    def _set_detail(self, key: str, text: str) -> None:
+        lbl = self._detail_refs.get(key)
+        if lbl is not None:
+            lbl.setText(text)
 
     # ── 数据（只读；任何查询失败都降级为「— 占位」并在脚注写明原因）──
 
@@ -255,6 +268,8 @@ class OverviewPage(QWidget):
 
         构造期不做重活；24 格明细是切页时的低频单独查询。
         """
+        for key in self._detail_refs:
+            self._set_detail(key, "")
         try:
             from core.database import stats_snapshot
 
@@ -302,6 +317,9 @@ class OverviewPage(QWidget):
                 foot.setText(
                     "数据来自今日统计快照 · 色块为今日各时段最高风险等级 · 点击查看实时监控"
                 )
+            pct = risk * 100.0 / total if total else 0.0
+            severe = sum(1 for lv in levels if lv in ("high", "critical"))
+            self._set_detail("traffic", f"今日风险占比：{pct:.1f}%\n高风险时段：{severe} / 24 格")
         except Exception as exc:
             self._fail(num, note, foot, "实时流", exc)
 
@@ -314,6 +332,12 @@ class OverviewPage(QWidget):
             num.setText(f"{n}")
             note.setText("当前未处理的风险事件")
             foot.setText("统计口径：当前未处置的风险事件 · 点击查看风险事件")
+            self._set_detail(
+                "todo",
+                "待确认封禁建议：{} 条\n今日风险事件：{} 条".format(
+                    int(snap.get("suggestions", 0)), int(snap.get("today_risk", 0))
+                ),
+            )
         except Exception as exc:
             self._fail(num, note, foot, "风险待办", exc)
 
@@ -344,6 +368,13 @@ class OverviewPage(QWidget):
                 "防火墙结论由后台检测推送 · 本机观察与权限状态实时刷新 · "
                 "未知状态不判为关闭 · 点击查看设置"
             )
+            st = port_watcher.get_watcher().stats()
+            self._set_detail(
+                "protection",
+                "观察端口：{} 个\n自动封禁：{}".format(
+                    len(st.get("ports", []) or []), "开" if st.get("allow_auto_ban") else "关"
+                ),
+            )
         except Exception as exc:
             self._fail(num, note, foot, "防护状态", exc)
 
@@ -353,12 +384,16 @@ class OverviewPage(QWidget):
         num, note, foot = self._refs["bans"]
         try:
             from app.ban_service import expired_backlog
+            from core.database import sum_ban_hits
 
             n = int(snap["active_bans"])
             expired = expired_backlog()
             num.setText(f"{n}")
             note.setText(f"当前生效封禁 {n} 条 · 已到期未解封 {expired} 条")
             foot.setText("统计口径：当前生效且未到期的封禁 · 含已到期未解封提示 · 点击查看封禁管理")
+            hits = sum_ban_hits()
+            backlog = expired * 100.0 / (n + expired) if (n + expired) else 0.0
+            self._set_detail("bans", f"生效累计拦截：{hits} 次\n到期积压占比：{backlog:.1f}%")
         except Exception as exc:
             self._fail(num, note, foot, "封禁概览", exc)
 
@@ -378,6 +413,10 @@ class OverviewPage(QWidget):
             num.setText(f"{enabled}")
             note.setText(f"共 {len(rules)} 条引擎规则，其中 {enabled} 条启用")
             foot.setText("统计口径：当前启用的引擎规则（与规则配置页一致）· 点击查看规则配置")
+            region_n = len(get_engine().region_rules())
+            scope = sum(1 for rid in rules if rid != "blacklist")
+            disabled = max(0, scope - enabled)
+            self._set_detail("rules", f"区域规则：{region_n} 条\n未启用：{disabled} 条")
         except Exception as exc:
             self._fail(num, note, foot, "规则引擎", exc)
 
@@ -395,5 +434,17 @@ class OverviewPage(QWidget):
             num.setText(f"v{APP_VERSION}")
             note.setText(f"离线 IP 库 {ready}/{len(files) or 2} 个文件就绪 · 自动同步{auto}")
             foot.setText("离线库版本与同步状态 · 点击查看设置")
+            last = int(s.get("last_update_at", 0) or 0)
+            last_txt = (
+                datetime.datetime.fromtimestamp(last / 1000.0).strftime("%m-%d %H:%M")
+                if last > 0
+                else "从未同步"
+            )
+            self._set_detail(
+                "system",
+                "上次同步：{}\n自动下载：{}".format(
+                    last_txt, "开" if s.get("auto_download") else "关"
+                ),
+            )
         except Exception as exc:
             self._fail(num, note, foot, "系统与离线库", exc)

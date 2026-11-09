@@ -764,6 +764,20 @@ QFrame#panel {{
     border-radius: 8px;
     font-size: 15px;
 }}
+
+/* ══════════ Phase 2：卡片明细 / 页头强调条（只追加、不前插）══════════ */
+#card_detail {{
+    background-color: {C.bg_card_alt};
+    border: 1px solid {C.border_light};
+    border-radius: 6px;
+    padding: 7px 10px;
+    color: {C.text_secondary};
+    font-size: 12.5px;
+}}
+#page_accent {{
+    background-color: {C.primary};
+    border-radius: 2px;
+}}
 """
 
 

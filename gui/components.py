@@ -106,6 +106,9 @@ class PageHeader(QWidget):
 
     说明与标题在同一行而不是换行：`02_ux_spec.md` P1-1 要求 7 页标题基线一致，
     说明一旦换行，各页标题区的实际高度就会随文案长短浮动。
+
+    页头左侧 3px 主色竖条 + 底部 1px 分隔线，与总览台面包屑条形成统一层级语言；
+    HEIGHT 62 与标题同基线规则不变。
     """
 
     HEIGHT = 62
@@ -122,6 +125,13 @@ class PageHeader(QWidget):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
+
+        accent = QLabel("")
+        accent.setObjectName("page_accent")
+        accent.setFixedWidth(3)
+        accent.setFixedHeight(22)
+        row.addWidget(accent, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addSpacing(12)
 
         self.title_lbl = QLabel(title)
         self.title_lbl.setObjectName("page_title")
@@ -147,6 +157,11 @@ class PageHeader(QWidget):
 
         outer.addLayout(row)
         outer.addStretch(1)
+
+        divider = QLabel("")
+        divider.setObjectName("page_divider")
+        divider.setFixedHeight(1)
+        outer.addWidget(divider)
 
     def add_action(self, w: QWidget) -> QWidget:
         """追加一个右侧动作控件（页面级按钮高 32，组内间距 8）"""
