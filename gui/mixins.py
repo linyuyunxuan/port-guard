@@ -58,6 +58,33 @@ log = get_logger(__name__)
 # 事件泵节拍（毫秒）：兼顾实时感与 CPU
 PUMP_INTERVAL_MS = 150
 STATS_INTERVAL_MS = 2000
+
+#: 到期解封 / 到期积压这类「一次性结果提示」的存活时间。
+#: 它们不是常驻状态：事情办完了还挂在状态栏，用户会以为条件仍然成立。
+#: 到点自动恢复默认，期间压住统计刷新，免得提示刚出现就被下一跳覆盖。
+STATUS_TRANSIENT_MS = 8000
+
+
+def risk_status_text(auto_blocked: int, pending: int) -> str:
+    """状态栏风险事件文案：**已被规则自动拦截的不再说成「待处理」**。
+
+    · 有自动拦截：主文案改成「已自动拦截 N 条风险事件」，N 取真实条数；
+      同时仍有真正待办时补一句「另有 M 条待处理」，不把待办藏起来。
+    · 没有自动拦截：保持原来的「有 M 条风险事件待处理」。
+    · 两个都是 0：返回空串，调用方不动状态栏（可能正显示别的结果提示）。
+
+    抽成纯函数是为了能直接单测口径；界面刷新只负责把结论贴到 QLabel 上。
+    """
+    if auto_blocked:
+        text = f"已自动拦截 {auto_blocked} 条风险事件"
+        if pending:
+            text += f" · 另有 {pending} 条待处理"
+        return text
+    if pending:
+        return f"有 {pending} 条风险事件待处理"
+    return ""
+
+
 EXPIRE_INTERVAL_MS = 60_000
 # 维护巡检节拍：只负责「看一眼今天到点没有」，真正的清理每天最多跑一次
 CLEANUP_TICK_MS = 10 * 60_000
@@ -133,7 +160,7 @@ class EventPumpMixin(_HostBase):
     def _set_ban_count(self, n: int) -> None:
         raise NotImplementedError
 
-    def _set_nav_badges(self, unhandled: int, suggestions: int) -> None:
+    def _set_nav_badges(self, pending: int, suggestions: int, auto_blocked: int = 0) -> None:
         raise NotImplementedError
 
     def _maybe_poll_firewall(self) -> None:
@@ -379,20 +406,28 @@ class EventPumpMixin(_HostBase):
             s = stats_snapshot(include_today=monitor_visible)
             bans, unhandled = s["active_bans"], s["unhandled"]
             suggestions = int(s.get("suggestions", 0))
+            # 规则自动拦截的未处理事件已经生效，不再算「待办」
+            auto_blocked = int(s.get("auto_blocked", 0))
+            pending = int(s.get("pending", unhandled))
             if monitor_visible:
                 self.page_monitor.set_stats(s["today_total"], s["today_risk"], bans)
         except Exception:
             log.exception("统计刷新失败")
             bans = unhandled = suggestions = 0
+            auto_blocked = pending = 0
         self.lbl_ban_count.setText(f"已封禁 {bans}")
-        # 侧栏角标：未处理事件 / 待确认建议。0 时角标自己隐藏（见 widgets.NavButton）
+        # 侧栏角标：真正待人工处理的事件 / 待确认建议。0 时角标自己隐藏
         with contextlib.suppress(Exception):
-            self._set_nav_badges(unhandled, suggestions)
+            self._set_nav_badges(pending, suggestions, auto_blocked)
         # 圆点颜色随计数切换：有数 danger / 0 时 success（P2-1）
         self._set_ban_count(bans)
-        if unhandled:
-            self.lbl_status.setText(f"有 {unhandled} 条风险事件待处理")
-            self.lbl_status.setStyleSheet(f"color:{C.warning};font-size:12.5px;")
+        # 一次性结果提示在存活期内优先，不被 2s 一跳的统计文案抢走
+        if time.monotonic() >= getattr(self, "_transient_until", 0.0):
+            msg = risk_status_text(auto_blocked, pending)
+            if msg:
+                color = C.success if auto_blocked else C.warning
+                self.lbl_status.setText(msg)
+                self.lbl_status.setStyleSheet(f"color:{color};font-size:12.5px;")
 
         # 状态栏上的本机观察指示 + 设置页的运行状态行
         with contextlib.suppress(Exception):
@@ -403,9 +438,37 @@ class EventPumpMixin(_HostBase):
         with contextlib.suppress(Exception):
             self._maybe_poll_firewall()
 
-    def _set_status(self, text: str, color: Optional[str] = None) -> None:
+    def _set_status(self, text: str, color: Optional[str] = None, auto_clear_ms: int = 0) -> None:
+        """状态栏文案；`auto_clear_ms > 0` 时到点自动恢复「就绪」。
+
+        到期解封、到期积压这类是**一次性结果**，不是常驻状态：事情已经办完还挂在
+        状态栏，用户会以为条件仍然成立。定时器带 token，旧消息不会把后来弹出的
+        新消息一起清掉；期间 `_refresh_stats` 暂不覆盖文案，保证用户看得见。
+        """
+        self._status_token = int(getattr(self, "_status_token", 0)) + 1
+        self._transient_until = 0.0
         self.lbl_status.setText(text)
         self.lbl_status.setStyleSheet(f"color:{color or C.text_secondary};font-size:12.5px;")
+        if auto_clear_ms <= 0:
+            return
+        token = self._status_token
+        self._transient_until = time.monotonic() + auto_clear_ms / 1000.0
+        QTimer.singleShot(auto_clear_ms, lambda: self._clear_transient_status(token, text))
+
+    def _clear_transient_status(self, token: int, text: str) -> None:
+        if token != getattr(self, "_status_token", 0):
+            return
+        if self.lbl_status.text() != text:
+            return
+        self._transient_until = 0.0
+        self.lbl_status.setText("就绪")
+        self.lbl_status.setStyleSheet(f"color:{C.text_secondary};font-size:12.5px;")
+
+    def _clear_expired_status(self) -> None:
+        """到期积压归零时，立刻收掉上一条「已到期 / 已自动解封」提示"""
+        text = self.lbl_status.text()
+        if "已到期" in text or "已自动解封" in text:
+            self._set_status("就绪")
 
     # ── 到期巡检 / 清理 ──
     def _check_expired(self) -> None:
@@ -440,7 +503,9 @@ class EventPumpMixin(_HostBase):
             self.page_bans.set_expired_backlog(int(payload.get("backlog") or 0))
         if not done:
             return
-        self._set_status(f"已自动解封 {len(done)} 个到期 IP", C.success)
+        self._set_status(
+            f"已自动解封 {len(done)} 个到期 IP", C.success, auto_clear_ms=STATUS_TRANSIENT_MS
+        )
         if self.stack.currentWidget() is self.page_bans:
             self.page_bans.refresh()
         self._refresh_stats(force=True)
@@ -448,7 +513,9 @@ class EventPumpMixin(_HostBase):
     def _on_expired_failed(self, err: str) -> None:
         self._expire_busy.leave("expire")
         log.error("到期解封巡检失败：%s", err)
-        self._set_status("到期解封巡检失败，详情见运行日志", C.danger)
+        self._set_status(
+            "到期解封巡检失败，详情见运行日志", C.danger, auto_clear_ms=STATUS_TRANSIENT_MS
+        )
 
     def _recover_pending(self) -> None:
         """启动时收敛残留 pending 封禁记录（后台线程）
@@ -471,7 +538,11 @@ class EventPumpMixin(_HostBase):
         if not n:
             return
         log.warning("启动已收敛 %d 条上次未收尾的封禁记录", n)
-        self._set_status(f"已收敛 {n} 条上次未完成的封禁记录，详情见审计页", C.warning)
+        self._set_status(
+            f"已收敛 {n} 条上次未完成的封禁记录，详情见审计页",
+            C.warning,
+            auto_clear_ms=STATUS_TRANSIENT_MS,
+        )
         if self.stack.currentWidget() is self.page_bans:
             self.page_bans.refresh()
         self._refresh_stats(force=True)
@@ -542,7 +613,12 @@ class EventPumpMixin(_HostBase):
             self._set_status(
                 f"有 {n} 条封禁已到期，但当前无管理员权限，无法删除防火墙规则",
                 C.warning,
+                auto_clear_ms=STATUS_TRANSIENT_MS,
             )
+        else:
+            # 积压清完了就别再挂着「有 N 条已到期」—— 封禁页的权限条也会
+            # 由 set_expired_backlog(0) 同步收起那句话，两处口径必须一致。
+            self._clear_expired_status()
 
     def _cleanup_logs(self) -> None:
         """

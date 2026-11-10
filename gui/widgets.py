@@ -19,6 +19,7 @@ from qtcompat import (
     QColor,
     QEasingCurve,
     QFont,
+    QFontMetrics,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -99,11 +100,43 @@ class NavButton(QPushButton):
     BADGE_RIGHT = 14
     #: 超过这个数显示 `99+`（三位数会把 4 字导航项挤到换行）
     BADGE_CAP = 99
+    #: 文字与角标之间必须留出的空隙。
+    #: 顶栏改成短词（「风险」/「封禁」只有两字）之后按钮宽度跟着文字走，
+    #: 角标仍按「按钮右边缘内收 14px」自绘 —— 结果就是 99+ 直接压在功能名上。
+    #: 正解不是把角标挪出按钮（会撞到相邻项），而是**在 sizeHint 里为角标预留宽度**：
+    #: QSS `#nav_btn` 是 text-align:left，多出来的宽度全落在文字右边。
+    BADGE_GAP = 8
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         self._badge = 0
         self._badge_color = C.danger_solid
+
+    def _badge_text(self) -> str:
+        if not self._badge:
+            return ""
+        return f"{self.BADGE_CAP}+" if self._badge > self.BADGE_CAP else str(self._badge)
+
+    def _badge_width(self) -> int:
+        """角标实际绘制宽度（与 paintEvent 用同一套字体度量，避免两处算不一样）"""
+        f = QFont(self.font())
+        f.setPixelSize(11)
+        f.setBold(True)
+        return max(self.BADGE_H, QFontMetrics(f).horizontalAdvance(self._badge_text()) + 10)
+
+    def _badge_slot(self) -> int:
+        """有角标时要在按钮宽度里额外预留的像素；0 = 不预留"""
+        return self._badge_width() + self.BADGE_GAP if self._badge > 0 else 0
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        hint.setWidth(hint.width() + self._badge_slot())
+        return hint
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        hint.setWidth(hint.width() + self._badge_slot())
+        return hint
 
     def set_badge(self, n: int, color: Optional[str] = None) -> None:
         """设置角标数量。`n <= 0` 隐藏；颜色只在显式传入时改（避免每跳都重设）"""
@@ -113,32 +146,37 @@ class NavButton(QPushButton):
         if n == self._badge:
             return
         self._badge = n
-        # 数字长短会改变绘制宽度，必须重绘；按钮本身尺寸不变，不触发重新布局
+        # 角标从 0 变有数（或位数变化）会改变按钮需要的宽度，必须通知布局；
+        # 只 update() 重绘的话，QHBoxLayout 仍按旧宽度分配，角标照样压字。
+        self.updateGeometry()
         self.update()
 
     def badge(self) -> int:
         return self._badge
 
+    def badge_rect(self) -> QRect:
+        """角标绘制矩形（供视觉判据/测试核对「没压到文字」）"""
+        w = self._badge_width()
+        r = QRect(self.width() - self.BADGE_RIGHT - w, (self.height() - self.BADGE_H) // 2, w, 0)
+        r.setHeight(self.BADGE_H)
+        return r
+
     def paintEvent(self, e) -> None:
         super().paintEvent(e)
         if self._badge <= 0:
             return
-        text = f"{self.BADGE_CAP}+" if self._badge > self.BADGE_CAP else str(self._badge)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         f = QFont(self.font())
         f.setPixelSize(11)
         f.setBold(True)
         p.setFont(f)
-        fm = p.fontMetrics()
-        w = max(self.BADGE_H, fm.horizontalAdvance(text) + 10)
-        r = QRect(self.width() - self.BADGE_RIGHT - w, (self.height() - self.BADGE_H) // 2, w, 0)
-        r.setHeight(self.BADGE_H)
+        r = self.badge_rect()
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(QColor(self._badge_color)))
         p.drawRoundedRect(r, self.BADGE_H / 2, self.BADGE_H / 2)
         p.setPen(QColor(C.accent_on))
-        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), self._badge_text())
         p.end()
 
 

@@ -778,6 +778,36 @@ QFrame#panel {{
     background-color: {C.primary};
     border-radius: 2px;
 }}
+
+/* ══════════ 二级分区导航 / 子菜单（只追加、不前插）══════════ */
+#section_index {{
+    background-color: {C.bg_card};
+    border: 1px solid {C.border_light};
+    border-radius: 8px;
+}}
+#section_index_group {{
+    color: {C.text_muted};
+    font-size: 12.5px;
+    font-weight: 600;
+    padding-right: 6px;
+}}
+#section_index_btn {{
+    background-color: transparent;
+    color: {C.text_secondary};
+    border: 1px solid transparent;
+    border-radius: 14px;
+    padding: 5px 13px;
+    font-size: 13.5px;
+}}
+#section_index_btn:hover {{
+    background-color: {C.primary_soft};
+    color: {C.text_on_dark};
+}}
+#section_index_btn:checked {{
+    background-color: {C.primary};
+    color: {C.accent_on};
+    font-weight: 600;
+}}
 """
 
 

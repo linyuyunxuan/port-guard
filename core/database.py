@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.config import DEFAULT_SETTINGS, db_path
 from core.logger import get_logger
 from core.models import (
+    DISPOSITION_BLOCK,
     STATUS_ACTIVE,
     STATUS_EXPIRED,
     STATUS_FAILED,
@@ -515,6 +516,14 @@ def stats_snapshot(include_today: bool = True) -> Dict[str, int]:
         unhandled = conn.execute("SELECT COUNT(*) c FROM risk_event WHERE handled = 0").fetchone()[
             "c"
         ]
+        # 规则自动拦截：pipeline 自动封禁成功后把 disposition 写成 block，
+        # 但 handled 仍是 0（没有人工确认过）。这类事件已经写进防火墙生效，
+        # 不是「等你处理」的待办 —— 角标 / 状态栏 / 总览若把它算进未处理数，
+        # 就会出现「99+ 待办」而点进去全是「已拦截」。分开统计才能校验规则是否生效。
+        auto_blocked = conn.execute(
+            "SELECT COUNT(*) c FROM risk_event WHERE handled = 0 AND disposition = ?",
+            (DISPOSITION_BLOCK,),
+        ).fetchone()["c"]
         # 待确认封禁建议：未处理 + 高危 + 该 IP 还没被封。
         # 与 `PageBans._load_suggestions` 的筛选口径逐条对齐（它按 IP 隐藏已封禁项），
         # 否则侧栏角标会说「3 项待确认」，点进去只有 1 项 —— 用户第一反应是建议丢了。
@@ -533,6 +542,9 @@ def stats_snapshot(include_today: bool = True) -> Dict[str, int]:
             "today_risk": int(risk),
             "active_bans": int(bans),
             "unhandled": int(unhandled),
+            "auto_blocked": int(auto_blocked),
+            # 真正还需要人工看一眼的：未处理里扣掉规则已自动拦截的
+            "pending": int(unhandled) - int(auto_blocked),
             "suggestions": int(suggestions),
         }
     finally:
@@ -815,8 +827,15 @@ def _query_risk_rows(
     keyword: str = "",
     since_ts: Optional[int] = None,
     until_ts: Optional[int] = None,
+    disposition: str = "",
+    pending_only: bool = False,
 ) -> List[Dict[str, Any]]:
-    """在给定连接上执行风险事件查询（纯执行版本，供单连接组合查询复用）"""
+    """在给定连接上执行风险事件查询（纯执行版本，供单连接组合查询复用）
+
+    ``disposition`` / ``pending_only`` 是「规则触发 / 自动拦截」筛选下推用：
+    必须在 SQL 里过滤，不能在 GUI 里对结果再筛 —— limit 会把最近 200 条之外
+    的待处理事件直接截掉，攻击期最近 200 条可能全是自动拦截的。
+    """
     sql = "SELECT * FROM risk_event WHERE 1=1"
     args: List[Any] = []
     if level:
@@ -825,6 +844,12 @@ def _query_risk_rows(
     if handled is not None:
         sql += " AND handled = ?"
         args.append(handled)
+    if disposition:
+        sql += " AND COALESCE(disposition, '') = ?"
+        args.append(disposition)
+    if pending_only:
+        sql += " AND handled = 0 AND COALESCE(disposition, '') <> ?"
+        args.append(DISPOSITION_BLOCK)
     if keyword:
         sql += " AND (ip LIKE ? OR summary LIKE ?)"
         args += [f"%{keyword}%", f"%{keyword}%"]
@@ -856,6 +881,8 @@ def query_risk_events(
     keyword: str = "",
     since_ts: Optional[int] = None,
     until_ts: Optional[int] = None,
+    disposition: str = "",
+    pending_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """按条件取风险事件。
 
@@ -866,7 +893,18 @@ def query_risk_events(
     """
     conn = _connect()
     try:
-        return _query_risk_rows(conn, limit, offset, level, handled, keyword, since_ts, until_ts)
+        return _query_risk_rows(
+            conn,
+            limit,
+            offset,
+            level,
+            handled,
+            keyword,
+            since_ts,
+            until_ts,
+            disposition,
+            pending_only,
+        )
     finally:
         conn.close()
 
@@ -1259,6 +1297,8 @@ def risk_events_page(
     keyword: str = "",
     since_ts: Optional[int] = None,
     until_ts: Optional[int] = None,
+    disposition: str = "",
+    pending_only: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, BanRecord]]:
     """事件页刷新的组合查询：(事件列表, 生效封禁映射) **共用一条连接**。
 
@@ -1278,6 +1318,8 @@ def risk_events_page(
             keyword=keyword,
             since_ts=since_ts,
             until_ts=until_ts,
+            disposition=disposition,
+            pending_only=pending_only,
         )
         try:
             banned = _active_ban_map(conn)

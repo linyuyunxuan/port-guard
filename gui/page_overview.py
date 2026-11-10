@@ -324,18 +324,20 @@ class OverviewPage(QWidget):
             self._fail(num, note, foot, "实时流", exc)
 
     def _refresh_todo(self, snap: Dict[str, int]) -> None:
-        # 数据源：core.database.stats_snapshot(include_today=True)["unhandled"]，
-        # 即当前未处理的风险事件数。
+        # 数据源：stats_snapshot 的 pending（未处理 - 规则自动拦截）。
+        # 自动拦截的事件已经写进防火墙生效，混进「风险待办」会把 3 万条已处置
+        # 记录显示成待办；明细行单独报出自动拦截数，用来校验规则有没有在拦。
         num, note, foot = self._refs["todo"]
         try:
-            n = int(snap["unhandled"])
+            n = int(snap.get("pending", snap.get("unhandled", 0)))
+            auto_blocked = int(snap.get("auto_blocked", 0))
             num.setText(f"{n}")
-            note.setText("当前未处理的风险事件")
-            foot.setText("统计口径：当前未处置的风险事件 · 点击查看风险事件")
+            note.setText("当前待人工处理的风险事件")
+            foot.setText("统计口径：未处理且未被规则自动拦截 · 点击查看风险事件")
             self._set_detail(
                 "todo",
-                "待确认封禁建议：{} 条\n今日风险事件：{} 条".format(
-                    int(snap.get("suggestions", 0)), int(snap.get("today_risk", 0))
+                "规则已自动拦截：{} 条\n待确认封禁建议：{} 条".format(
+                    auto_blocked, int(snap.get("suggestions", 0))
                 ),
             )
         except Exception as exc:

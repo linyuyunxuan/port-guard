@@ -45,6 +45,60 @@ from qtcompat import (
 MenuEntry = Tuple[str, Optional[Callable[[], object]]]
 
 
+class SectionIndex(QFrame):
+    """一级 tab 之下的二级分区导航（「子菜单」）。
+
+    层级固定为三层：一级 = QTabWidget 的功能分类，二级 = 这里列出的分区，
+    三级 = 分区卡片里的具体设置项。所有页面共用同一组 objectName / QSS，
+    免得每个页面各写一套「看起来差不多但差 2px」的子菜单。
+
+    组件本身只负责「选中哪个并发信号」，不碰 QScrollArea —— 滚动定位由页面
+    自己接 `section_clicked` 做，这样它也能用在不需要滚动的页面上。
+    """
+
+    section_clicked = Signal(int)
+
+    def __init__(self, group: str, labels: Sequence[str], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("section_index")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 8, 14, 8)
+        lay.setSpacing(8)
+
+        title = QLabel(group)
+        title.setObjectName("section_index_group")
+        lay.addWidget(title)
+
+        self._buttons: List[QPushButton] = []
+        for i, label in enumerate(labels):
+            btn = QPushButton(label)
+            btn.setObjectName("section_index_btn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(self._slot_for(i))
+            lay.addWidget(btn)
+            self._buttons.append(btn)
+        lay.addStretch(1)
+        if self._buttons:
+            self.set_current(0)
+
+    def _slot_for(self, idx: int) -> Callable[..., None]:
+        # ⚠️ 不能用 `lambda _, i=idx: ...`：PySide2 按 0 参调用槽，带默认参数的
+        # lambda 会静默失灵（点击没反应），交付栈整个子菜单会废掉。
+        def slot(_checked: bool = False) -> None:
+            self.set_current(idx)
+            self.section_clicked.emit(idx)
+
+        return slot
+
+    def set_current(self, idx: int) -> None:
+        for i, btn in enumerate(self._buttons):
+            btn.setChecked(i == idx)
+
+    def labels(self) -> List[str]:
+        return [b.text() for b in self._buttons]
+
+
 class ShieldMark(QWidget):
     """20×20 自绘盾牌（侧栏品牌区图标）
 

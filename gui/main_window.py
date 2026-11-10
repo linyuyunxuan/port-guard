@@ -727,21 +727,27 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.lbl_ban_count.setText(f"已封禁 {n}")
         self.ban_dot.set_color(C.danger if n > 0 else C.success)
 
-    def _set_nav_badges(self, unhandled: int, suggestions: int) -> None:
-        """侧栏角标：风险事件 = 未处理事件数（琥珀），封禁管理 = 待确认建议数（红）。
+    def _set_nav_badges(self, pending: int, suggestions: int, auto_blocked: int = 0) -> None:
+        """导航角标：风险事件 = **真正待人工处理**数（琥珀），封禁 = 待确认建议（红）。
 
         两个数口径不同，颜色也刻意不同：
-        · 未处理事件是「积压」，本身不代表必须动手 → warning；
+        · 待人工处理是「积压」，本身不代表必须动手 → warning；
         · 待确认建议是「规则已经判定要封、只差你点头」→ danger。
         红色在这套界面里只给「需要立即处置」的东西，角标也不例外。
+
+        规则自动拦截（disposition=block 但 handled=0）已经写进防火墙生效，
+        **不进角标** —— 否则攻击期角标恒为 99+，点进去却全是「已拦截」。
+        它的数量写进 tooltip，方便核对自定义规则有没有真的在拦。
         """
         events = self.nav_badges.get(PAGE_EVENTS)
         if events is not None:
-            events.set_badge(unhandled, C.warning)
-            events.setToolTip(
-                f"风险事件（Ctrl+{PAGE_EVENTS + 1}）"
-                + (f" · {unhandled} 条未处理" if unhandled else "")
-            )
+            events.set_badge(pending, C.warning)
+            tip = f"风险事件（Ctrl+{PAGE_EVENTS + 1}）"
+            if pending:
+                tip += f" · {pending} 条待人工处理"
+            if auto_blocked:
+                tip += f" · 规则已自动拦截 {auto_blocked} 条（无需处理）"
+            events.setToolTip(tip)
         bans = self.nav_badges.get(PAGE_BANS)
         if bans is not None:
             bans.set_badge(suggestions, C.danger_solid)

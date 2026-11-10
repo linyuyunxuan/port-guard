@@ -214,6 +214,16 @@ def _disposition_cell(row: Dict, handled: int) -> Tuple[str, str, str]:
             C.text_muted,
             f"{DISPOSITION_HINT.get(DISPOSITION_IGNORED, '')}（系统判定：{text}）",
         )
+    if handled == 0 and disp == DISPOSITION_BLOCK:
+        # 规则自动拦截：pipeline 自动封禁后写了 disposition=block，但没有人确认过，
+        # handled 仍是 0。它与「待确认」是完全不同的两件事 —— 一个是已经生效的
+        # 处置结论，一个是还在等人拿主意。分开写，才能一眼校验规则有没有在拦。
+        return (
+            "自动拦截",
+            C.success,
+            "自定义规则已触发并自动写入防火墙规则，该 IP 的新连接已被阻断；"
+            "无需人工处理。状态筛选选「规则自动拦截」可单独复核这批事件。",
+        )
     if handled == 1 and disp == DISPOSITION_CONFIRM:
         return HANDLED_LABEL.get(1, text), C.text_link, f"{tip}（已人工确认）"
     if handled == 1:
@@ -317,7 +327,9 @@ class EventsPage(BaseTablePage):
         root.setContentsMargins(24, 16, 24, 12)
         root.setSpacing(12)
 
-        head = PageHeader("风险事件", "命中风险规则才会进入本列表")
+        head = PageHeader(
+            "风险事件", "命中风险规则才会进入本列表 · 规则自动拦截的标注「自动拦截」，无需人工处理"
+        )
         self.btn_refresh = QPushButton("刷新")
         self.btn_refresh.setObjectName("btn_outline")
         self.btn_refresh.clicked.connect(self._on_refresh_clicked)
@@ -368,8 +380,13 @@ class EventsPage(BaseTablePage):
         self.level.currentIndexChanged.connect(self._on_filter_changed)
 
         self.handled = QComboBox()
-        self.handled.addItems(["全部状态", "未处理", "已确认", "已忽略"])
-        self.handled.setFixedWidth(122)
+        # 「待人工处理」= 未处理里扣掉规则已自动拦截的；「规则自动拦截」专供
+        # 校验自定义规则是否真的生效。两者都下推到 SQL，不能在结果里再筛 ——
+        # 攻击期最近 200 条可能全是自动拦截的，GUI 层筛会得到一片空白。
+        self.handled.addItems(
+            ["全部状态", "待人工处理", "规则自动拦截", "未处理", "已确认", "已忽略"]
+        )
+        self.handled.setFixedWidth(148)
         self.handled.currentIndexChanged.connect(self._on_filter_changed)
 
         self.range = QComboBox()
@@ -583,8 +600,17 @@ class EventsPage(BaseTablePage):
         return m.get(self.level.currentText(), "")
 
     def _handled_filter(self):
-        m = {"未处理": 0, "已确认": 1, "已忽略": 2}
+        # 前三个都是「还没人工确认」的事件，只是按处置结论再切一刀
+        m = {"待人工处理": 0, "规则自动拦截": 0, "未处理": 0, "已确认": 1, "已忽略": 2}
         return m.get(self.handled.currentText())
+
+    def _disposition_filter(self) -> str:
+        """「规则自动拦截」→ 只看 disposition=block（写进防火墙的那一批）"""
+        return DISPOSITION_BLOCK if self.handled.currentText() == "规则自动拦截" else ""
+
+    def _pending_only_filter(self) -> bool:
+        """「待人工处理」→ 未处理且不是规则自动拦截，即真正待办"""
+        return self.handled.currentText() == "待人工处理"
 
     def _limit_value(self) -> int:
         try:
@@ -650,7 +676,9 @@ class EventsPage(BaseTablePage):
         self._downgraded_to = self._limit_value()
         return True
 
-    def _info_text(self, total: int, merged_groups: int) -> str:
+    def _info_text(
+        self, total: int, merged_groups: int, auto_blocked: int = 0, pending: int = 0
+    ) -> str:
         """计数行文案。降档状态要写在这里 —— 否则「列表怎么只剩 200 条」= bug
 
         判据里带 `_downgraded_to` 是为了自愈：用户自己把条数改回更大档位后，
@@ -659,6 +687,8 @@ class EventsPage(BaseTablePage):
         info = f"共 {total} 条事件"
         if merged_groups:
             info += f"（同类合并为 {merged_groups} 组）"
+        if auto_blocked or pending:
+            info += f" · 规则自动拦截 {auto_blocked} 条 · 待人工处理 {pending} 条"
         if self.auto_downgraded and self._limit_value() == self._downgraded_to:
             info += f" · 事件激增，已临时降到最近 {self._downgraded_to} 条"
         return info
@@ -699,6 +729,8 @@ class EventsPage(BaseTablePage):
             keyword=self.search.text().strip(),
             since_ts=since,
             until_ts=until,
+            disposition=self._disposition_filter(),
+            pending_only=self._pending_only_filter(),
         )
         # 排序状态跨刷新保留：用户在「按评分降序」下改筛选条件，期望的还是降序
         self._rows_src = rows
@@ -714,7 +746,17 @@ class EventsPage(BaseTablePage):
         self._render(self._rows)
         # 只有真的折叠掉了行才提「合并为 N 组」，否则是废话
         groups = len(src) if (merged and len(src) < len(rows)) else 0
-        self.lbl_info.setText(self._info_text(len(rows), groups))
+        # 只在「未处理」这一批里拆：规则自动拦截的已经生效，剩下的才是待办。
+        # 计数写在常驻的计数行，用户扫一眼就能确认自定义规则有没有在拦。
+        auto_n = pending_n = 0
+        for r in rows:
+            if int(r.get("handled") or 0) != 0:
+                continue
+            if disposition_of(r) == DISPOSITION_BLOCK:
+                auto_n += 1
+            else:
+                pending_n += 1
+        self.lbl_info.setText(self._info_text(len(rows), groups, auto_n, pending_n))
         self.btn_export.setToolTip(f"导出当前筛选结果（{len(rows)} 条事件）")
 
     def _render(self, rows: List[Dict]) -> None:
@@ -764,7 +806,7 @@ class EventsPage(BaseTablePage):
                     note = f"{labels[0]} +{len(labels) - 1}"
                 level_label = LEVEL_LABEL.get(level, level)
                 level_tip = (
-                    f"{level_label}\n命中规则：{'、'.join(labels)}" if labels else level_label
+                    f"{level_label}\n规则触发：{'、'.join(labels)}" if labels else level_label
                 )
 
                 n = int(r.get("group_count") or 1)
@@ -814,6 +856,10 @@ class EventsPage(BaseTablePage):
                     ),
                 )
                 disp_text, disp_color, disp_tip = _disposition_cell(r, handled)
+                if labels:
+                    # 触发的规则名与处置结论放进同一个 tooltip：校验「规则是否生效」
+                    # 时不必在等级列和处置列之间来回对照。
+                    disp_tip = f"规则触发：{'、'.join(labels)}\n{disp_tip}"
                 self.table.setItem(
                     i,
                     COL_DISPOSITION,

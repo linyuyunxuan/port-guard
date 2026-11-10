@@ -44,18 +44,16 @@ from core.database import clear_all_logs, db_size
 from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.background import run_in_background
-from gui.components import PageHeader
+from gui.components import PageHeader, SectionIndex
 from gui.settings_audit import AuditPanel
 from gui.theme import C
-from gui.widgets import CONTENT_MAX_W, ToggleSwitch, WarnBanner, make_item
+from gui.widgets import CONTENT_MAX_W, ToggleSwitch, WarnBanner
 from qtcompat import (
-    QAbstractItemView,
     QApplication,
     QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLayout,
     QLineEdit,
@@ -65,7 +63,6 @@ from qtcompat import (
     QScrollArea,
     QSpinBox,
     Qt,
-    QTableWidget,
     QTabWidget,
     QTimer,
     QVBoxLayout,
@@ -81,12 +78,9 @@ LEVEL_LABELS = [LEVEL_LABEL[x] for x in LEVEL_ITEMS]
 #: 表单标签列固定宽度。所有面板共用，保证控件左缘对齐（P1-5）
 LABEL_W = 128
 
-#: 备份表：行高与列宽（库 / 备份文件 / 大小 / 备份时间）。文件列是唯一的拉伸列
-BACKUP_ROW_H = 28
-BACKUP_WIDTHS = [78, 345, 92, 170]
-
-#: 数据库备份表：库只有一份，不需要「库」列
-DB_BACKUP_WIDTHS = [368, 101, 170]
+#: 备份明细改成单行下拉（2026-11-10）：表格嵌在滚动区里，上下拖动时行会被
+#: 卡片边缘遮住、也不好点中。下拉只占一行，选中项的完整明细放在下一行文字里。
+BACKUP_PICKER_MIN_W = 460
 
 #: 后台任务进行中的提示语（VACUUM 可能几十秒，必须让用户知道程序没死）
 DB_TASK_TEXT = {
@@ -215,7 +209,10 @@ class SettingsPage(QWidget):
         outer.setSpacing(12)
 
         # ── 标题区（56，7 页统一用 PageHeader）──
-        head = PageHeader("设置", "服务、采集、封禁、告警与离线库")
+        head = PageHeader(
+            "设置",
+            "按「采集与服务 → 防护与告警 → 数据与离线库 → 操作审计」分层，每类下再按分区展开",
+        )
         self.lbl_dirty = QLabel("")
         self.lbl_dirty.setVisible(False)
         head.add_action(self.lbl_dirty)
@@ -241,6 +238,9 @@ class SettingsPage(QWidget):
     # ── Tab 1：服务与采集 ──
     def _tab_service(self) -> QWidget:
         page, page_layout = self._scroll_page()
+        self._section_service = self._add_section_index(
+            page, page_layout, "① 采集与服务", ["本机端口访问观察", "运行与守护"]
+        )
 
         # ── 本机端口访问观察 ──
         watch = _Panel("本机端口访问观察")
@@ -409,6 +409,9 @@ class SettingsPage(QWidget):
     # ── Tab 2：防护与告警 ──
     def _tab_guard(self) -> QWidget:
         page, lay = self._scroll_page()
+        self._section_guard = self._add_section_index(
+            page, lay, "② 防护与告警", ["封禁策略", "告警通知"]
+        )
 
         ban = _Panel("封禁策略")
 
@@ -615,6 +618,9 @@ class SettingsPage(QWidget):
     # ── Tab 3：数据与离线库 ──
     def _tab_data(self) -> QWidget:
         page, lay = self._scroll_page()
+        self._section_data = self._add_section_index(
+            page, lay, "③ 数据与离线库", ["离线库在线同步", "数据管理"]
+        )
         self.tab_data = page
         self._data_scroll = page  # WAL 提示条的「去整理」要滚到这里
 
@@ -724,25 +730,12 @@ class SettingsPage(QWidget):
             f"（每个库只保留最近 {maintenance.KEEP_BACKUPS_PER_FILE} 份）。\n"
             "回滚前会再备份一次当前库，所以回滚错了仍然可以再回滚回来。"
         )
-        # 备份列表用 QTableWidget 而不是下拉框：_wire_dirty 会把页面里所有
-        # QComboBox 的 currentIndexChanged 接到「未保存」标记上，而「选中哪份
-        # 备份」不是一项设置，不该点亮未保存。
-        self.tbl_bak = QTableWidget(0, 4)
-        self.tbl_bak.setHorizontalHeaderLabels(["库", "备份文件", "大小", "备份时间"])
-        self.tbl_bak.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.tbl_bak.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tbl_bak.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.tbl_bak.setAlternatingRowColors(True)
-        self.tbl_bak.setShowGrid(False)
-        self.tbl_bak.setWordWrap(False)
-        self.tbl_bak.setTabKeyNavigation(False)
-        self.tbl_bak.verticalHeader().setVisible(False)
-        self.tbl_bak.verticalHeader().setDefaultSectionSize(BACKUP_ROW_H)
-        hh = self.tbl_bak.horizontalHeader()
-        for i, w in enumerate(BACKUP_WIDTHS):
-            hh.resizeSection(i, w)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        xdb.add_block(self.tbl_bak, span=False)
+        # 备份明细改成下拉选择：原来 4 列表格夹在滚动区里，上下拖动时被卡片
+        # 边缘遮挡、行也不好点中。现在下拉只占一行，选中那份的完整明细写在
+        # 下一行文字里；_wire_dirty 会跳过这个选择器（它不是设置项）。
+        self.cb_bak = self._backup_picker()
+        self.cb_bak.currentIndexChanged.connect(self._show_bak_detail)
+        xdb.add("可回滚备份", self.cb_bak)
 
         self.lbl_bak = QLabel("")
         self.lbl_bak.setObjectName("form_hint")
@@ -973,24 +966,10 @@ class SettingsPage(QWidget):
         self.lbl_db_state.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         panel.add_block(self.lbl_db_state, span=False)
 
-        # 备份列表：与离线库那张表同样的取舍（QTableWidget 而不是下拉框，
-        # 否则「选中哪份备份」会被 _wire_dirty 记成「未保存的设置」）
-        self.tbl_db_bak = QTableWidget(0, 3)
-        self.tbl_db_bak.setHorizontalHeaderLabels(["备份文件", "大小", "备份时间"])
-        self.tbl_db_bak.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.tbl_db_bak.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tbl_db_bak.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.tbl_db_bak.setAlternatingRowColors(True)
-        self.tbl_db_bak.setShowGrid(False)
-        self.tbl_db_bak.setWordWrap(False)
-        self.tbl_db_bak.setTabKeyNavigation(False)
-        self.tbl_db_bak.verticalHeader().setVisible(False)
-        self.tbl_db_bak.verticalHeader().setDefaultSectionSize(BACKUP_ROW_H)
-        dhh = self.tbl_db_bak.horizontalHeader()
-        for i, w in enumerate(DB_BACKUP_WIDTHS):
-            dhh.resizeSection(i, w)
-        dhh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        panel.add_block(self.tbl_db_bak, span=False)
+        # 数据库备份明细同样改成下拉：与离线库那张同款，避免滚动区里表格被遮挡
+        self.cb_db_bak = self._backup_picker()
+        self.cb_db_bak.currentIndexChanged.connect(self._show_db_bak_detail)
+        panel.add("可恢复备份", self.cb_db_bak)
 
         self.lbl_db_bak = QLabel("")
         self.lbl_db_bak.setObjectName("form_hint")
@@ -1043,12 +1022,114 @@ class SettingsPage(QWidget):
         area.setWidget(host)
         return area, lay
 
+    def _add_section_index(
+        self, page: QScrollArea, lay: QVBoxLayout, group: str, labels: List[str]
+    ) -> SectionIndex:
+        """每个 tab 顶部一条二级分区导航，与卡片同宽、同款 QSS。
+
+        设置页原来只有「tab → 卡片」两层，卡片一多就只能靠上下拖着找；现在
+        「分类 → 分区 → 设置项」三层都看得见，点分区名直接滚到对应卡片。
+        """
+        idx = SectionIndex(group, labels)
+        idx.setMaximumWidth(CONTENT_MAX_W)
+        lay.addWidget(idx, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # 普通 def 槽 + 默认值：PySide2 有时按 0 参调用，两栈都能接住
+        def on_click(i: int = 0) -> None:
+            self._scroll_to_section(page, lay, i)
+
+        idx.section_clicked.connect(on_click)
+        return idx
+
+    @staticmethod
+    def _scroll_to_section(page: QScrollArea, lay: QVBoxLayout, i: int) -> None:
+        # 第 0 项是导航条自身，分区卡片从 1 开始；卡片在 host 里的 y 就是
+        # QScrollArea 的内容坐标，直接交给滚动条即可。
+        item = lay.itemAt(i + 1)
+        w = item.widget() if item is not None else None
+        if w is None:
+            return
+        bar = page.verticalScrollBar()
+        if bar is not None:
+            bar.setValue(max(0, w.y() - 8))
+
     @staticmethod
     def _sw_label(text: str) -> QLabel:
         """开关右侧的小字说明"""
         lb = QLabel(text)
         lb.setStyleSheet(f"color:{C.text_secondary};font-size:13.5px;")
         return lb
+
+    @staticmethod
+    def _backup_picker() -> QComboBox:
+        """两处备份明细共用的单行下拉：不随滚动区跑，也不会被卡片边缘遮住"""
+        cb = QComboBox()
+        cb.setMinimumWidth(BACKUP_PICKER_MIN_W)
+        cb.setMaxVisibleItems(10)
+        cb.setToolTip("下拉选择备份版本；选中后在下方查看该份的完整明细")
+        return cb
+
+    @staticmethod
+    def _fill_backup_picker(cb: QComboBox, labels: List[str]) -> None:
+        """重建下拉项并尽量保留当前选择（按显示文本匹配）。
+
+        clear()/addItem() 会连发 currentIndexChanged，刷一次备份就把明细文字
+        搅乱；先 blockSignals，最后统一 setCurrentIndex。调用方在填充后仍需
+        显式刷一次明细 —— 若目标索引恰好等于当前索引，Qt 不会发信号。
+        """
+        prev = cb.currentText()
+        cb.blockSignals(True)
+        try:
+            cb.clear()
+            if not labels:
+                cb.addItem("（暂无可用备份）", -1)
+            for i, label in enumerate(labels):
+                cb.addItem(label, i)
+        finally:
+            cb.blockSignals(False)
+        if not labels:
+            return
+        idx = cb.findText(prev)
+        cb.setCurrentIndex(idx if idx >= 0 else 0)
+
+    @staticmethod
+    def _picker_index(cb: QComboBox) -> int:
+        try:
+            return int(cb.currentData())
+        except (TypeError, ValueError):
+            return -1
+
+    def _show_bak_detail(self) -> None:
+        """下拉选中项的完整明细（库 / 文件 / 大小 / 时间），替代原来的 4 列表格"""
+        rows = list(getattr(self, "_bak_rows", []) or [])
+        i = self._picker_index(self.cb_bak)
+        base = str(getattr(self, "_bak_summary", "") or "")
+        if not 0 <= i < len(rows):
+            self.lbl_bak.setText(base)
+            return
+        item = rows[i]
+        name = xdb_updater.backup_group(str(item.get("file", "")))
+        size_mb = int(item.get("size", 0) or 0) / 1048576
+        detail = (
+            f"当前选择：{_xdb_label(name)} · {item.get('file', '')} · "
+            f"{size_mb:.1f} MB · 备份于 {ms_to_str(item.get('mtime'))}"
+        )
+        self.lbl_bak.setText(f"{base}\n{detail}" if base else detail)
+
+    def _show_db_bak_detail(self) -> None:
+        rows = list(getattr(self, "_db_rows", []) or [])
+        i = self._picker_index(self.cb_db_bak)
+        base = str(getattr(self, "_db_bak_summary", "") or "")
+        if not 0 <= i < len(rows):
+            self.lbl_db_bak.setText(base)
+            return
+        item = rows[i]
+        detail = (
+            f"当前选择：{item.get('file', '')} · "
+            f"{maintenance.format_size(int(item.get('size', 0) or 0))} · "
+            f"备份于 {ms_to_str(item.get('mtime'))}"
+        )
+        self.lbl_db_bak.setText(f"{base}\n{detail}" if base else detail)
 
     def _wire_dirty(self) -> None:
         """把页面内所有可编辑控件的变更信号接到「未保存」标记上。
@@ -1065,8 +1146,14 @@ class SettingsPage(QWidget):
             if le is self.cb_xdb_source.lineEdit():
                 continue
             le.textChanged.connect(self._mark_dirty)
+        pickers = {
+            getattr(self, "cb_bak", None),
+            getattr(self, "cb_db_bak", None),
+        }
         for cb in self.findChildren(QComboBox):
-            if cb is self.cb_xdb_source:
+            # 备份版本选择器不是「设置」：选哪份不改变保存结果，
+            # 不该像以前用表格时那样被 _mark_dirty 点亮「未保存」。
+            if cb is self.cb_xdb_source or cb in pickers:
                 continue
             cb.currentIndexChanged.connect(self._mark_dirty)
         for tg in self.findChildren(ToggleSwitch):
@@ -1636,26 +1723,18 @@ class SettingsPage(QWidget):
             rows.extend(groups.get(name, []))
         self._bak_rows = rows
 
-        self.tbl_bak.setRowCount(0)
-        self.tbl_bak.setRowCount(len(rows))
-        for i, item in enumerate(rows):
+        labels = []
+        for item in rows:
             name = xdb_updater.backup_group(str(item.get("file", "")))
-            size_mb = int(item.get("size", 0) or 0) / 1048576
-            self.tbl_bak.setItem(i, 0, make_item(_xdb_label(name)))
-            self.tbl_bak.setItem(i, 1, make_item(item.get("file", ""), mono=True))
-            self.tbl_bak.setItem(
-                i,
-                2,
-                make_item(f"{size_mb:.1f} MB", align=Qt.AlignmentFlag.AlignCenter, mono=True),
+            labels.append(
+                f"{_xdb_label(name)} · {item.get('file', '')} · {ms_to_str(item.get('mtime'))}"
             )
-            self.tbl_bak.setItem(i, 3, make_item(ms_to_str(item.get("mtime")), mono=True))
+        self._fill_backup_picker(self.cb_bak, labels)
 
         has = bool(rows)
-        self.tbl_bak.setVisible(has)
-        self.tbl_bak.setFixedHeight(min(28 + BACKUP_ROW_H * len(rows), 176))
+        self.cb_bak.setEnabled(has)
         self.btn_bak_restore.setEnabled(has)
         if has:
-            self.tbl_bak.selectRow(0)
             counts = " · ".join(
                 f"{_xdb_label(n)} {len(groups.get(n, []))} 份" for n in XDB_UPSTREAM if n in groups
             )
@@ -1665,13 +1744,14 @@ class SettingsPage(QWidget):
             )
         else:
             text = "尚无备份。每次在线同步换库前都会自动备份，届时这里会列出可回滚的版本。"
-        self.lbl_bak.setText(text)
+        self._bak_summary = text
+        self._show_bak_detail()
         self.lbl_bak.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
 
     def _restore_backup(self) -> None:
-        row = self.tbl_bak.currentRow()
+        row = self._picker_index(self.cb_bak)
         if not 0 <= row < len(self._bak_rows):
-            QMessageBox.information(self, "无法回滚", "请先在上方列表里选中一份备份。")
+            QMessageBox.information(self, "无法回滚", "请先在下拉框里选中一份备份。")
             return
         item = self._bak_rows[row]
         name = xdb_updater.backup_group(str(item.get("file", "")))
@@ -1781,34 +1861,21 @@ class SettingsPage(QWidget):
             rows = []
         self._db_rows = rows
 
-        self.tbl_db_bak.setRowCount(0)
-        self.tbl_db_bak.setRowCount(len(rows))
-        for i, item in enumerate(rows):
-            self.tbl_db_bak.setItem(i, 0, make_item(item.get("file", ""), mono=True))
-            self.tbl_db_bak.setItem(
-                i,
-                1,
-                make_item(
-                    maintenance.format_size(int(item.get("size", 0) or 0)),
-                    align=Qt.AlignmentFlag.AlignCenter,
-                    mono=True,
-                ),
-            )
-            self.tbl_db_bak.setItem(i, 2, make_item(ms_to_str(item.get("mtime")), mono=True))
+        labels = [f"{item.get('file', '')} · {ms_to_str(item.get('mtime'))}" for item in rows]
+        self._fill_backup_picker(self.cb_db_bak, labels)
 
         has = bool(rows)
-        self.tbl_db_bak.setVisible(has)
-        self.tbl_db_bak.setFixedHeight(min(28 + BACKUP_ROW_H * len(rows), 176))
+        self.cb_db_bak.setEnabled(has and not self._db_busy)
         self.btn_db_restore.setEnabled(has and not self._db_busy)
         if has:
-            self.tbl_db_bak.selectRow(0)
             text = (
                 f"共 {len(rows)} 份，最多保留 {maintenance.KEEP_DB_BACKUPS} 份"
                 "（更早的在下次备份时自动删除）。"
             )
         else:
             text = "尚无数据库备份。先点「立即备份」打一份快照，之后才能恢复。"
-        self.lbl_db_bak.setText(text)
+        self._db_bak_summary = text
+        self._show_db_bak_detail()
         self.lbl_db_bak.setStyleSheet(f"color:{C.text_muted};font-size:13.5px;")
 
     def _db_run(self, kind: str, fn) -> None:
@@ -1850,6 +1917,8 @@ class SettingsPage(QWidget):
                     QApplication.restoreOverrideCursor()
                 self._db_cursor = False
             self.btn_db_restore.setEnabled(bool(self._db_rows))
+        # 任务跑的时候连「换选另一份备份」也一起锁住，避免恢复中途改选择
+        self.cb_db_bak.setEnabled(not busy and bool(self._db_rows))
 
     def _on_db_task_done(self, res: Any) -> None:
         """后台任务结束（Qt 主线程）：恢复按钮、刷新状态、留痕"""
@@ -1917,9 +1986,9 @@ class SettingsPage(QWidget):
         self._db_run("backup", maintenance.backup_db)
 
     def _db_restore(self) -> None:
-        row = self.tbl_db_bak.currentRow()
+        row = self._picker_index(self.cb_db_bak)
         if not 0 <= row < len(self._db_rows):
-            QMessageBox.information(self, "无法恢复", "请先在上方列表里选中一份备份。")
+            QMessageBox.information(self, "无法恢复", "请先在下拉框里选中一份备份。")
             return
         item = self._db_rows[row]
         file_name = str(item.get("file", ""))

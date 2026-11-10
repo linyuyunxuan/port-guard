@@ -80,9 +80,9 @@ from qtcompat import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     Qt,
     QTableWidget,
+    QTabWidget,
     QTimer,
     QVBoxLayout,
     QWidget,
@@ -90,6 +90,33 @@ from qtcompat import (
 )
 
 log = get_logger(__name__)
+
+#: 一次性结果提示（解封完成 / 删除记录 / 到期积压）在筛选行的存活时间。
+#: 到点自动清回统计文案 —— 事办完了还挂着，用户会以为条件仍然成立。
+INFO_FLASH_MS = 8000
+
+
+def _flash_label(label: Any, text: str, restore_text: str = "") -> None:
+    """在给定的筛选行 label 上显示一次性提示，到点自动回填统计文案。
+
+    刻意做成模块级函数、状态挂在 label 上，而不是页面方法：审计类用例会用
+    「最小宿主桩 + 未绑定方法」直接调 ``BansPage._batch_delete_bans``，桩里
+    只有 ``lbl_info``，没有页面上的其它方法。提示属于展示层，不该让这类
+    桩对象被迫实现一堆界面方法，更不该因此把审计动作带崩。
+    """
+    token = int(getattr(label, "_pg_flash_token", 0)) + 1
+    label._pg_flash_token = token
+    label.setText(text)
+    QTimer.singleShot(INFO_FLASH_MS, lambda: _restore_label(label, token, restore_text))
+
+
+def _restore_label(label: Any, token: int, restore_text: str) -> None:
+    """只让最后一次提示的定时器生效，旧定时器不许清掉后来的新提示。"""
+    if token != getattr(label, "_pg_flash_token", 0):
+        return
+    label._pg_flash_token = 0
+    label.setText(restore_text)
+
 
 BAN_HEADERS = [
     "",
@@ -312,52 +339,14 @@ class BansPage(BaseTablePage):
         root.addWidget(self.fw_banner)
         self._refresh_fw_banner()
 
-        # 结果区：上「待确认建议」/ 下「封禁记录」，可拖拽分配高度
-        self.split = QSplitter(Qt.Orientation.Vertical)
-        self.split.setChildrenCollapsible(False)
-        self.split.addWidget(self._build_sug_panel())
-        self.split.addWidget(self._build_records_area())
-        self.split.setStretchFactor(0, 0)
-        self.split.setStretchFactor(1, 1)
-        # 初始 264 = 面板开销 94（卡头 46 + 表头 44 + 边 4）+ 5 行 × 34；
-        # 拖完再吸附到整数行（见 _snap_sug_rows），否则 268 这种高度会让表格
-        # 底部露出 4px 的下一行 —— 看起来像半行被切掉。
-        self.split.setSizes([264, 390])
-        self.split.splitterMoved.connect(lambda *_: self._snap_sug_rows())
-        root.addWidget(self.split, 1)
-
-    # ══════════ 建议区高度：吸附到整数行 ══════════
-
-    def _sug_chrome(self) -> int:
-        """建议面板里除表格可视区以外的固定开销（卡头 + 表头 + 边框）。
-
-        不用写死 94：卡头高度随字体走，两栈（雅黑 9pt / PySide2 度量偏大）
-        差两三个像素就够让吸附算错。布局没完成时返回 0，调用方据此跳过。
-        """
-        lay = self.sug_panel.layout()
-        item = lay.itemAt(0) if lay is not None else None
-        head = item.geometry().height() if item is not None else 0
-        return head + self.sug_table.horizontalHeader().height() + 4
-
-    def _snap_sug_rows(self) -> None:
-        """把建议面板高度对齐到「开销 + 整数行」。
-
-        拖分隔条时用户只想要「多看几行」，结果露半行反而显得界面没对齐。
-        只在可视化状态下做（空态折叠时表格是隐藏的，行高无意义）。
-        """
-        if not self.sug_table.isVisible():
-            return
-        row = self.sug_table.verticalHeader().defaultSectionSize()
-        chrome = self._sug_chrome()
-        if row <= 0 or chrome <= row:
-            return
-        rows = max(1, round((self.sug_panel.height() - chrome) / row))
-        target = chrome + rows * row
-        sizes = self.split.sizes()
-        delta = target - self.sug_panel.height()
-        if delta == 0 or sizes[1] - delta < 120:
-            return
-        self.split.setSizes([target, sizes[1] - delta])
+        # 结果区：「待确认建议」与「封禁记录」拆成独立分页（2026-11-10）。
+        # 原来是 QSplitter 上下堆叠：两块互相抢高度，0 条建议时还得把上半区
+        # 折叠成 80px 的一行，滚动/拖动时标题与表格容易错位。分页后各占满
+        # 整个内容区，层级与全局 QTabWidget 下划线风格一致（见 theme.py）。
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_sug_panel(), "待确认建议")
+        self.tabs.addTab(self._build_records_area(), "封禁记录")
+        root.addWidget(self.tabs, 1)
 
     def _fit_sug_hint(self) -> None:
         """卡头宽度够就显示说明，不够就收起来。
@@ -371,9 +360,8 @@ class BansPage(BaseTablePage):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        # 首次显示时卡头还没几何，等这一轮布局跑完再吸附
+        # 分页后建议区独占一个 tab，不再需要按 QSplitter 的高度吸附行数
         self._fit_sug_hint()
-        QTimer.singleShot(0, self._snap_sug_rows)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -408,6 +396,13 @@ class BansPage(BaseTablePage):
             return
         self._expired_backlog = n
         self._refresh_perm_banner()
+        if n == 0:
+            # 积压归零：权限条上「另有 N 条已到期」由 _refresh_perm_banner 收起，
+            # 筛选行里残留的到期/解封一次性提示也一起清掉，两处口径保持一致。
+            text = self.lbl_info.text()
+            if "已到期" in text or "解封" in text:
+                self._info_token = 0
+                self.lbl_info.setText(getattr(self, "_stats_info_text", ""))
 
     def _refresh_fw_banner(self) -> None:
         """
@@ -914,16 +909,10 @@ class BansPage(BaseTablePage):
         ips = {str(r.get("ip") or "") for r in rows} - {""}
         self.btn_sug_ban_all.setEnabled(not empty)
         self.btn_sug_ban_all.setText(f"全部封禁（{len(ips)}）" if ips else "全部封禁")
-        if empty:
-            # 0 条时整区折叠成一行提示，把高度让给封禁记录表
-            # 折叠态也要装得下「标题行 40 + 一句空态 26 + 下留白 14」
-            self.sug_panel.setMinimumHeight(80)
-            self.sug_panel.setMaximumHeight(80)
-        else:
-            # 196 / 366 = 面板开销 94 + 3 行 / 8 行（34px 一行）。
-            # 这两个数只是上下夹逼，精确吸附在 _snap_sug_rows 里按实际开销算。
-            self.sug_panel.setMinimumHeight(196)
-            self.sug_panel.setMaximumHeight(366)
+        # 分页后面板占满整个 tab，不再折叠成 80px 给下面那张表让高度
+        self.sug_panel.setMinimumHeight(0)
+        self.sug_panel.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+        self.tabs.setTabText(self.tabs.indexOf(self.sug_panel), f"待确认建议（{len(rows)}）")
 
         self.sug_sel.begin_render()
         self._sug_action_delegate.reset_hover()
@@ -1230,7 +1219,11 @@ class BansPage(BaseTablePage):
         )
         self.refresh()
         self.request_refresh_stats.emit()
-        self.lbl_info.setText(f"已删除 {n} 条记录 · 共 {len(self._ban_rows)} 条")
+        _flash_label(
+            self.lbl_info,
+            f"已删除 {n} 条记录 · 共 {len(self._ban_rows)} 条",
+            getattr(self, "_stats_info_text", ""),
+        )
 
     # ── 导出 ──
     def _export_sug_csv(self) -> None:
@@ -1411,6 +1404,7 @@ class BansPage(BaseTablePage):
         self.table.setVisible(bool(rows))
         # 计数写在卡片标题里：两块卡片并排上下时，「这块有几条」是定位的第一步
         self.ban_title.setText(f"封禁记录（{len(rows)}）")
+        self.tabs.setTabText(self.tabs.indexOf(self.ban_panel), f"封禁记录（{len(rows)}）")
 
         self.ban_sel.begin_render()
         self._ban_action_delegate.reset_hover()
@@ -1509,7 +1503,29 @@ class BansPage(BaseTablePage):
         text = f"共 {len(rows)} 条 · 当前生效 {count_active_bans()} 条"
         if hits:
             text += f" · 封禁期间累计拦截 {hits} 次"
+        # 常驻统计文案留一份，瞬时提示到点后直接回填，不必为此重查一次库
+        self._stats_info_text = text
+        if getattr(self, "_info_token", 0) == 0:
+            self.lbl_info.setText(text)
+
+    def _flash_info(self, text: str) -> None:
+        """一次性结果提示（解封完成 / 删除记录 / 到期积压），到点自动清回统计文案。
+
+        这些不是常驻状态：自动解封办完、到期积压归零之后，提示还挂在筛选行上，
+        用户会以为条件仍然成立。token 保证旧定时器不会清掉后来的新提示。
+        """
+        self._info_token = int(getattr(self, "_info_token", 0)) + 1
+        token = self._info_token
         self.lbl_info.setText(text)
+        QTimer.singleShot(INFO_FLASH_MS, lambda: self._restore_info(token))
+
+    def _restore_info(self, token: int) -> None:
+        if token != getattr(self, "_info_token", 0):
+            return
+        self._info_token = 0
+        # 归零后下一轮 _render_bans 会重新写统计文案；这里先立即回填，
+        # 让用户看到的是「提示消失」而不是「提示变旧」。
+        self.lbl_info.setText(getattr(self, "_stats_info_text", ""))
 
     def _ban_spec(self, row: int) -> Optional[RowAction]:
         """封禁记录表操作列：「解封」只在生效中的记录上可点"""
