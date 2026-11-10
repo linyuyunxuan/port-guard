@@ -22,6 +22,7 @@ from qtcompat import (
     QColor,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QPainter,
     QPushButton,
@@ -73,7 +74,7 @@ class BarStripWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("barstrip_container")
-        self.setMinimumHeight(56)
+        self.setMinimumHeight(48)
         self._counts: List[int] = [0] * _BUCKETS  # 仅留作 tooltip 数据，不决定高度/颜色
         self._colors: List[str] = [C.bg_card_alt] * _BUCKETS
         self._anomaly = False
@@ -193,12 +194,27 @@ class OverviewPage(QWidget):
         card.setObjectName("panel")
         card.setMinimumSize(340, 250)
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(18, 16, 18, 14)
+        lay.setContentsMargins(20, 12, 20, 14)
         lay.setSpacing(8)
 
+        # 顶部一条主色细条 + 标题前的小锚点：六张卡长得一样，靠这两笔把
+        # 「卡片」和「卡片里的层级」分开，不需要引入图标字体或 emoji。
+        accent = QFrame()
+        accent.setObjectName("overview_accent")
+        accent.setFixedHeight(3)
+        lay.addWidget(accent)
+
+        head_row = QHBoxLayout()
+        head_row.setSpacing(8)
+        dot = QFrame()
+        dot.setObjectName("overview_dot")
+        dot.setFixedSize(8, 8)
+        head_row.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
         t = QLabel(title)
-        t.setObjectName("form_label")
-        lay.addWidget(t)
+        t.setObjectName("overview_card_title")
+        head_row.addWidget(t, 0, Qt.AlignmentFlag.AlignVCenter)
+        head_row.addStretch(1)
+        lay.addLayout(head_row)
 
         num = QLabel("—")
         num.setObjectName("card_number")
@@ -221,12 +237,12 @@ class OverviewPage(QWidget):
         lay.addStretch(1)
 
         foot_lbl = QLabel(foot)
-        foot_lbl.setObjectName("hint")
+        foot_lbl.setObjectName("overview_card_foot")
         foot_lbl.setWordWrap(True)
         lay.addWidget(foot_lbl)
 
         btn = QPushButton("查看 →")
-        btn.setObjectName("quick_link")
+        btn.setObjectName("overview_link")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(_make_slot(self._on_navigate, target))
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignRight)
@@ -334,12 +350,13 @@ class OverviewPage(QWidget):
             num.setText(f"{n}")
             note.setText("当前待人工处理的风险事件")
             foot.setText("统计口径：未处理且未被规则自动拦截 · 点击查看风险事件")
-            self._set_detail(
-                "todo",
-                "规则已自动拦截：{} 条\n待确认封禁建议：{} 条".format(
-                    auto_blocked, int(snap.get("suggestions", 0))
-                ),
-            )
+            # 「待确认封禁建议」为 0 时整行不显示：自动拦截过的重复 IP 事件已经
+            # 不再计入建议，挂一行 0 只会让用户以为还有东西没处理、点进去又是空的。
+            detail = f"规则已自动拦截：{auto_blocked} 条"
+            sug = int(snap.get("suggestions", 0))
+            if sug:
+                detail += f"\n待确认封禁建议：{sug} 条"
+            self._set_detail("todo", detail)
         except Exception as exc:
             self._fail(num, note, foot, "风险待办", exc)
 

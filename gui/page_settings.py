@@ -44,7 +44,7 @@ from core.database import clear_all_logs, db_size
 from core.logger import get_logger, log_file, set_retention
 from core.models import ms_to_str
 from gui.background import run_in_background
-from gui.components import PageHeader, SectionIndex
+from gui.components import PageHeader, SectionIndex, capsule_tabs
 from gui.settings_audit import AuditPanel
 from gui.theme import C
 from gui.widgets import CONTENT_MAX_W, ToggleSwitch, WarnBanner
@@ -63,7 +63,6 @@ from qtcompat import (
     QScrollArea,
     QSpinBox,
     Qt,
-    QTabWidget,
     QTimer,
     QVBoxLayout,
     QWidget,
@@ -224,7 +223,7 @@ class SettingsPage(QWidget):
         outer.addWidget(head)
 
         # ── 四个 tab ──
-        self.tabs = QTabWidget()
+        self.tabs = capsule_tabs("设置")
         self.tabs.addTab(self._tab_service(), "服务与采集")
         self.tabs.addTab(self._tab_guard(), "防护与告警")
         self.tabs.addTab(self._tab_data(), "数据与离线库")

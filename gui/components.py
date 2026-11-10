@@ -32,6 +32,7 @@ from qtcompat import (
     QPolygonF,
     QPushButton,
     Qt,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -43,6 +44,104 @@ from qtcompat import (
 # 选择置灰而不是删掉，是因为用户必须先**看见**「已在封禁中」才知道不用再点；
 # 直接消失会让人以为这个功能出了 bug。
 MenuEntry = Tuple[str, Optional[Callable[[], object]]]
+
+
+class CapsuleTabs(QWidget):
+    """一级功能分类的胶囊导航：「① 分组名」+ 一排页签按钮 + 页面区。
+
+    对标二级 `SectionIndex` 的观感（分组名与按钮同处一个圆角胶囊里）。
+    原生 QTabWidget 的 corner widget 会落在 tab 条之外，做不到「分组名在框内」，
+    所以这里自己搭胶囊条，但**页面管理仍借一个隐藏 tabBar 的 QTabWidget**：
+    既有测试用 `findChildren(QTabWidget)` 遍历关于页、各处 `_on_tab_changed`
+    接线都不用改。
+
+    对外保留 QTabWidget 的常用接口（addTab / setTabText / tabText / indexOf /
+    widget / count / currentIndex / setCurrentIndex / setCurrentWidget /
+    currentChanged），四个页面与离屏探针的调用点因此零改动。
+    """
+
+    currentChanged = Signal(int)
+
+    def __init__(self, group: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("capsule_tabs")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(10)
+
+        bar = QFrame()
+        bar.setObjectName("capsule_tabs_bar")
+        self._bar_lay = QHBoxLayout(bar)
+        self._bar_lay.setContentsMargins(14, 8, 14, 8)
+        self._bar_lay.setSpacing(8)
+        title = QLabel(f"①  {group}")
+        title.setObjectName("capsule_tabs_group")
+        self._bar_lay.addWidget(title)
+        self._buttons: List[QPushButton] = []
+        self._bar_lay.addStretch(1)
+        outer.addWidget(bar)
+
+        self._pages = QTabWidget()
+        self._pages.setObjectName("capsule_tabs_pages")
+        self._pages.tabBar().hide()  # 只借它管页面与 currentChanged，视觉全交给胶囊条
+        outer.addWidget(self._pages, 1)
+        self._pages.currentChanged.connect(self._on_page_changed)
+
+    def _on_page_changed(self, idx: int) -> None:
+        for i, btn in enumerate(self._buttons):
+            btn.setChecked(i == idx)
+        self.currentChanged.emit(idx)
+
+    def _slot_for(self, idx: int) -> Callable[..., None]:
+        # 不能用带默认参数的 lambda：PySide2 按 0 参调用槽，点击会静默失灵。
+        def slot(_checked: bool = False) -> None:
+            self.setCurrentIndex(idx)
+
+        return slot
+
+    def addTab(self, widget: QWidget, label: str) -> int:
+        idx = self._pages.addTab(widget, label)
+        btn = QPushButton(label)
+        btn.setObjectName("capsule_tabs_btn")
+        btn.setCheckable(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(self._slot_for(idx))
+        # stretch 永远在最后一位，按钮插到它前面，保持「分组名 → 按钮 → 留白」
+        self._bar_lay.insertWidget(self._bar_lay.count() - 1, btn)
+        self._buttons.append(btn)
+        if idx == 0:
+            btn.setChecked(True)
+        return idx
+
+    def setTabText(self, idx: int, text: str) -> None:
+        self._buttons[idx].setText(text)
+        self._pages.setTabText(idx, text)
+
+    def tabText(self, idx: int) -> str:
+        return self._buttons[idx].text()
+
+    def count(self) -> int:
+        return self._pages.count()
+
+    def widget(self, idx: int) -> Optional[QWidget]:
+        return self._pages.widget(idx)
+
+    def indexOf(self, widget: QWidget) -> int:
+        return self._pages.indexOf(widget)
+
+    def currentIndex(self) -> int:
+        return self._pages.currentIndex()
+
+    def setCurrentIndex(self, idx: int) -> None:
+        self._pages.setCurrentIndex(idx)
+
+    def setCurrentWidget(self, widget: QWidget) -> None:
+        self._pages.setCurrentWidget(widget)
+
+
+def capsule_tabs(group: str, parent: Optional[QWidget] = None) -> CapsuleTabs:
+    """四个页面统一用这个工厂建一级胶囊导航；`group` 是当前模块名。"""
+    return CapsuleTabs(group, parent)
 
 
 class SectionIndex(QFrame):

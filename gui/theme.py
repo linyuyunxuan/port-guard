@@ -748,13 +748,14 @@ QMessageBox QLabel {{ color: {C.text_primary}; font-size: 15px; min-width: 300px
 }}
 #card_number {{
     font-family: "Consolas", "Microsoft YaHei UI", monospace;
-    font-size: 34px;
-    font-weight: bold;
+    font-size: 38px;
+    font-weight: 700;
     color: {C.text_on_dark};
+    margin: 0 0 2px 0;
 }}
 #barstrip_container {{
-    background-color: {C.bg_card};
-    border: 1px solid {C.border_light};
+    background-color: {C.bg_card_alt};
+    border: none;
     border-radius: 6px;
     font-size: 12.5px;
 }}
@@ -767,12 +768,13 @@ QFrame#panel {{
 
 /* ══════════ Phase 2：卡片明细 / 页头强调条（只追加、不前插）══════════ */
 #card_detail {{
-    background-color: {C.bg_card_alt};
+    background-color: {C.bg_zebra};
     border: 1px solid {C.border_light};
+    border-left: 2px solid {C.primary};
     border-radius: 6px;
     padding: 7px 10px;
-    color: {C.text_secondary};
-    font-size: 12.5px;
+    color: {C.text_primary};
+    font-size: 13px;
 }}
 #page_accent {{
     background-color: {C.primary};
@@ -807,6 +809,76 @@ QFrame#panel {{
     background-color: {C.primary};
     color: {C.accent_on};
     font-weight: 600;
+}}
+
+/* ══════════ 一级功能分类：胶囊页签（与 #section_index 同一套视觉语言）══════════
+   原生 QTabWidget 的 corner widget 落在 tab 条外面，做不出「分组名在框内」，
+   所以由 components.CapsuleTabs 自己搭胶囊条；页面仍由隐藏 tabBar 的
+   QTabWidget 管，addTab / setTabText / currentChanged 等接口全部照旧。     */
+#capsule_tabs_bar {{
+    background-color: {C.bg_card};
+    border: 1px solid {C.border_light};
+    border-radius: 18px;
+}}
+#capsule_tabs_pages::pane {{
+    border: none;
+    background: transparent;
+}}
+#capsule_tabs_group {{
+    color: {C.text_muted};
+    font-size: 12.5px;
+    font-weight: 600;
+    padding-right: 6px;
+}}
+#capsule_tabs_btn {{
+    background-color: transparent;
+    color: {C.text_secondary};
+    border: 1px solid transparent;
+    border-radius: 14px;
+    padding: 5px 13px;
+    font-size: 13.5px;
+}}
+#capsule_tabs_btn:hover {{
+    background-color: {C.primary_soft};
+    color: {C.text_on_dark};
+}}
+#capsule_tabs_btn:checked {{
+    background-color: {C.primary};
+    color: {C.accent_on};
+    font-weight: 600;
+}}
+
+/* ══════════ 总览台 6 卡：轻量精修（结构仍是 3 列 × 2 行）══════════
+   只加层级锚点、拉开数字与明细的对比，不改卡片数量与下钻目标。         */
+#overview_accent {{
+    background-color: {C.primary};
+    border-radius: 2px;
+}}
+#overview_dot {{
+    background-color: {C.primary};
+    border-radius: 4px;
+}}
+#overview_card_title {{
+    color: {C.text_secondary};
+    font-size: 13px;
+    font-weight: 600;
+}}
+#overview_card_foot {{
+    color: {C.text_muted};
+    font-size: 12px;
+}}
+#overview_link {{
+    background-color: transparent;
+    color: {C.text_link};
+    border: none;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 13.5px;
+    font-weight: 600;
+}}
+#overview_link:hover {{
+    background-color: {C.primary_light};
+    color: {C.primary};
 }}
 """
 

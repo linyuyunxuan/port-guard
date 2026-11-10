@@ -35,7 +35,7 @@ from core.config import (
 from core.geo_locator import get_locator
 from core.logger import log_file
 from core.models import ms_to_str
-from gui.components import ShieldMark
+from gui.components import ShieldMark, capsule_tabs
 from gui.theme import C
 from gui.widgets import align_headers
 from qtcompat import (
@@ -56,7 +56,6 @@ from qtcompat import (
     Qt,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
     Signal,
@@ -317,7 +316,7 @@ class AboutDialog(QDialog):
         lay.setSpacing(12)
         lay.addLayout(self._header())
 
-        tabs = QTabWidget()
+        tabs = capsule_tabs("关于")
         tabs.addTab(self._tab_about(), "关于")
         tabs.addTab(self._tab_shortcuts(), "快捷键")
         lay.addWidget(tabs, 1)

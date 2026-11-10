@@ -38,7 +38,7 @@ from core.models import (
 )
 from core.validators import InvalidIP, normalize_ip
 from gui.background import BusyGuard, run_in_background
-from gui.components import PageHeader, build_menu, export_table_csv
+from gui.components import PageHeader, build_menu, capsule_tabs, export_table_csv
 from gui.event_detail import EventDetailDialog
 from gui.event_group import flatten_rows, merge_rows
 from gui.row_action import RowAction, RowActionDelegate
@@ -82,7 +82,6 @@ from qtcompat import (
     QSpinBox,
     Qt,
     QTableWidget,
-    QTabWidget,
     QTimer,
     QVBoxLayout,
     QWidget,
@@ -342,8 +341,8 @@ class BansPage(BaseTablePage):
         # 结果区：「待确认建议」与「封禁记录」拆成独立分页（2026-11-10）。
         # 原来是 QSplitter 上下堆叠：两块互相抢高度，0 条建议时还得把上半区
         # 折叠成 80px 的一行，滚动/拖动时标题与表格容易错位。分页后各占满
-        # 整个内容区，层级与全局 QTabWidget 下划线风格一致（见 theme.py）。
-        self.tabs = QTabWidget()
+        # 整个内容区，页签走四个页面统一的胶囊导航（见 components.capsule_tabs）。
+        self.tabs = capsule_tabs("封禁管理")
         self.tabs.addTab(self._build_sug_panel(), "待确认建议")
         self.tabs.addTab(self._build_records_area(), "封禁记录")
         root.addWidget(self.tabs, 1)
@@ -839,9 +838,14 @@ class BansPage(BaseTablePage):
             self._load_bans()
 
     def _load_suggestions(self) -> None:
+        # 全量取 + 在 SQL 里排除「规则已自动拦截」(pending_only)：
+        # 攻击期最近 200 条可能全是自动拦截事件，截断会把真待办藏在后面；而这类
+        # 事件已经写进防火墙生效，不该再作为「等你拿主意」的建议出现。
+        # 四条判据与 core.database.stats_snapshot 的 suggestions 逐条对齐，
+        # 总览 / 侧栏角标 / 本页三个数字从此不会打架。
         rows = [
             r
-            for r in query_risk_events(limit=200, handled=0)
+            for r in query_risk_events(limit=0, handled=0, pending_only=True)
             if r.get("risk_level") in (LEVEL_HIGH, LEVEL_CRITICAL)
         ]
         # 同 IP + 同端口 = 一件事（2026-10-22 用户反馈：一个 IP 打同一端口占了 27 行）。

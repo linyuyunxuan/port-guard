@@ -524,18 +524,25 @@ def stats_snapshot(include_today: bool = True) -> Dict[str, int]:
             "SELECT COUNT(*) c FROM risk_event WHERE handled = 0 AND disposition = ?",
             (DISPOSITION_BLOCK,),
         ).fetchone()["c"]
-        # 待确认封禁建议：未处理 + 高危 + 该 IP 还没被封。
-        # 与 `PageBans._load_suggestions` 的筛选口径逐条对齐（它按 IP 隐藏已封禁项），
-        # 否则侧栏角标会说「3 项待确认」，点进去只有 1 项 —— 用户第一反应是建议丢了。
-        # 索引：risk_event(handled) + ban_list(status)，两张表都在清理任务里按天收敛，
-        # 这条查询在 2 秒一跳里可忽略。
+        # 待确认封禁建议：与 `PageBans._load_suggestions` 逐条对齐的四条判据 ——
+        #   ① 未处理 ② 高危/严重 ③ **排除规则已自动拦截**（disposition=block）
+        #   ④ 该 IP 还没被生效封禁。
+        # ③ 是新加的：自动拦截的事件 handled 仍为 0，但它们已经写进防火墙生效，
+        # 不是「等你拿主意」的建议。攻击期 3 万条自动拦截曾被全算成待确认，
+        # 总览说「166 条」、封禁页却一条都没有 —— 这类重复事件不该再出现。
+        # GROUP BY ip+port 与建议表的 merge_rows 同口径（同 IP 同端口 = 一件事），
+        # 不然「27 行事件折成 1 项建议」会让两个数字差 26 倍。
+        # 索引：risk_event(handled) + ban_list(status)，2 秒一跳里可忽略。
         suggestions = conn.execute(
-            "SELECT COUNT(*) c FROM risk_event r WHERE r.handled = 0 "
-            "AND r.risk_level IN ('high', 'critical') "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM ban_list b WHERE b.ip = r.ip AND b.status = ?"
+            "SELECT COUNT(*) c FROM ("
+            "  SELECT 1 FROM risk_event r WHERE r.handled = 0 "
+            "  AND r.risk_level IN ('high', 'critical') "
+            "  AND COALESCE(r.disposition, '') <> ? "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM ban_list b WHERE b.ip = r.ip AND b.status = ?"
+            "  ) GROUP BY r.ip, r.local_port"
             ")",
-            (STATUS_ACTIVE,),
+            (DISPOSITION_BLOCK, STATUS_ACTIVE),
         ).fetchone()["c"]
         return {
             "today_total": int(total),
@@ -835,6 +842,8 @@ def _query_risk_rows(
     ``disposition`` / ``pending_only`` 是「规则触发 / 自动拦截」筛选下推用：
     必须在 SQL 里过滤，不能在 GUI 里对结果再筛 —— limit 会把最近 200 条之外
     的待处理事件直接截掉，攻击期最近 200 条可能全是自动拦截的。
+
+    ``limit <= 0`` 表示不截断（封禁建议要的是全量，不是「最近 N 条」）。
     """
     sql = "SELECT * FROM risk_event WHERE 1=1"
     args: List[Any] = []
@@ -859,8 +868,10 @@ def _query_risk_rows(
     if until_ts is not None:
         sql += " AND event_ts < ?"
         args.append(int(until_ts))
-    sql += " ORDER BY event_ts DESC, id DESC LIMIT ? OFFSET ?"
-    args += [limit, offset]
+    sql += " ORDER BY event_ts DESC, id DESC"
+    if limit > 0:
+        sql += " LIMIT ? OFFSET ?"
+        args += [limit, offset]
     out = []
     for r in conn.execute(sql, args):
         d = dict(r)

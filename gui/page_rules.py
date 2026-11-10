@@ -32,7 +32,7 @@ from core.config import (
 from core.logger import get_logger
 from core.rule_engine import get_engine
 from core.rules_meta import RULE_DESCS, RULE_LABELS, RULE_PARAMS
-from gui.components import PageHeader
+from gui.components import PageHeader, capsule_tabs
 from gui.region_rules import RegionRulesTab
 from gui.theme import C
 from gui.widgets import CONTENT_MAX_W, ToggleSwitch
@@ -49,7 +49,6 @@ from qtcompat import (
     QScrollArea,
     QSpinBox,
     Qt,
-    QTabWidget,
     QTimer,
     QVBoxLayout,
     QWidget,
@@ -293,7 +292,7 @@ class RulesPage(QWidget):
         head.add_action(self.btn_save)
         root.addWidget(head)
 
-        self.tabs = QTabWidget()
+        self.tabs = capsule_tabs("规则配置")
 
         # Tab1 规则
         self.rules_area = QScrollArea()
