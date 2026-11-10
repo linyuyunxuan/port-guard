@@ -21,32 +21,40 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 ## 2. `data/ip2region_v4.xdb` / `ip2region_v6.xdb` —— 离线 IP 数据库
 
 - **来源**：https://github.com/lionsoul2014/ip2region  （仓库内 `data/`）
-- **许可**：Apache License 2.0
+- **许可**：Apache License 2.0，全文随交付包附于 `licenses/LICENSE-Apache-2.0.txt`
 - **格式**：xdb（ip2region 自有二进制格式）
-- **是否入库**：**不入库**。两个文件合计约 46 MB（v4 约 10.6 MB、v6 约 35.6 MB），
-  且可由内置的同步器随时从上游重新拉取，因此列入 `.gitignore`。
-  新克隆的仓库首次运行前需要同步一次离线库（默认启动即自动同步）。
+- **仓库与交付包的区别**：两个文件合计约 46 MB（v4 约 10.6 MB、v6 约 35.6 MB），
+  **不纳入 Git 版本库**（列入 `.gitignore`），但**已随交付 exe 包附带**，位于
+  `_internal/data/`。首次启动时 `ensure_data_file()` 会把它复制到
+  `%APPDATA%/PortGuard/`，因此纯内网客户首启无需联网即可查询归属地。
+  新克隆的仓库在打包前仍需先备好这两个文件，否则 `port_guard.spec`
+  会跳过不存在的资源，打出来的包里就没有离线库。
 - **运行期更新**：`core/xdb_updater.py` 会在版本指纹变化时从
   jsDelivr CDN / GitHub raw / ghproxy 等镜像下载新版本，
   经「大小 → git blob SHA-1 → xdb 结构校验 → 抽样查询」四重校验后原子替换，
   旧库备份到 `data/backup/`，可一键回滚。下载源受主机白名单约束（见
   `core/config.py` 的 `XDB_ALLOWED_HOSTS`）。
 
-## 3. 运行时依赖（通过 pip 安装，未内置）
+## 3. 运行时依赖
 
 同一套源码有**两条运行栈**，pip 按 Python 版本二选一（见 `requirements.txt`）。
-两条栈的 Qt 绑定都是 LGPL v3，闭源分发的义务完全一致。
+**本交付包使用 PySide2 线**（Python 3.8 / Qt 5.15）；PySide6 线只用于开发与测试，
+不随交付包分发。两条栈的 Qt 绑定都是 LGPL v3，闭源分发的义务一致。
 
-| 包 | 用途 | 许可 |
-| --- | --- | --- |
-| PySide6-Essentials | 桌面界面（Python 3.9+，开发栈 / Win10 1809+ 交付） | **LGPL v3**（另有 Qt 商业许可可选） |
-| shiboken6 | PySide6 的 C++/Python 绑定层 | LGPL v3 |
-| PySide2 | 桌面界面（Python 3.8，交付到 Win7 SP1 / Server 2008 R2 的线路） | **LGPL v3**（另有 Qt 商业许可可选） |
-| shiboken2 | PySide2 的 C++/Python 绑定层 | LGPL v3 |
-| FastAPI | 上报接收服务 | MIT |
-| Uvicorn | ASGI 服务器 | BSD-3-Clause |
-| Starlette（FastAPI 依赖） | ASGI 框架 | BSD-3-Clause |
-| Pydantic（FastAPI 依赖） | 数据校验 | MIT |
+| 包 / 组件 | 用途 | 是否随本交付包分发 | 许可 |
+| --- | --- | --- | --- |
+| PySide2 5.15.2.1 | 桌面界面（交付栈） | **是**：`_internal/PySide2/` | **LGPL v3**（另有 Qt 商业许可可选） |
+| shiboken2 5.15.2.1 | PySide2 的 C++/Python 绑定层 | **是**：`_internal/shiboken2/` | LGPL v3 |
+| PySide6-Essentials | 桌面界面（Python 3.9+，开发栈） | 否 | LGPL v3（另有 Qt 商业许可可选） |
+| shiboken6 | PySide6 的 C++/Python 绑定层 | 否 | LGPL v3 |
+| CPython 3.8 运行库与标准库 | 运行时 | **是**：`python38.dll` / `base_library.zip` 等 | PSF License |
+| Microsoft VC++ 运行库 | Qt / Python 依赖的 DLL | **是**：平铺在 `_internal/` | 随 Visual Studio 再分发条款 |
+| ip2region 客户端与 xdb 数据 | 离线 IP 归属地查询 | **是**（见第 1、2 节） | Apache-2.0 |
+
+> **1.2.0 起内置的 HTTP 上报接收服务已移除**，因此 FastAPI / Uvicorn /
+> Starlette / Pydantic 不再是运行时依赖，也不随交付包分发；
+> `port_guard.spec` 的 `hiddenimports` 为空列表。历史评审文档里出现的这四个
+> 名字只描述当时的旧版本，不能作为当前交付包的第三方清单。
 
 > **为什么只有 PySide2 这一条能下到 Win7**：`PySide6` 所用的 `Qt6Core.dll` 把
 > `icuuc.dll` 列为硬导入，而该组件是 Windows 10 1703 才加入系统的；`PySide2` 的
@@ -72,18 +80,25 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 > 4. 若修改了 Qt / PySide 源码本身（本项目未做任何修改），需公开这些修改。
 >
 > 本项目仅以动态链接方式使用，未修改 Qt 源码，也不对其做静态链接，
-> 因此上述 1、4 项自动满足；发布闭源产品时请补齐第 2、3 项材料。
+> 因此第 1、4 项自动满足。**本交付包已补齐第 2、3 项**：
+> `02_TERMS.txt` 第四节写明用官方 wheel 替换同名文件的方式；
+> `licenses/LICENSE-LGPL-3.0.txt` 与 `licenses/LICENSE-GPL-3.0.txt`
+> （取自 PySide2 5.15.2.1 官方 wheel）随包附全文；本文件在包内名为 `NOTICE.txt`。
 >
 > 注：只安装 `PySide6-Essentials`（而非完整版 PySide6）**不削弱第 2 项的可替换性** ——
 > 最终用户随时可以用官方原版 `PySide6-Essentials` wheel 覆盖同名文件，替换后程序照常工作。
 
-开发期依赖（pytest / ruff / mypy / httpx）仅用于 CI 与本地开发，不随产品分发。
+开发期依赖（pytest / pytest-cov / ruff / mypy / pyinstaller，见
+`requirements-dev.txt`）仅用于 CI 与本地开发，不随产品分发。
 
 ---
 
 ## 4. 检查项
 
+**交付包的权威清单以包内 `NOTICE.txt` 为准**（本文件由打包脚本改名随包附上），
+并应与 `licenses/` 下的许可全文、包内 `SHA256SUMS.txt` 逐项核对。
+
 ```bash
-# 列出所有直接依赖及其许可（需先安装 pip-licenses）
+# 开发期复查直接依赖及其许可（需先安装 pip-licenses）
 pip install pip-licenses && pip-licenses --with-urls --format=markdown
 ```

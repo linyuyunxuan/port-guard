@@ -11,7 +11,7 @@ import sys
 
 APP_NAME = "PortGuard"
 APP_TITLE = "PortGuard 端口访问防御工具"
-APP_VERSION = "1.9.3"
+APP_VERSION = "1.9.4"
 #: 作者与联系方式。出现在三处，必须是同一个来源（core.config）：
 #: 关于对话框、exe 文件属性（version_info.txt 由本文件同步）、README。
 APP_AUTHOR = "林玉云轩"
@@ -348,5 +348,7 @@ DEFAULT_SETTINGS = {
     "xdb_last_result": "",  # 最近一次同步结果摘要
 }
 
-# 外部可关闭的联网行为（企业内网无出口时用环境变量一键关掉）
+# 预留常量：当前版本没有读取该环境变量，不要对外宣称「一键关联网」。
+# 纯内网关闭出站同步的正式途径是设置页的三个开关：
+# xdb_auto_sync / xdb_sync_on_start / xdb_auto_download（见 delivery/01_DEPLOY.txt）。
 XDB_SYNC_DISABLED_ENV = "PORTGUARD_NO_UPDATE"

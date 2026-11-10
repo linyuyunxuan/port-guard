@@ -88,8 +88,8 @@ _HEADER_H = 36
 class ClickableLabel(QLabel):
     """可点击的 `QLabel`（侧栏底部版本号用）。
 
-    QLabel 没有 `clicked` 信号，而侧栏底部那行「v1.2.0 · ip2region」是
-    全程序唯一还留着版本信息的地方 —— 让它可点，用户不必再去托盘里找入口。
+    QLabel 没有 `clicked` 信号，而侧栏底部那行版本号标签是
+    最容易找到的版本信息入口 —— 让它可点，用户不必再去托盘里找入口。
 
     ⚠️ 必须靠子类重写虚拟函数，不能实例级打补丁（`w.mouseReleaseEvent = ...`）：
     PySide 的 shiboken 不会因此改变 C++ 侧的事件分发（同 `gui.components.ClickableStatusItem`）。
@@ -396,8 +396,9 @@ class AboutDialog(QDialog):
             "不作为任何行政、商业或法律意义上的依据。",
             "· 本工具会创建 / 删除 Windows 防火墙入站阻止规则，"
             "请仅在你有管理权限且获得授权的环境中使用。",
-            "· 包含的第三方组件与许可见程序目录下的 NOTICE"
-            "（Qt for Python LGPLv3、ip2region Apache-2.0 等）。",
+            "· 包含的第三方组件与许可见程序目录下的 NOTICE.txt，"
+            "许可全文在 licenses/ 目录（Qt for Python LGPLv3、"
+            "ip2region Apache-2.0 等）；使用条款见 02_TERMS.txt。",
         ):
             lb = QLabel(line)
             lb.setObjectName("hint")

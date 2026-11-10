@@ -1,8 +1,8 @@
 """PortGuard — 设置页
 
 布局依据 _design/02_ux_spec.md：
-  · 6 组竖排（约 1780px，要滚 2.4 屏）改成 **3 个下划线 tab** —— 服务与采集 /
-    防护与告警 / 数据与离线库；
+  · 6 组竖排（约 1780px，要滚 2.4 屏）改成 **4 个胶囊页签** —— 服务与采集 /
+    防护与告警 / 数据与离线库 / 操作审计；
   · 标签列固定 128px 右对齐，所有控件左缘落在同一条竖线（P1-5）；
   · 自动封禁警告**只在开关打开时**出现在表单里，不常驻；
   · 「未保存」标记：任一控件改动即在标题区亮起，保存后熄灭（P1-12）。
@@ -704,7 +704,7 @@ class SettingsPage(QWidget):
         xdb.add("同步进度", (self.xdb_bar, self.lbl_xdb_progress))
 
         # 存成属性便于自检/自动化测试直接触发
-        self.btn_xdb_check = QPushButton("立即检查更新")
+        self.btn_xdb_check = QPushButton("检查离线库更新")
         self.btn_xdb_check.setObjectName("btn_outline")
         self.btn_xdb_check.clicked.connect(self.xdb_check_requested.emit)
         self.btn_xdb_sync = QPushButton("立即同步")
