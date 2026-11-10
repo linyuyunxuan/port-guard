@@ -43,7 +43,7 @@ from core.rule_engine import get_engine
 
 app_main._init_backend()
 check("后端初始化（日志/数据库/设置缓存/批量写入器）", cfg.is_warmed())
-check("APP_VERSION", APP_VERSION == "1.9.2", APP_VERSION)
+check("APP_VERSION", APP_VERSION == "1.9.3", APP_VERSION)
 check("作者信息已配置", bool(APP_AUTHOR and APP_CONTACT), f"{APP_AUTHOR} / {APP_CONTACT}")
 
 # 自检期间必须关掉自动封禁与告警声音：本脚本会喂入「恶意样本」，

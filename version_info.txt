@@ -11,8 +11,8 @@
 # VarStruct 的 Translation [2052, 1200] 必须成对。改语言时两处一起改。
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(1, 9, 2, 0),
-        prodvers=(1, 9, 2, 0),
+        filevers=(1, 9, 3, 0),
+        prodvers=(1, 9, 3, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -28,12 +28,12 @@ VSVersionInfo(
                     [
                         StringStruct("CompanyName", "林玉云轩"),
                         StringStruct("FileDescription", "PortGuard 端口访问防御工具"),
-                        StringStruct("FileVersion", "1.9.2"),
+                        StringStruct("FileVersion", "1.9.3"),
                         StringStruct("InternalName", "PortGuard"),
                         StringStruct("LegalCopyright", "Copyright (C) 2026 林玉云轩"),
                         StringStruct("OriginalFilename", "PortGuard.exe"),
                         StringStruct("ProductName", "PortGuard"),
-                        StringStruct("ProductVersion", "1.9.2"),
+                        StringStruct("ProductVersion", "1.9.3"),
                         StringStruct(
                             "Comments", "作者：林玉云轩　联系方式：1416161819"
                         ),
