@@ -18,7 +18,7 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from app import audit, maintenance
-from core import firewall, xdb_updater
+from core import firewall, policy_snapshot, xdb_updater
 from core import settings as cfg
 from core.config import (
     BAN_DURATION_TIER_DEFAULTS,
@@ -51,6 +51,7 @@ from gui.widgets import CONTENT_MAX_W, ToggleSwitch, WarnBanner
 from qtcompat import (
     QApplication,
     QComboBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -171,10 +172,74 @@ class _Panel(QFrame):
         self._row += 1
 
 
+def _policy_export(parent) -> None:
+    """导出策略快照：只带规则 / 名单 / 策略设置，不含运行数据与凭据。"""
+    name = "portguard-policy-" + datetime.datetime.now().strftime("%Y%m%d") + ".json"
+    path, _ = QFileDialog.getSaveFileName(parent, "导出策略快照", name, "JSON 文件 (*.json)")
+    if not path:
+        return
+    try:
+        data = policy_snapshot.export_to(path)
+    except Exception as e:
+        QMessageBox.warning(parent, "导出失败", f"策略快照导出失败：{e}")
+        return
+    with contextlib.suppress(Exception):
+        audit.record(audit.ACTION_SETTINGS_SAVE, summary="导出策略快照", detail=path)
+    QMessageBox.information(
+        parent,
+        "导出完成",
+        f"已导出 {len(data['settings'])} 项策略设置、"
+        f"{len(data['blacklist'])} 条黑名单、{len(data['whitelist'])} 条白名单。\n\n{path}",
+    )
+
+
+def _policy_import(parent) -> None:
+    """导入策略快照：先确认，再备份；失败自动回滚（见 core.policy_snapshot）。"""
+    path, _ = QFileDialog.getOpenFileName(parent, "导入策略快照", "", "JSON 文件 (*.json)")
+    if not path:
+        return
+    if (
+        QMessageBox.question(
+            parent,
+            "导入策略快照",
+            "将用快照里的规则、黑白名单与策略设置覆盖本机配置。\n"
+            "导入前会自动备份当前配置，失败可回滚；运行数据（事件 / 封禁 / 审计）不受影响。\n\n继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        != QMessageBox.StandardButton.Yes
+    ):
+        return
+    res = policy_snapshot.import_from(path)
+    if res["ok"]:
+        applied = res["applied"]
+        with contextlib.suppress(Exception):
+            audit.record(
+                audit.ACTION_SETTINGS_SAVE,
+                summary=f"导入策略快照（设置 {applied['settings']} 项）",
+                detail=res["backup_dir"],
+            )
+        loader = getattr(parent, "load", None)
+        if callable(loader):
+            with contextlib.suppress(Exception):
+                loader()
+        QMessageBox.information(
+            parent,
+            "导入完成",
+            f"策略已导入：设置 {applied['settings']} 项、"
+            f"黑名单 {applied['blacklist']} 条、白名单 {applied['whitelist']} 条。\n"
+            f"导入前备份：{res['backup_dir']}\n"
+            "部分设置可能需重启服务后完全生效。",
+        )
+    else:
+        QMessageBox.warning(parent, "导入未完成", res["error"] or "未知错误")
+
+
 class SettingsPage(QWidget):
     settings_saved = Signal()
     xdb_sync_requested = Signal(bool)  # 立即同步（True=强制重下）
     xdb_check_requested = Signal()  # 只检查
+    geo_reload_requested = Signal()  # 不联网、不重启，重新读取本机离线库
     logs_open_requested = Signal()
     watch_changed = Signal()  # 本机端口观察的开关/参数发生变化
     # 数据库维护（VACUUM / 重建索引 / 备份 / 恢复）在后台线程跑，结果同样经信号回主线程
@@ -361,8 +426,9 @@ class SettingsPage(QWidget):
 
         hint = QLabel(
             "封禁时长只记在本程序里，防火墙规则本身没有「到期时间」——"
-            "程序没运行，到期的封禁就不会被解除。开启后每次登录会自动启动"
-            "（会请求一次管理员权限），启动 1.5 秒内补跑到期巡检与黑名单补封。"
+            "程序没运行，到期的封禁就不会被解除。开启后每次登录以观察模式自动启动"
+            "（普通权限、不弹 UAC），启动 1.5 秒内补跑到期巡检与黑名单补封；"
+            "需要开机即写防火墙，请用随包的 start-as-admin.bat 配置启动项。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -386,7 +452,9 @@ class SettingsPage(QWidget):
             return
         if preview is not None:
             if preview:
-                self.lbl_autostart.setText("保存后写入登录启动项：登录时自动启动并请求管理员权限")
+                self.lbl_autostart.setText(
+                    "保存后写入登录启动项：登录时以观察模式自动启动（不弹 UAC）"
+                )
             else:
                 self.lbl_autostart.setText("保存后移除登录启动项：重启后需要手动启动")
             return
@@ -713,6 +781,14 @@ class SettingsPage(QWidget):
         self.btn_xdb_force = QPushButton("强制重新下载")
         self.btn_xdb_force.setObjectName("btn_outline")
         self.btn_xdb_force.clicked.connect(self._force_sync)
+        # 启动期加载失败的自助重试：不联网、不重启，纯本地热重载
+        self.btn_geo_reload = QPushButton("重新加载定位库")
+        self.btn_geo_reload.setObjectName("btn_outline")
+        self.btn_geo_reload.setToolTip(
+            "不联网、不重启：重新读取本机离线库文件。\n"
+            "用于修复启动期「定位库 读取失败」，不影响现有配置。"
+        )
+        self.btn_geo_reload.clicked.connect(self.geo_reload_requested.emit)
         # 流程说明进 tooltip（P1-4）：它只在「想知道为什么这么慢」时才需要
         sync_tip = (
             "同步流程：版本指纹比对 → 多源下载 → 大小 / 内容指纹 / xdb 结构 / 抽样查询"
@@ -721,7 +797,10 @@ class SettingsPage(QWidget):
         )
         for b in (self.btn_xdb_check, self.btn_xdb_sync, self.btn_xdb_force):
             b.setToolTip(sync_tip)
-        xdb.add("", (self.btn_xdb_check, self.btn_xdb_sync, self.btn_xdb_force))
+        xdb.add(
+            "",
+            (self.btn_xdb_check, self.btn_xdb_sync, self.btn_xdb_force, self.btn_geo_reload),
+        )
 
         # ── 备份与回滚（换库前自动备份，这里把它们列出来供手动回滚）──
         restore_tip = (
@@ -958,6 +1037,26 @@ class SettingsPage(QWidget):
         panel.add("数据库大小", self.lbl_dbsize)
         panel.add("数据库文件", self.lbl_dbpath)
         panel.add("", (self.btn_db_vacuum, self.btn_db_reindex, self.btn_db_backup))
+
+        # 策略快照：逐台交付时用一份 JSON 复制规则 / 名单 / 策略设置。
+        # 与上面的「整库备份」刻意分开：整库备份带事件与审计，不能跨机器复制。
+        snap_title = QLabel("策略快照（逐台复制配置）")
+        snap_title.setObjectName("panel_title")
+        panel.add_block(snap_title)
+        self.btn_policy_export = QPushButton("导出策略快照")
+        self.btn_policy_export.setObjectName("btn_outline")
+        self.btn_policy_export.setToolTip(
+            "导出规则配置、黑白名单与策略设置。不含事件 / 封禁 / 审计等运行数据，"
+            "也不含 Webhook 地址、镜像代理等本机凭据。"
+        )
+        self.btn_policy_export.clicked.connect(lambda: _policy_export(self))
+        self.btn_policy_import = QPushButton("导入策略快照")
+        self.btn_policy_import.setObjectName("btn_outline")
+        self.btn_policy_import.setToolTip(
+            "导入前自动备份当前配置，失败可回滚；导入后建议重启服务使全部设置生效。"
+        )
+        self.btn_policy_import.clicked.connect(lambda: _policy_import(self))
+        panel.add("", (self.btn_policy_export, self.btn_policy_import))
 
         self.lbl_db_state = QLabel("")
         self.lbl_db_state.setObjectName("form_hint")

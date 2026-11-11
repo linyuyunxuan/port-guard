@@ -8,8 +8,10 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- 需要修改 Windows 防火墙，声明以管理员身份运行 -->
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <!-- 默认普通权限（只读 / 观察模式）：查看采集、风险、历史与统计不需要管理员。
+             写防火墙的动作由用户在界面里主动触发「以管理员身份重启」，
+             或用随包的 start-as-admin.bat 启动完整模式。不在后台静默提权。 -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>

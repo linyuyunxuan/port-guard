@@ -41,7 +41,7 @@ def test_delivery_files_exist():
     assert (ROOT / "NOTICE").is_file()
     for rel in pack_release.DELIVERY_FILES:
         assert (DELIVERY / rel).is_file(), f"缺少交付材料：{rel}"
-    assert len(pack_release.DELIVERY_FILES) == 8
+    assert len(pack_release.DELIVERY_FILES) == 9
 
 
 def test_license_texts_are_official_full_texts():
@@ -66,6 +66,13 @@ def test_delivery_docs_contain_required_facts():
         "--diag --quiet",
         "xdb_auto_sync",
         "立即同步",
+        "asInvoker",
+        "观察模式",
+        "start-as-admin.bat",
+        "重新加载定位库",
+        "封禁状态读取失败",
+        "策略快照",
+        "导出 CSV",
     ):
         assert fact in deploy, f"部署说明漏了关键事实：{fact}"
 
@@ -74,12 +81,16 @@ def test_delivery_docs_contain_required_facts():
         assert fact in terms
 
     integrity = _doc("03_INTEGRITY.txt")
-    for fact in ("Authenticode", "certutil", "SHA256", "requireAdministrator"):
+    for fact in ("Authenticode", "certutil", "SHA256", "asInvoker", "start-as-admin.bat"):
         assert fact in integrity
-    # 不能把「未签名」写成「已签名」
+    # 不能把「未签名」写成「已签名」，也不能把「全进程提权」写成现状
     assert "**未进行 Authenticode 数字签名**" in integrity
+    assert "requireAdministrator（全进程" not in integrity
 
-    assert f"v{APP_VERSION} · 交付合规修订" in _doc("04_CHANGELOG.txt")
+    changelog = _doc("04_CHANGELOG.txt")
+    assert f"v{APP_VERSION} ·" in changelog
+    assert "只读 / 观察模式" in changelog
+    assert "策略快照" in changelog
 
 
 # ── 对外口径与实物一致 ──
@@ -110,7 +121,9 @@ def test_readme_has_no_stale_claims():
         "PySide2 5.15.2.1",
         "十四、对外交付包与客户材料",
         "xdb_auto_sync",
-        "requireAdministrator",
+        "asInvoker",
+        "start-as-admin.bat",
+        "观察模式",
     ):
         assert fact in text
 
@@ -171,7 +184,7 @@ def test_version_sources_match_app_version():
     assert f"filevers={tuple_text}" in version_info
     assert f"prodvers={tuple_text}" in version_info
 
-    assert f"v{APP_VERSION} · 交付合规修订" in _doc("04_CHANGELOG.txt")
+    assert f"v{APP_VERSION} ·" in _doc("04_CHANGELOG.txt")
 
 
 # ── 打包产物：交付材料是固定组成 ──
@@ -201,6 +214,7 @@ def test_pack_injects_delivery_materials(tmp_path: Path):
         "PortGuard/02_TERMS.txt",
         "PortGuard/03_INTEGRITY.txt",
         "PortGuard/04_CHANGELOG.txt",
+        "PortGuard/start-as-admin.bat",
         "PortGuard/licenses/LICENSE-LGPL-3.0.txt",
         "PortGuard/licenses/LICENSE-GPL-3.0.txt",
         "PortGuard/licenses/LICENSE-Apache-2.0.txt",
@@ -216,6 +230,10 @@ def test_pack_injects_delivery_materials(tmp_path: Path):
         assert zf.read("PortGuard/NOTICE.txt").startswith(b"\xef\xbb\xbf")
         assert b"PySide2 5.15.2.1" in zf.read("PortGuard/NOTICE.txt")
         assert not zf.read("PortGuard/licenses/LICENSE-LGPL-3.0.txt").startswith(b"\xef\xbb\xbf")
+        # 启动器必须保持 CRLF + 纯 ASCII + 无 BOM，否则中文系统会整行乱飞
+        bat = zf.read("PortGuard/start-as-admin.bat")
+        assert b"\r\n" in bat and bat.count(b"\r\n") == bat.count(b"\n")
+        assert all(x < 128 for x in bat) and not bat.startswith(b"\xef\xbb\xbf")
         assert (
             zf.read("PortGuard/VERSION.txt").decode("utf-8-sig").strip()
             == f"PortGuard v{APP_VERSION}"

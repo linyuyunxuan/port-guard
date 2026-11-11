@@ -301,7 +301,12 @@ class AboutDialog(QDialog):
     快捷键帮助据此生成切页条目（见 `build_shortcut_rows`）。
     """
 
-    def __init__(self, nav_items: List[Tuple[str, str]], parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        nav_items: List[Tuple[str, str]],
+        parent: Optional[QWidget] = None,
+        initial_tab: int = 0,
+    ):
         super().__init__(parent)
         self._nav_items = nav_items
         self.setWindowTitle(f"关于 {APP_NAME}")
@@ -316,10 +321,14 @@ class AboutDialog(QDialog):
         lay.setSpacing(12)
         lay.addLayout(self._header())
 
-        tabs = capsule_tabs("关于")
-        tabs.addTab(self._tab_about(), "关于")
-        tabs.addTab(self._tab_shortcuts(), "快捷键")
-        lay.addWidget(tabs, 1)
+        self.tabs = capsule_tabs("关于")
+        self.tabs.addTab(self._tab_about(), "关于")
+        self.tabs.addTab(self._tab_shortcuts(), "快捷键")
+        self.tabs.addTab(self._tab_permissions(), "权限与能力")
+        # 顶栏「权限」直接落到第三栏，避免用户点开还要自己找
+        if initial_tab:
+            self.tabs.setCurrentIndex(initial_tab)
+        lay.addWidget(self.tabs, 1)
 
         lay.addLayout(self._buttons())
 
@@ -406,6 +415,53 @@ class AboutDialog(QDialog):
             lb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             box.addWidget(lb)
         return w
+
+    def _tab_permissions(self) -> QWidget:
+        """权限与能力的**单点**自助说明（顶栏「权限」直接落到这一栏）。
+
+        以前「普通权限能干什么」散落在 6 个页面里各写一句，且交付 exe 强制
+        提权导致这些说明一条都看不到。默认改回普通权限后，这里就是唯一口径：
+        哪些能用、哪些要管理员、怎么切换、切换前残留规则还在不在。
+        """
+        from core.firewall import is_admin
+
+        area, lay = _scroll_page()
+
+        state = _InfoPanel("当前状态")
+        state.add(
+            "运行模式",
+            "管理员（可写防火墙）" if is_admin() else "普通权限 · 观察模式",
+        )
+        state.add("程序版本", f"v{APP_VERSION}")
+        lay.addWidget(state)
+
+        w = QFrame()
+        w.setObjectName("panel")
+        box = QVBoxLayout(w)
+        box.setContentsMargins(14, 10, 14, 12)
+        box.setSpacing(6)
+        t = QLabel("能力边界")
+        t.setObjectName("panel_title")
+        box.addWidget(t)
+        for line in (
+            "· 观察模式（默认）：实时监控、风险事件、历史访问、IP 查询、规则配置、"
+            "统计与导出、操作审计都能正常使用；程序不会写 Windows 防火墙。",
+            "· 需要管理员：确认封禁 / 解封、一键全部解封、到期自动删除规则、"
+            "开启防火墙安全日志与安全启用防火墙、名单规则写入。",
+            "· 如何切换：在封禁管理页点「以管理员身份重启」，或退出后用随包的"
+            " start-as-admin.bat 启动。每次提权都会弹 UAC 由你确认，"
+            "程序不会在后台静默提权。",
+            "· 观察模式下「已到期但解不掉」的防火墙规则仍在生效，封禁管理页会显示条数与原因。",
+            "· 部署与权限边界的完整说明见 01_DEPLOY.txt 与 03_INTEGRITY.txt。",
+        ):
+            lb = QLabel(line)
+            lb.setObjectName("hint")
+            lb.setWordWrap(True)
+            lb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            box.addWidget(lb)
+        lay.addWidget(w)
+        lay.addStretch(1)
+        return area
 
     # ── 快捷键 ──
     def _tab_shortcuts(self) -> QWidget:

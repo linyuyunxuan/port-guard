@@ -11,11 +11,12 @@
   · 同名 `.sha256` 文件内容是 `<小写哈希>  <文件名>`，与 `sha256sum -c` 兼容。
 
 交付合规材料（v1.9.4 起，别删）：
-  · `delivery/` 下的客户文档与许可全文、仓库根的 `NOTICE`、`VERSION.txt`
-    都是**交付包的固定组成**，缺任何一份都直接拒绝出包；
+  · `delivery/` 下的客户文档、许可全文与管理员启动器、仓库根的 `NOTICE`、
+    `VERSION.txt` 都是**交付包的固定组成**，缺任何一份都直接拒绝出包；
   · `SHA256SUMS.txt` 由脚本按包内实际内容生成，客户可逐文件核对；
   · 中文客户文档在包内写成 UTF-8 BOM，避免旧版记事本按 ANSI 显示乱码；
-    许可全文保持上游原字节，便于与官方 wheel 逐字比对。
+    许可全文保持上游原字节，便于与官方 wheel 逐字比对；
+    `start-as-admin.bat` 保持 CRLF + 纯 ASCII + 无 BOM（LF 会让中文注释字节错位）。
 
 用法：
     python tools/pack_release.py                       # dist/PortGuard → dist/PortGuard-v1.3.0.zip
@@ -46,6 +47,7 @@ DELIVERY_FILES: Tuple[str, ...] = (
     "02_TERMS.txt",
     "03_INTEGRITY.txt",
     "04_CHANGELOG.txt",
+    "start-as-admin.bat",
     "licenses/LICENSE-LGPL-3.0.txt",
     "licenses/LICENSE-GPL-3.0.txt",
     "licenses/LICENSE-Apache-2.0.txt",

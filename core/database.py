@@ -1283,9 +1283,27 @@ def list_all_active_bans() -> List[BanRecord]:
     return query_bans(status=STATUS_ACTIVE, limit=100000)
 
 
+#: 最近一次「生效中封禁」查询失败的原因；空串 = 成功或尚未查询。
+#: `risk_events_page()` 为了保住事件列表会在内部吞掉这个异常，界面必须能
+#: 从这里读出「其实没读到」，否则会把失败画成「未封禁」（效果验收事故）。
+_BAN_STATE_ERROR = ""
+
+
+def ban_state_error() -> str:
+    """供 GUI 区分「真的没有封禁」与「封禁态没读出来」。"""
+    return _BAN_STATE_ERROR
+
+
 def _active_ban_map(conn: sqlite3.Connection) -> Dict[str, BanRecord]:
-    rows = conn.execute("SELECT * FROM ban_list WHERE status = ?", (STATUS_ACTIVE,))
-    return {b.ip: b for b in (_row_to_ban(r) for r in rows)}
+    global _BAN_STATE_ERROR
+    try:
+        rows = conn.execute("SELECT * FROM ban_list WHERE status = ?", (STATUS_ACTIVE,))
+        result = {b.ip: b for b in (_row_to_ban(r) for r in rows)}
+        _BAN_STATE_ERROR = ""
+        return result
+    except Exception as e:
+        _BAN_STATE_ERROR = str(e) or type(e).__name__
+        raise
 
 
 def active_ban_ip_map() -> Dict[str, BanRecord]:

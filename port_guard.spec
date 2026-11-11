@@ -8,14 +8,16 @@ PortGuard PyInstaller 打包配置
 说明：
 - xdb 定位库与默认 rules.json 作为只读资源打进包内（首次运行会拷到 %APPDATA%/PortGuard）
 - 推荐 onedir 模式（启动更快）；如需单文件，把 EXE(...) 的 exclude_binaries / COLLECT 段改为 onefile 写法
-- uac_admin=True 会要求管理员权限；若只想默认普通权限，把 uac_admin 改为 False，
-  并用 start_as_admin.bat / 界面上的「以管理员身份重启」按钮在需要时提权
+- uac_admin=False + app.manifest 的 asInvoker：默认以普通权限启动（只读 / 观察模式）。
+  写防火墙前由用户在界面里主动点「以管理员身份重启」，或用随包的
+  start-as-admin.bat 直接以管理员身份启动。绝不在后台静默提权。
 
 打包产物的运行验证（2026-10-16 实做过）：
 - **`PortGuard.exe --diag --quiet`** —— 打印系统内部版本、逐个探测运行库、扫描产物依赖闭包，
   退出码 0 即通过。这是「拷到别的电脑跑不起来」时的第一手证据。
-- `uac_admin=True` 的 exe 从非提权进程启动会直接被系统拒绝（ERROR_ELEVATION_REQUIRED），
-  自动化验证请用 `tools/verify_exe.py`：它会自建 `uac_admin=False` 的冒烟产物再跑。
+- 产物从非提权进程也能直接启动（观察模式），因此自动化验证可以直接跑
+  `PortGuard.exe --diag --quiet` 与不带参数的完整启动，不再需要另造冒烟变体。
+  `tools/verify_exe.py` 仍可用 `--no-elevate` 跳过它自带的提权步骤。
 - 判定「跑起来了」不能只看进程存活：窗口化程序崩溃时会弹错误框并一直卡住，进程同样“活着”。
   可靠做法是看 %APPDATA%/PortGuard/logs/portguard.log 里出现
   「PortGuard 后端就绪（配置项 N 条）」且没有「界面启动失败」。
@@ -156,7 +158,7 @@ exe = EXE(
     # exe 的「属性 → 详细信息」：作者 / 联系方式 / 版本。内容与 core/config.py
     # 的一致性由 tests/test_version_info.py 守着（改版本只改一处会红）。
     version="version_info.txt" if os.path.exists("version_info.txt") else None,
-    uac_admin=True,
+    uac_admin=False,
 )
 
 coll = COLLECT(

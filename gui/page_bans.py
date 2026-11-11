@@ -64,6 +64,7 @@ from gui.widgets import (
     align_headers,
     badge_item,
     make_item,
+    set_ban_state_banner,
 )
 from qtcompat import (
     QComboBox,
@@ -338,6 +339,12 @@ class BansPage(BaseTablePage):
         root.addWidget(self.fw_banner)
         self._refresh_fw_banner()
 
+        # 封禁态读取失败：建议表 / 记录页的「未封禁」都不能作为判断依据
+        self._ban_state_banner = WarnBanner("", "重试", C.danger, level="danger")
+        self._ban_state_banner.action_clicked.connect(self.refresh)
+        self._ban_state_banner.setVisible(False)
+        root.addWidget(self._ban_state_banner)
+
         # 结果区：「待确认建议」与「封禁记录」拆成独立分页（2026-11-10）。
         # 原来是 QSplitter 上下堆叠：两块互相抢高度，0 条建议时还得把上半区
         # 折叠成 80px 的一行，滚动/拖动时标题与表格容易错位。分页后各占满
@@ -417,9 +424,9 @@ class BansPage(BaseTablePage):
         放在界面线程里就是每刷一次卡一下。缓存过期后由后台线程补一次探测，
         回来再重画；探测失败保持原值，绝不当成「已关闭」。
         """
-        if not firewall.is_admin():
-            self.fw_banner.setVisible(False)
-            return
+        # v1.9.5 起普通权限是默认形态：防火墙开关状态是只读探测，观察模式下
+        # 也必须显示。藏掉它等于让客户以为「已封禁」成立，实测规则一条都不参与过滤。
+        # 「安全启用防火墙」的写操作仍会在点击时提示需要管理员。
         self._probe_fw_state()
         self._render_fw_banner()
 
@@ -586,10 +593,9 @@ class BansPage(BaseTablePage):
             head.addWidget(w)
         lay.addLayout(head)
 
-        self.sug_empty = QLabel("没有待确认建议 · 规则引擎未发现需要封禁的高危 IP")
-        self.sug_empty.setStyleSheet(
-            f"color:{C.text_muted};font-size:13.5px;padding:0 16px 14px 16px;"
-        )
+        # 与其余列表页共用统一空态组件；「读取失败」由上方横幅负责，
+        # 这里只表达「确实没有待确认建议」。
+        self.sug_empty = EmptyState("没有待确认建议", "规则引擎未发现需要封禁的高危 IP")
         self.sug_empty.setVisible(False)
         lay.addWidget(self.sug_empty)
 
@@ -860,9 +866,12 @@ class BansPage(BaseTablePage):
         # 按钮要据此显示「已封禁」而不是让人再点一次
         try:
             self._banned = active_ban_ip_map()
-        except Exception:
-            log.exception("加载生效中的封禁失败（建议表按钮将按「未封禁」渲染）")
+            set_ban_state_banner(getattr(self, "_ban_state_banner", None), "")
+        except Exception as e:
+            # 保留建议列表可见，但「未封禁」必须标注为不可信（H6）
+            log.exception("加载生效中的封禁失败（页面将显示读取失败横幅）")
             self._banned = {}
+            set_ban_state_banner(getattr(self, "_ban_state_banner", None), str(e))
         # 已经封掉的 IP 不再出现在「待确认的封禁建议」里（2026-10-22 用户反馈）。
         # 建议表的语义是「等你拿主意」，而这类 IP 的主意已经拿完了 —— 留着只会
         # 让人再点一次「确认封禁」，然后被告知「该 IP 已在封禁中」。
@@ -1359,8 +1368,9 @@ class BansPage(BaseTablePage):
         展示上不加「网段」二字 —— IP 列本身就写着 `/24`，加字会把
         归属地列挤到省略号；tooltip 里说明清楚即可。
 
-        查询失败（离线库损坏 / 非法字符串）一律按「未知」处理：
-        归属地只是辅助信息，不能因为它让整页刷不出来。
+        查询失败（离线库损坏 / 非法字符串）记 `geo_failed`，渲染时写「读取失败」；
+        「未知」只留给「查了但库里没有」（内网 / 保留段 / 未收录）。两者混为一谈
+        会让客户以为只是这个 IP 没资料，实际是离线库根本没读出来。
         """
         import ipaddress
 
@@ -1377,9 +1387,11 @@ class BansPage(BaseTablePage):
                     probe = ""
             try:
                 geo = loc.lookup(probe) if probe else None
+                b.geo_failed = False
             except Exception:
                 log.exception("查询封禁记录归属地失败 ip=%s", ip)
                 geo = None
+                b.geo_failed = True
             b.geo = geo
             b.geo_is_network = "/" in ip
 
@@ -1439,17 +1451,19 @@ class BansPage(BaseTablePage):
                     i, COL_BAN_REASON, make_item(b.reason or "-", tip=b.reason or "")
                 )
                 # 归属地：与建议表同一套 `region_short`（省 市 / 国家 城市）。
-                # 查不到（内网、保留段、库未收录）一律写「未知」而不是留空 ——
-                # 空白格会被当成"这一列没数据"，而「未知」说明是**查了没查到**。
+                # 三种状态分开写：读取失败 / 查了没收录（未知）/ 查到了。
+                # 空白格会被当成「这一列没数据」，而读取失败必须能被截图留证。
                 geo = getattr(b, "geo", None)
-                geo_tip = geo.display if geo else "未知"
+                geo_failed = bool(getattr(b, "geo_failed", False))
+                geo_text = "读取失败" if geo_failed else (geo.region_short if geo else "未知")
+                geo_tip = (
+                    "归属地查询失败，请检查离线库"
+                    if geo_failed
+                    else (geo.display if geo else "未知")
+                )
                 if getattr(b, "geo_is_network", False):
                     geo_tip += "（网段记录，按网段地址查询）"
-                self.table.setItem(
-                    i,
-                    COL_BAN_GEO,
-                    make_item(geo.region_short if geo else "未知", tip=geo_tip),
-                )
+                self.table.setItem(i, COL_BAN_GEO, make_item(geo_text, tip=geo_tip))
                 self.table.setItem(
                     i,
                     COL_BAN_SOURCE,

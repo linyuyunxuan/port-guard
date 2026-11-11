@@ -111,7 +111,7 @@ def is_admin() -> bool:
 
 
 def elevate_and_wait(exe: str, out_path: str, timeout: int) -> int:
-    """以管理员身份重启自己（exe 清单要求提权，从非提权进程启动会被系统直接拒绝）。"""
+    """以管理员身份重启自己（exe 默认观察模式；本验证脚本的真防火墙用例需要高权限）。"""
     if os.path.exists(out_path):
         os.remove(out_path)
 

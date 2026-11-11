@@ -6,12 +6,17 @@
 
 这个 tab **只读**，且刻意不放任何「删除 / 清空」按钮 —— 审计表的价值
 就在于它不能被使用者自己抹掉，想删只能靠保留期（`audit_retention_days`）
-到期被定期清理带走。
+到期被定期清理带走。v1.9.5 起增加「导出 CSV」：只读不影响留痕，
+但记录可以带出本机做多机汇总 / 合规归档。
 """
 
-from typing import Any, Dict
+import socket
+import time
+from typing import Any, Dict, List
 
 from app import audit
+from app.export_csv import export_rows
+from core.config import APP_VERSION
 from core.database import count_audit, query_audit
 from core.logger import get_logger
 from gui.theme import C
@@ -19,10 +24,12 @@ from gui.widgets import align_headers, make_item
 from qtcompat import (
     QAbstractItemView,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     Qt,
     QTableWidget,
@@ -41,6 +48,28 @@ AUDIT_RESULT_LABEL = {
     "fail": "失败",
     "skipped": "未执行",
 }
+
+#: 导出比界面多两列：多机汇总时只靠 Windows 用户名分不清是哪台机器产生的记录
+AUDIT_EXPORT_HEADERS = [*AUDIT_HEADERS, "主机名", "程序版本"]
+
+
+def audit_csv_row(r: Dict[str, Any], host: str = "", version: str = APP_VERSION) -> List[str]:
+    """审计导出的单行（纯函数，便于回归）。
+
+    「操作者」用原始 actor 而不是界面上的中文别名：多机汇总时
+    `system` / `http:1.2.3.4` 这类来源不能被翻译掉。
+    """
+    result = str(r.get("result") or "")
+    return [
+        audit.fmt_ts(r.get("ts")),
+        str(r.get("actor") or ""),
+        audit.action_label(str(r.get("action") or "")),
+        _audit_target(r),
+        str(r.get("summary") or ""),
+        AUDIT_RESULT_LABEL.get(result, result),
+        host or socket.gethostname(),
+        version,
+    ]
 
 
 def _audit_target(row: Dict[str, Any]) -> str:
@@ -111,6 +140,16 @@ class AuditPanel(QWidget):
         bar.addWidget(self.ed_kw)
         bar.addWidget(b_search)
         bar.addWidget(b_refresh)
+
+        self.btn_export = QPushButton("导出 CSV")
+        self.btn_export.setObjectName("btn_outline")
+        self.btn_export.setFixedWidth(88)
+        self.btn_export.setToolTip(
+            "导出当前筛选条件下的全部审计记录（不受分页限制）。\n"
+            "CSV 额外带「主机名 / 程序版本」两列，便于多机汇总与合规归档。"
+        )
+        self.btn_export.clicked.connect(self._export_csv)
+        bar.addWidget(self.btn_export)
         bar.addStretch(1)
         lay.addLayout(bar)
 
@@ -160,6 +199,7 @@ class AuditPanel(QWidget):
             "记录谁在何时做了什么：本机操作记 Windows 用户名，"
             "程序自动（到期巡检 / 定期清理 / 自动封禁）记 system，"
             "老库里还留着 1.1.0 之前 HTTP 上报触发的 http:<来源IP>。"
+            "导出 CSV 会额外带上主机名与程序版本，便于多机汇总时区分主体。"
         )
         self.lbl_hint.setObjectName("form_hint")
         self.lbl_hint.setWordWrap(True)
@@ -175,6 +215,30 @@ class AuditPanel(QWidget):
     def _goto_page(self, page: int) -> None:
         self._page = max(0, int(page))
         self.refresh()
+
+    def _export_csv(self) -> None:
+        """按当前筛选条件导出**全部**审计记录（只读，不改留痕）。"""
+        actor = self.cb_actor.currentData() or ""
+        action = self.cb_action.currentData() or ""
+        kw = self.ed_kw.text().strip()
+        host = socket.gethostname()
+        name = f"portguard-audit-{host}-{time.strftime('%Y%m%d')}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "导出审计记录", name, "CSV 文件 (*.csv)")
+        if not path:
+            return
+        try:
+            rows = query_audit(limit=100000, offset=0, actor=actor, action=action, keyword=kw)
+            n = export_rows(
+                path,
+                AUDIT_EXPORT_HEADERS,
+                (audit_csv_row(r, host) for r in rows),
+                title="审计记录",
+            )
+        except Exception as e:
+            log.exception("导出审计记录失败")
+            QMessageBox.warning(self, "导出失败", f"审计记录导出失败：{e}")
+            return
+        QMessageBox.information(self, "导出完成", f"已导出 {n} 条审计记录到：\n{path}")
 
     def refresh(self) -> None:
         """按当前条件重查一页审计记录"""

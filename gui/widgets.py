@@ -882,3 +882,28 @@ class RefreshGuard:
             text = ""
         stamp = time.strftime("%H:%M:%S")
         self._label.setText(f"{text} · 更新于 {stamp}" if text else f"更新于 {stamp}")
+
+
+#: 「封禁态读取失败」统一文案。三个列表页共用一条口径，别各写一句。
+BAN_STATE_FAIL_TEXT = (
+    "封禁状态读取失败：列表里的「未封禁 / 可封禁」暂不能作为判断依据。"
+    "请点「重试」刷新，或查看运行日志；恢复前不要据此认定防护未生效或已生效。"
+)
+
+
+def set_ban_state_banner(banner, err: str) -> None:
+    """把「读取失败」与「确实没有封禁」分开显示（v1.9.5 / H6）。
+
+    banner 允许为 None：多个页面方法被测调用「最小宿主桩」直接以未绑定方法
+    执行（见 tests/test_merge_display.py），桩里没有横幅控件，此时静默跳过展示，
+    但不能因此把失败重新吞掉 —— 调用方仍要记日志并保留错误状态。
+
+    「重试」动作由页面在构造时连接到自己的 refresh，这里不重复连线。
+    """
+    if banner is None:
+        return
+    if not err:
+        banner.setVisible(False)
+        return
+    banner.set_text(BAN_STATE_FAIL_TEXT)
+    banner.setVisible(True)

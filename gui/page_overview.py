@@ -376,15 +376,17 @@ class OverviewPage(QWidget):
             }.get(verdict, "检测中…")
             watching = port_watcher.get_watcher().running  # running 是 @property
             admin = firewall.is_admin()
-            checks = (verdict == firewall.STATE_OK, watching, admin)
+            # 权限不参与健康分：v1.9.5 起普通权限是默认形态，若仍算扣分项，
+            # 每个观察模式客户都会看到「2/3」并误判防护没生效。
+            checks = (verdict == firewall.STATE_OK, watching)
             ok = sum(1 for v in checks if v)
-            num.setText(f"{ok}/3")
+            num.setText(f"{ok}/2")
+            mode = "管理员（可封禁）" if admin else "观察模式（只读）"
             note.setText(
-                f"防火墙 {fw_txt} · 本机观察 {'运行中' if watching else '未启动'}"
-                f" · 权限 {'管理员' if admin else '普通权限'}"
+                f"防火墙 {fw_txt} · 本机观察 {'运行中' if watching else '未启动'} · {mode}"
             )
             foot.setText(
-                "防火墙结论由后台检测推送 · 本机观察与权限状态实时刷新 · "
+                "健康分只看防火墙与本机观察 · 权限是运行模式说明，不参与评分 · "
                 "未知状态不判为关闭 · 点击查看设置"
             )
             st = port_watcher.get_watcher().stats()

@@ -186,12 +186,13 @@ def test_about_dialog_builds(qapp):
     dlg = AboutDialog(NAV_ITEMS)
     try:
         assert "关于" in dlg.windowTitle()
-        # 两栏：关于 / 快捷键
+        # 三栏：关于 / 快捷键 / 权限与能力（顶栏「权限」直接落到第三栏）
         tab_widgets = dlg.findChildren(QTabWidget)
         assert len(tab_widgets) == 1
         assert [tab_widgets[0].tabText(i) for i in range(tab_widgets[0].count())] == [
             "关于",
             "快捷键",
+            "权限与能力",
         ]
         assert APP_VERSION in dlg.summary_text()
     finally:

@@ -52,9 +52,11 @@ from gui.widgets import (
     EmptyState,
     RefreshGuard,
     RiskBadgeDelegate,
+    WarnBanner,
     align_headers,
     badge_item,
     make_item,
+    set_ban_state_banner,
 )
 from qtcompat import (
     QAbstractItemView,
@@ -277,6 +279,12 @@ class AccessPage(QWidget):
         root.addWidget(head)
 
         root.addLayout(self._build_filters())
+
+        # 封禁态没读出来时必须说清楚，不能让行内菜单照常写「封禁该 IP」
+        self._ban_state_banner = WarnBanner("", "重试", C.danger, level="danger")
+        self._ban_state_banner.action_clicked.connect(self.refresh)
+        self._ban_state_banner.setVisible(False)
+        root.addWidget(self._ban_state_banner)
 
         self.empty = EmptyState("暂无访问记录", "还没有收到任何访问上报")
         self.empty.setVisible(False)
@@ -589,9 +597,12 @@ class AccessPage(QWidget):
         # 一次查询给整页用（逐行查 = 每页 N 次建连）
         try:
             self._banned = active_ban_ip_map()
-        except Exception:
-            log.exception("加载生效中的封禁失败（菜单将按「未封禁」渲染）")
+            set_ban_state_banner(getattr(self, "_ban_state_banner", None), "")
+        except Exception as e:
+            # 保留数据可见，但必须明确「没读到」—— 否则客户会把失败当成「未封禁」
+            log.exception("加载生效中的封禁失败（页面将显示读取失败横幅）")
             self._banned = {}
+            set_ban_state_banner(getattr(self, "_ban_state_banner", None), str(e))
         self._render(rows)
         self._update_pager()
 

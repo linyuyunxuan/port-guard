@@ -11,7 +11,7 @@ import sys
 
 APP_NAME = "PortGuard"
 APP_TITLE = "PortGuard 端口访问防御工具"
-APP_VERSION = "1.9.4"
+APP_VERSION = "1.9.5"
 #: 作者与联系方式。出现在三处，必须是同一个来源（core.config）：
 #: 关于对话框、exe 文件属性（version_info.txt 由本文件同步）、README。
 APP_AUTHOR = "林玉云轩"
@@ -304,8 +304,8 @@ DEFAULT_SETTINGS = {
     "alert_webhook_level": "critical",
     # 运行与守护
     # 开机自启：封禁时长只靠本程序的到点巡检兑现（防火墙规则没有到期时间），
-    # 所以进程没了 = 到期的封禁永远不解除。默认关闭是因为本程序要管理员权限，
-    # 开启后每次登录都会弹一次 UAC，得由用户自己权衡（7×24 服务器通常要开）。
+    # 所以进程没了 = 到期的封禁永远不解除。默认关闭是让用户自己决定是否常驻；
+    # v1.9.5 起开机自启的是普通权限观察模式，不弹 UAC，也不写防火墙规则。
     "autostart_enabled": "0",
     # 数据
     "maintenance_enabled": "1",  # 1=每天到点自动清理（关掉就只保留手动入口）

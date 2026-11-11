@@ -28,6 +28,7 @@ from app import audit
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
 from core.config import LEVEL_LABEL, LEVEL_ORDER
 from core.database import (
+    ban_state_error,
     delete_risk_events,
     risk_events_page,
     set_risk_handled_batch,
@@ -66,9 +67,11 @@ from gui.widgets import (
     RefreshGuard,
     RiskBadgeDelegate,
     SortHeader,
+    WarnBanner,
     align_headers,
     badge_item,
     make_item,
+    set_ban_state_banner,
 )
 from qtcompat import (
     QCheckBox,
@@ -340,6 +343,13 @@ class EventsPage(BaseTablePage):
         # 但性质不同（筛选是看哪些、批量是改哪些），中间用一条极淡的横线隔开。
         # 原来两行都直接铺在灰底上，与下面的表格卡片并列时像三段互不相干的东西。
         root.addWidget(self._build_toolbar_card())
+
+        # 事件页的封禁态查询在 risk_events_page 内部被吞掉以保住列表，
+        # 这里用 ban_state_error() 把「没读到」显式呈现（H6）
+        self._ban_state_banner = WarnBanner("", "重试", C.danger, level="danger")
+        self._ban_state_banner.action_clicked.connect(self._on_refresh_clicked)
+        self._ban_state_banner.setVisible(False)
+        root.addWidget(self._ban_state_banner)
 
         self.empty = EmptyState("暂无风险事件", "当前规则未命中任何访问，这是正常状态")
         self.empty.setVisible(False)
@@ -737,6 +747,7 @@ class EventsPage(BaseTablePage):
         # 行内按钮要知道「这个 IP 是不是已经封了」：一次查询给整张表用。
         # 逐行查在 200 行的表上就是 200 次建连，渲染直接掉到秒级。
         self._banned = banned
+        set_ban_state_banner(getattr(self, "_ban_state_banner", None), ban_state_error())
         # 同类合并：同一「IP+端口+路径+等级+评分+规则+状态」折叠成一行（×N）。
         # 合并的是展示层，_rows_src 始终是后端原序原条数，导出/审计走 flatten 还原。
         merged = self.merge.isChecked()

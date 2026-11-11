@@ -433,14 +433,18 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.si_fw.set_state("防火墙 检测中…", C.text_muted)
         self.si_watch.set_state("本机观察 未启动", C.text_muted)
         self.si_admin.set_state("权限 检测中…", C.text_muted)
-        # 三个项里只有「防火墙」和「观察」可点：前者跳到封禁管理（安全的开启入口在
-        # 那里），后者跳设置页。权限无法在程序内提升，点不动就不给手型光标。
+        # 三个项都可点：防火墙 → 封禁管理，观察 → 设置页，权限 → 关于的
+        # 「权限与能力」栏（唯一一处自助说明）。程序不会在后台提升权限，
+        # 所有提权都由用户主动点击后弹 UAC 确认。
         self.si_fw.setCursor(Qt.CursorShape.PointingHandCursor)
         self.si_fw.setToolTip("防火墙开关状态 · 点击打开封禁管理")
         self.si_fw.clicked.connect(self._goto_bans)
         self.si_watch.setCursor(Qt.CursorShape.PointingHandCursor)
         self.si_watch.setToolTip("打开设置页")
         self.si_watch.clicked.connect(self._goto_settings)
+        self.si_admin.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.si_admin.setToolTip("权限与能力边界 · 点击查看单点说明")
+        self.si_admin.clicked.connect(self._show_permissions)
         col.addWidget(self.topbar)
 
         self.stack = QStackedWidget()
@@ -638,6 +642,14 @@ class MainWindow(EventPumpMixin, QMainWindow):
     def _show_about(self) -> None:
         """关于 / 快捷键帮助：侧栏版本号、托盘菜单、F1 三个入口共用这一种实现"""
         AboutDialog(NAV_ITEMS, self).exec()
+
+    def _show_permissions(self) -> None:
+        """顶栏「权限」：直接落到关于页的「权限与能力」栏。
+
+        普通权限是默认形态，用户第一个要问的就是「我现在能干什么、怎么封禁」。
+        这里只做展示，不提权、不改设置。
+        """
+        AboutDialog(NAV_ITEMS, self, initial_tab=2).exec()
 
     def _goto_settings(self) -> None:
         self._switch_page(PAGE_SETTINGS)
@@ -858,6 +870,7 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.page_bans.request_refresh_stats.connect(lambda: self._refresh_stats(force=True))
         self.page_rules.rules_saved.connect(self._on_rules_saved)
         self.page_settings.settings_saved.connect(self._on_settings_saved)
+        self.page_settings.geo_reload_requested.connect(self._reload_geo_now)
         self.page_settings.xdb_sync_requested.connect(self._sync_xdb_now)
         self.page_settings.xdb_check_requested.connect(self._check_xdb_now)
         self.page_settings.logs_open_requested.connect(self._open_logs_dir)
@@ -1085,12 +1098,38 @@ class MainWindow(EventPumpMixin, QMainWindow):
             self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:12.5px;")
             self.lbl_geo.setToolTip(f"离线定位库 v{gen} · 缓存 {ci.get('size', 0)} 条")
         else:
-            self.lbl_geo.setText("定位库 不可用")
+            # 启动期定位库失败**不能弹模态**：静默部署 / 无人值守会一直卡在弹窗上。
+            # 状态栏这条是常驻的，可截图留证；自助重试入口在设置页「数据与离线库」。
+            # 文案用「读取失败」而不是「未知」—— 后者会被误读成「这个 IP 没有归属地」。
+            self.lbl_geo.setText("定位库 读取失败")
+            self.lbl_geo.setStyleSheet(f"color:{C.danger};font-size:12.5px;")
+            self.lbl_geo.setToolTip(
+                f"定位库加载失败：{err}\n"
+                "请到「设置 → 数据与离线库」点「重新加载定位库」或「立即同步」。"
+            )
+            self._set_status("定位库读取失败：可到设置 → 数据与离线库重新加载或同步", C.danger)
+            log.warning("定位库加载失败（不弹模态，可在设置页重试）：%s", err)
+
+    def _reload_geo_now(self) -> None:
+        """设置页「重新加载定位库」：热加载不重启，结果直接回写状态栏。"""
+        from core.geo_locator import reload_locator
+
+        try:
+            ok, err = reload_locator()
+        except Exception as e:
+            ok, err = False, str(e)
+        if ok:
+            self.lbl_geo.setText("定位库 已加载")
+            self.lbl_geo.setStyleSheet(f"color:{C.success};font-size:12.5px;")
+            self.lbl_geo.setToolTip("离线定位库已重新加载")
+            self._set_status("定位库已重新加载", C.success)
+        else:
+            self.lbl_geo.setText("定位库 读取失败")
             self.lbl_geo.setStyleSheet(f"color:{C.danger};font-size:12.5px;")
             self.lbl_geo.setToolTip(f"定位库加载失败：{err}")
-            QMessageBox.warning(
-                self, "定位库加载失败", f"IP 归属地库加载失败，归属地将显示为未知。\n\n{err}"
-            )
+            self._set_status(f"定位库重新加载失败：{err}", C.danger)
+        with contextlib.suppress(Exception):
+            self.page_iplookup._update_lib_info()
 
     # ═══════════════════════════════════════════════
     #  封禁
