@@ -29,12 +29,11 @@
 import datetime
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from app import audit
+from app import data_service
 from core.config import LEVEL_LABEL
 from core.database import (
     active_ban_ip_map,
     count_access_logs,
-    delete_access_logs,
     query_access_logs,
 )
 from core.logger import get_logger
@@ -783,7 +782,7 @@ class AccessPage(QWidget):
             return
 
         try:
-            deleted = delete_access_logs(
+            deleted = data_service.clear_access_logs(
                 keyword=kw,
                 level=lvl,
                 port=port,
@@ -791,26 +790,13 @@ class AccessPage(QWidget):
                 until_ts=until,
                 # 无筛选时才是「清空全部」；数据层要求这种调用显式声明意图
                 all_rows=not scoped,
+                scope_desc=scope_desc,
+                matched_total=total,
             )
         except Exception as e:
-            audit.record(
-                audit.ACTION_DATA_CLEAR,
-                target_type="access",
-                summary=f"清空访问列表失败（{scope_desc}）：{e}",
-                result=audit.RESULT_FAIL,
-                detail=str(e),
-            )
             self._notify("清空失败", f"未能清空访问记录：\n{e}", warn=True)
             return
 
-        # 破坏性操作必须留痕：事后唯一能回答「数据哪天没的、删了多少」的就是这条
-        audit.record(
-            audit.ACTION_DATA_CLEAR,
-            target_type="access",
-            summary=f"清空访问列表：{scope_desc}，删除 {deleted} 条",
-            before={"scope": scope_desc, "matched": total},
-            after={"deleted": deleted},
-        )
         self._page = 0
         self.refresh()
         self._notify("已清空", f"已删除 {deleted} 条访问记录。")

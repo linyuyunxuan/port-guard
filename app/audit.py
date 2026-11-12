@@ -230,3 +230,38 @@ def fmt_snapshot(text: Optional[str], limit: int = SNAPSHOT_MAX) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
+
+
+# ═══════════════════════════════════════════════════════════
+#  只读查询
+# ═══════════════════════════════════════════════════════════
+
+# 只读查询也集中到 app 层，gui 不直接 import core.database。
+
+
+def count_records(*, actor: str = "", action: str = "", keyword: str = "") -> int:
+    """按条件统计审计记录总数（分页用）。同条件口径见 `core.database.count_audit`。"""
+    from core.database import count_audit
+
+    return count_audit(actor=actor, action=action, keyword=keyword)
+
+
+def query_records(
+    *,
+    limit: int,
+    offset: int,
+    actor: str = "",
+    action: str = "",
+    keyword: str = "",
+) -> list:
+    """按条件取一页审计记录（最新在前）。`limit`/`offset` 为必填，防止意外全量拉取。"""
+    from core.database import query_audit
+
+    return query_audit(limit=limit, offset=offset, actor=actor, action=action, keyword=keyword)
+
+
+def list_actors() -> list:
+    """审计「操作者」去重列表，用于筛选下拉框。"""
+    from core.database import list_audit_actors
+
+    return list_audit_actors()

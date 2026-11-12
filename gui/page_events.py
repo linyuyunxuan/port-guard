@@ -24,12 +24,11 @@
 import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app import audit
+from app import audit, data_service
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
 from core.config import LEVEL_LABEL, LEVEL_ORDER
 from core.database import (
     ban_state_error,
-    delete_risk_events,
     risk_events_page,
     set_risk_handled_batch,
 )
@@ -971,24 +970,10 @@ class EventsPage(BaseTablePage):
         # 事后既答不出「删了哪些 IP」，也答不出「删的时候它们是什么状态」。
         snapshot = _event_snapshot(rows)
         try:
-            n = delete_risk_events(ids)
+            n = data_service.delete_risk_events_by_ids(ids, snapshot)
         except Exception as e:
-            audit.record(
-                audit.ACTION_EVENT_DELETE,
-                target_type="event",
-                summary=f"删除 {len(ids)} 条风险事件失败：{e}",
-                result=audit.RESULT_FAIL,
-                detail=str(e),
-            )
             QMessageBox.warning(self, "删除失败", str(e))
             return
-        audit.record(
-            audit.ACTION_EVENT_DELETE,
-            target_type="event",
-            summary=f"删除 {n} 条风险事件",
-            before={"events": snapshot},
-            after={"count": n},
-        )
         self.refresh()
         self.lbl_info.setText(f"已删除 {n} 条 · 当前列表共 {len(self._rows)} 条")
 

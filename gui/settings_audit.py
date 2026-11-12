@@ -17,7 +17,6 @@ from typing import Any, Dict, List
 from app import audit
 from app.export_csv import export_rows
 from core.config import APP_VERSION
-from core.database import count_audit, query_audit
 from core.logger import get_logger
 from gui.theme import C
 from gui.widgets import align_headers, make_item
@@ -227,7 +226,9 @@ class AuditPanel(QWidget):
         if not path:
             return
         try:
-            rows = query_audit(limit=100000, offset=0, actor=actor, action=action, keyword=kw)
+            rows = audit.query_records(
+                limit=100000, offset=0, actor=actor, action=action, keyword=kw
+            )
             n = export_rows(
                 path,
                 AUDIT_EXPORT_HEADERS,
@@ -246,8 +247,8 @@ class AuditPanel(QWidget):
         action = self.cb_action.currentData() or ""
         kw = self.ed_kw.text().strip()
         try:
-            total = count_audit(actor=actor, action=action, keyword=kw)
-            rows = query_audit(
+            total = audit.count_records(actor=actor, action=action, keyword=kw)
+            rows = audit.query_records(
                 limit=self._size,
                 offset=self._page * self._size,
                 actor=actor,
@@ -290,11 +291,9 @@ class AuditPanel(QWidget):
 
     def refresh_actors(self) -> None:
         """重载「操作者」下拉框。保留当前选中项，避免刷新把筛选条件打回全部"""
-        from core.database import list_audit_actors
-
         current = self.cb_actor.currentData() or ""
         try:
-            actors = list_audit_actors()
+            actors = audit.list_actors()
         except Exception:
             log.exception("读取审计操作者列表失败")
             actors = []
