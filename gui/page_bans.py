@@ -44,7 +44,6 @@ from gui.row_action import RowAction, RowActionDelegate
 from gui.table_base import BaseTablePage
 from gui.table_select import CheckColumn
 from gui.table_sort import (
-    KIND_DATETIME,
     KIND_MS,
     KIND_NUM,
     KIND_TEXT,
@@ -203,7 +202,7 @@ BAN_SORT_SPECS = {
     COL_BAN_SCORE: ColumnSpec(KIND_NUM, lambda b: b.risk_score),
     COL_BAN_STATUS: ColumnSpec(KIND_NUM, lambda b: BAN_STATUS_ORDER.get(b.status)),
     COL_BAN_EXPIRE: ColumnSpec(KIND_MS, lambda b: b.expire_at),
-    COL_BAN_CREATED: ColumnSpec(KIND_DATETIME, lambda b: b.created_at),
+    COL_BAN_CREATED: ColumnSpec(KIND_MS, lambda b: b.created_at),
 }
 
 
@@ -1492,7 +1491,7 @@ class BansPage(BaseTablePage):
                         b.created_min,
                         align=Qt.AlignmentFlag.AlignCenter,
                         mono=True,
-                        tip=b.created_at or "",
+                        tip=ms_to_str(b.created_at) if b.created_at else "-",
                     ),
                 )
         finally:
