@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from app import audit, ban_service
+from app import ban_service, data_service
 from app.export_csv import (
     BAN_CSV_HEADERS,
     SUG_CSV_HEADERS,
@@ -20,7 +20,6 @@ from core.config import LEVEL_CRITICAL, LEVEL_HIGH, LEVEL_ORDER
 from core.database import (
     active_ban_ip_map,
     count_active_bans,
-    delete_ban_records,
     query_bans,
     query_risk_events,
     set_risk_handled,
@@ -1211,25 +1210,10 @@ class BansPage(BaseTablePage):
             for b in rows
         ]
         try:
-            n = delete_ban_records(ids)
+            n = data_service.delete_ban_records_by_ids(ids, snapshot)
         except Exception as e:
-            audit.record(
-                audit.ACTION_BAN_DELETE,
-                target_type="ban",
-                summary=f"删除 {len(ids)} 条封禁记录失败：{e}",
-                result=audit.RESULT_FAIL,
-                detail=str(e),
-            )
             QMessageBox.warning(self, "删除失败", str(e))
             return
-        audit.record(
-            audit.ACTION_BAN_DELETE,
-            target_type="ban",
-            summary=f"删除 {n} 条封禁记录（仅删库记录，未改动防火墙规则）",
-            before={"bans": snapshot},
-            after={"count": n},
-            detail="防火墙规则未改动",
-        )
         self.refresh()
         self.request_refresh_stats.emit()
         _flash_label(
@@ -1623,8 +1607,6 @@ class BansPage(BaseTablePage):
         QMessageBox.warning(self, "解封失败", "解封时发生异常，详情见运行日志。")
 
     def _delete(self, b) -> None:
-        from core.database import delete_ban_record
-
         if (
             QMessageBox.question(
                 self,
@@ -1636,7 +1618,7 @@ class BansPage(BaseTablePage):
             != QMessageBox.StandardButton.Yes
         ):
             return
-        delete_ban_record(b.id)
+        data_service.delete_ban_record_single(b.id)
         self.refresh()
 
     def _unban_all(self) -> None:
