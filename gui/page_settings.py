@@ -209,12 +209,17 @@ class SettingsPage(QWidget):
 
         子页已建且持有该名字时才转发；父页自身的生命周期属性（`_dirty` /
         `_loading` / `_hint_timer` …）子页没有同名，仍写本地。
+
+        注意：非转发路径必须走 `super().__setattr__`（shiboken 的 native 路径），
+        而不是 `object.__setattr__` —— __init__ 早期 shiboken2(PySide2) 会在
+        QWidget subclass 上设置 C++ 持有的 attribute，绕过 native 路径会抛
+        `TypeError: can't apply this __setattr__ to ...`（回归 F2）。
         """
         for page in self._subpages():
             if page is not None and hasattr(page, name):
                 object.__setattr__(page, name, value)
                 return
-        object.__setattr__(self, name, value)
+        super().__setattr__(name, value)
 
     # ── Tab 1：服务与采集 ──
     def _tab_service(self) -> QWidget:

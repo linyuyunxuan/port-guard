@@ -280,6 +280,63 @@ def test_selecting_backup_does_not_mark_settings_dirty(fresh_db):
     assert page._dirty is False
 
 
+def test_data_tab_identity_and_reload_on_switch(fresh_db):
+    """P2⑤ 回归护栏（F1）：tabs 成员的 data tab 必须与 tab_data 是同一对象。
+
+    拆分后 addTab 的是 DataPage 自身，tab_data 原语义是「能 addTab /
+    setCurrentWidget 的 tab 成员」——若不变量 `tabs.widget(idx) is tab_data`
+    失真，切到数据 tab 不会触发 refresh_db_state、_scroll_to_db_section 也
+    切不动。这里锁死不变量与切换副作用。
+    """
+    _qapp()
+    _db()
+    from gui.page_settings import SettingsPage
+
+    page = SettingsPage()
+    tabs = page.tabs
+    data_idx = tabs.indexOf(page.data_page)
+    assert tabs.widget(data_idx) is page.tab_data
+    assert page.tab_data is page.data_page
+
+    # 切到数据 tab 触发一次 refresh_db_state
+    hits = []
+    orig = page.refresh_db_state
+    page.refresh_db_state = lambda: hits.append(1)
+    try:
+        tabs.setCurrentIndex(data_idx)
+        assert hits == [1]
+    finally:
+        page.refresh_db_state = orig
+
+    # _scroll_to_db_section 能真正把当前 tab 切到数据 tab（setCurrentWidget(tab_data)）
+    tabs.setCurrentIndex(0)
+    page._scroll_to_db_section()
+    assert tabs.widget(tabs.currentIndex()) is page.data_page
+
+
+def test_flat_setattr_routes_to_subpage_and_local_else(fresh_db):
+    """P2⑤ 回归护栏（F2）：扁平赋值落到子页、未知名保持本地。
+
+    同时验证非转发路径走父页自身（__init__ 期间 shiboken2 需要 native
+    __setattr__，不能一概 object.__setattr__ 绕过）。
+    """
+    _qapp()
+    _db()
+    from gui.page_settings import SettingsPage
+
+    page = SettingsPage()
+    # 子页已初始化持有 _bak_rows → 扁平赋值转发到子页
+    page.data_page._bak_rows = []
+    page._bak_rows = [{"file": "ipv4_a.bak"}]
+    assert page.data_page._bak_rows == [{"file": "ipv4_a.bak"}]
+
+    # 父页独有生命周期属性仍写本地，不进子页
+    page._loading = True
+    assert page.__dict__.get("_loading") is True
+    assert not hasattr(page.data_page, "_loading")
+    page._loading = False
+
+
 # ══════════ ⑤ 子菜单：三层归类、统一组件与样式 ══════════
 
 

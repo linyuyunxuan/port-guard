@@ -203,7 +203,9 @@ class DataPage(QWidget):
         self._section_data = _add_section_index(
             page, lay, "③ 数据与离线库", ["离线库在线同步", "数据管理"]
         )
-        self.tab_data = page
+        self.tab_data = (
+            self  # addTab 的成员是 DataPage 自身，供父页 identity 判断 / setCurrentWidget
+        )
         self._data_scroll = page  # WAL 提示条的「去整理」要滚到这里
 
         xdb = _Panel("离线库在线同步（IP 归属地）")
