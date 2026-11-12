@@ -31,8 +31,8 @@ from core.models import (
     BanRecord,
     GeoInfo,
     RiskResult,
-    ms_to_str,
     now_ms,
+    to_epoch_ms,
 )
 
 log = get_logger(__name__)
@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS access_log (
     risk_level    TEXT DEFAULT 'normal',
     matched_rules TEXT,
     event_ts      INTEGER NOT NULL,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
 );
 CREATE INDEX IF NOT EXISTS idx_access_ip  ON access_log(ip);
 CREATE INDEX IF NOT EXISTS idx_access_ts  ON access_log(event_ts);
@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS risk_event (
     handled       INTEGER NOT NULL DEFAULT 0,
     disposition   TEXT NOT NULL DEFAULT '',
     event_ts      INTEGER NOT NULL,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
 );
 CREATE INDEX IF NOT EXISTS idx_event_ip      ON risk_event(ip);
 CREATE INDEX IF NOT EXISTS idx_event_handled ON risk_event(handled);
@@ -163,8 +163,8 @@ CREATE TABLE IF NOT EXISTS ban_list (
     status      TEXT NOT NULL DEFAULT 'active',
     duration_sec INTEGER,
     expire_at   INTEGER,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+    updated_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
     error_msg   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ban_ip     ON ban_list(ip);
@@ -659,22 +659,24 @@ def delete_old_bans(days: int) -> int:
        没发生过」的决定，而这个决定本不该由清理任务来做；
     3. 其余状态（`failed` / `expired` / `unbanned`）才是可清理的终态。
 
-    ⚠️ 时间列是字符串：`created_at` 由 `datetime('now','localtime')` 生成
-    （见 SCHEMA），格式 `YYYY-MM-DD HH:MM:SS`，定长下字典序即时间序，所以
-    这里只能写 `datetime(created_at) < datetime('now','localtime','-N days')`。
-    这是 ban_list 的历史包袱，与全项目 epoch 毫秒口径不一致，改表结构要另开
-    一次迁移。
+    P2⑦ 起 `created_at` 一律写整数 epoch 毫秒，这里用 `created_at < ?`
+    （? 为 `now_ms() - days*86400*1000`）直接数值比较。历史库里可能仍有
+    旧程序写入的 `YYYY-MM-DD HH:MM:SS` 字符串行（旧备份 restore），SQLite
+    对「字符串与整数比较」恒为假（类型亲和性），故再补一条按字符串日期
+    解析的兜底分支，两份口径都覆盖，保证老数据也能被正确清理。
     """
     if days <= 0:
         return 0
     placeholders = ", ".join("?" for _ in CLEANABLE_BAN_STATUS)
+    cutoff = now_ms() - days * 86400 * 1000
     conn = _connect()
     try:
         cur = conn.execute(
             # 状态数量固定且来自模块级常量元组，不是外部输入
             f"DELETE FROM ban_list WHERE status IN ({placeholders}) "  # noqa: S608
-            "AND datetime(created_at) < datetime('now','localtime',?)",
-            [*CLEANABLE_BAN_STATUS, f"-{int(days)} days"],
+            "AND (created_at < ? OR "
+            "datetime(created_at) < datetime('now','localtime',?))",
+            [*CLEANABLE_BAN_STATUS, cutoff, f"-{int(days)} days"],
         )
         conn.commit()
         return cur.rowcount
@@ -1037,8 +1039,8 @@ def insert_ban(rec: BanRecord) -> int:
         cur = conn.execute(
             """INSERT INTO ban_list
                (ip, rule_name, reason, risk_score, source, status,
-                duration_sec, expire_at, error_msg)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                duration_sec, expire_at, error_msg, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 rec.ip,
                 rec.rule_name,
@@ -1049,6 +1051,8 @@ def insert_ban(rec: BanRecord) -> int:
                 rec.duration_sec,
                 rec.expire_at,
                 rec.error_msg,
+                now_ms(),
+                now_ms(),
             ),
         )
         conn.commit()
@@ -1077,7 +1081,7 @@ def update_ban(ban_id: Optional[int], **fields) -> None:
     # 读到旧值（回归：update_ban(hit_count=4) 后立刻查必须拿到 4，P1-1）。
     # update_ban 本身只在封禁生命周期事件上被调用，不是热路径，多失效没有代价。
     invalidate_active_ban_cache()
-    fields["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fields["updated_at"] = now_ms()
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn = _connect()
     try:
@@ -1106,8 +1110,8 @@ def _row_to_ban(r: sqlite3.Row) -> BanRecord:
         status=r["status"],
         duration_sec=r["duration_sec"],
         expire_at=r["expire_at"],
-        created_at=r["created_at"] or "",
-        updated_at=r["updated_at"] or "",
+        created_at=to_epoch_ms(r["created_at"]),
+        updated_at=to_epoch_ms(r["updated_at"]),
         error_msg=r["error_msg"] or "",
         unblocked_by=(r["unblocked_by"] or "") if "unblocked_by" in keys else "",
         # hit_count / last_hit_at 是 v5 迁移才加的列：老库或测试里手工建的
@@ -1261,8 +1265,9 @@ def count_bans_by_ip(ip: str, since_ts: Optional[int] = None) -> int:
       就又回到「第一次」，递增永远不生效。
     · **必须 `ip = ?` 等值**：`query_bans` 的 keyword 走 `ip LIKE %kw%`，
       `203.0.113.1` 会连带命中 `203.0.113.10~19`，拿来精确计数是错的。
-    · since_ts 为 epoch 毫秒，只统计该时刻之后创建的记录。created_at 存的是
-      `YYYY-MM-DD HH:MM:SS` 本地时间字符串（见 SCHEMA），定长格式下字典序即时间序。
+    · since_ts 为 epoch 毫秒，只统计该时刻之后创建的记录。P2⑦ 起 created_at
+      写整数 epoch 毫秒，直接数值比较；历史库里的 `YYYY-MM-DD HH:MM:SS`
+      字符串行因 SQLite 类型亲和性比较不成立不计入，属可接受的历史口径差。
 
     ⚠️ 调用点必须在 `insert_ban` **之前**：本函数不排除任何记录，插库后再数会把
     本次封禁自己数进去，第一次封禁就被当成第二次，时长直接翻倍。
@@ -1271,7 +1276,7 @@ def count_bans_by_ip(ip: str, since_ts: Optional[int] = None) -> int:
     args: List[Any] = [ip]
     if since_ts:
         sql += " AND created_at >= ?"
-        args.append(ms_to_str(since_ts))
+        args.append(since_ts)
     conn = _connect()
     try:
         return int(conn.execute(sql, args).fetchone()["c"])
@@ -1404,13 +1409,15 @@ def count_active_bans() -> int:
 
 
 def count_today_bans() -> int:
-    today = datetime.date.today()
-    start = datetime.datetime(today.year, today.month, today.day).strftime("%Y-%m-%d %H:%M:%S")
+    # 今日 00:00 的本地时区 epoch 毫秒；整数行直接数值比较，
+    # 历史字符串行因类型亲和性不计入（口径与 count_bans_by_ip 一致）。
+    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min).timestamp()
+    start_ms = int(today_start * 1000)
     conn = _connect()
     try:
         return int(
             conn.execute(
-                "SELECT COUNT(*) c FROM ban_list WHERE created_at >= ?", (start,)
+                "SELECT COUNT(*) c FROM ban_list WHERE created_at >= ?", (start_ms,)
             ).fetchone()["c"]
         )
     finally:

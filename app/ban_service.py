@@ -48,6 +48,8 @@ from core.models import (
     STATUS_PENDING,
     STATUS_UNBANNED,
     BanRecord,
+    now_ms,
+    to_epoch_ms,
 )
 from core.rule_engine import RuleEngine, get_engine, is_never_ban
 from core.rules_meta import REGION_PREFIX, region_rule_key, rule_label
@@ -801,13 +803,14 @@ def recover_stale_pending(timeout_sec: int = PENDING_STALE_SEC) -> int:
     if not firewall.is_admin():
         return 0
 
-    cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - max(60, timeout_sec)))
+    cutoff = now_ms() - max(60, timeout_sec) * 1000
     try:
-        # created_at 是本地时间字符串（YYYY-MM-DD HH:MM:SS），同格式可直接比大小
+        # created_at 是 epoch 毫秒整数；历史字符串行（旧备份 restore）经
+        # to_epoch_ms 归一化，统一按「超过宽限期」筛选，null/无法解读的不动。
         rows = [
             b
             for b in query_bans(status=STATUS_PENDING, limit=2000)
-            if b.created_at and b.created_at <= cutoff
+            if (ts := to_epoch_ms(b.created_at)) is not None and ts <= cutoff
         ]
     except Exception:
         log.exception("查询残留 pending 记录失败")

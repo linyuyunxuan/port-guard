@@ -87,12 +87,11 @@ def test_run_daily_survives_backup_failure(isolated_env, monkeypatch):
 # ═══════════════════ S7：残留 pending 收敛 ═══════════════════
 
 
-def _pending(ip: str, rule: str, created_at: str) -> int:
+def _pending(ip: str, rule: str, created_at: int) -> int:
     """造一条 pending 记录并把 created_at 改到指定时刻。
 
-    `insert_ban` 不写 created_at（列默认 `datetime('now','localtime')`），
-    而 `update_ban` 的白名单里没有它（状态列不许随便改），只能直接改库 ——
-    这正是要复现的现场：记录是**上次进程留下的**。
+    `update_ban` 的白名单里没有 created_at（状态列不许随便改），所以只能
+    直接改库 —— 这正是要复现的现场：记录是**上次进程留下的**。
     """
     import sqlite3
 
@@ -117,17 +116,13 @@ def _pending(ip: str, rule: str, created_at: str) -> int:
     return bid
 
 
-def _old() -> str:
-    """早就过了 10 分钟宽限期的时间戳（格式与库里的 created_at 一致）"""
-    import time
-
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 3600))
+def _old() -> int:
+    """早就过了 10 分钟宽限期的时间戳（epoch 毫秒整数）"""
+    return now_ms() - 3600_000
 
 
-def _recent() -> str:
-    import time
-
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 30))
+def _recent() -> int:
+    return now_ms() - 30_000
 
 
 def _status(ban_id: int) -> str:
@@ -205,6 +200,42 @@ def test_recover_is_audited(isolated_env, admin, monkeypatch):
 
     rows = database.query_audit(limit=10, action=audit.ACTION_BAN_RECOVER)
     assert rows and rows[0]["actor"] == audit.ACTOR_SYSTEM
+
+
+def test_recover_compat_with_legacy_string_created_at(isolated_env, admin, monkeypatch):
+    """P2⑦ 双容忍：旧备份 restore 的 `YYYY-MM-DD HH:MM:SS` 字符串行也能被收敛。
+
+    created_at 读端经 `to_epoch_ms` 归一化，超过宽限期的历史 pending 仍会被
+    检出（按「规则是否存在」回填），不会因为字符串/整数形态差异漏掉。
+    """
+    import datetime
+    import sqlite3
+
+    from core.config import db_path
+
+    database.init_db()
+    # 直接插一条库里的 created_at 是旧字符串格式的 pending 记录（模拟旧备份）
+    old = (datetime.datetime.now() - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    bid = database.insert_ban(
+        BanRecord(
+            ip=IP,
+            rule_name="PortGuard_Block_203.0.113.91",
+            status=STATUS_PENDING,
+            source="auto",
+            duration_sec=3600,
+            expire_at=now_ms() + 3600_000,
+        )
+    )
+    conn = sqlite3.connect(db_path())
+    try:
+        conn.execute("UPDATE ban_list SET created_at = ? WHERE id = ?", (old, bid))
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(firewall, "list_rule_names", list)
+    assert ban_service.recover_stale_pending() == 1
+    assert _status(bid) == STATUS_FAILED
 
 
 # ═══════════════════ S9：CLI 与界面跨进程互斥 ═══════════════════

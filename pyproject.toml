@@ -47,7 +47,8 @@ line-length = 100
 target-version = "py38"
 # ip2region/ 是上游 vendored 代码（见 NOTICE），不做任何风格要求
 # _design/ 是设计验证脚手架（离屏渲染探针），不进产物，也不参与门禁
-extend-exclude = ["ip2region", "build", "dist", "assets", "data", "_design"]
+# _verify_tmp/ 是临时验证脚本目录（独立验证遗留），不进产物，也不参与门禁
+extend-exclude = ["ip2region", "build", "dist", "assets", "data", "_design", "_verify_tmp"]
 
 [tool.ruff.lint]
 select = [
@@ -136,6 +137,7 @@ exclude = [
     "(^|[/\\\\])ip2region([/\\\\]|$)",
     "(^|[/\\\\])(build|dist)([/\\\\]|$)",
     "(^|[/\\\\])_design([/\\\\]|$)",
+    "(^|[/\\\\])_verify_tmp([/\\\\]|$)",
 ]
 # PySide6-Essentials 未必带完整类型存根
 ignore_missing_imports = true

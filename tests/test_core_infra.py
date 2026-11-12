@@ -266,12 +266,115 @@ def test_migration_v6_drops_dead_stats_hourly():
     conn = sqlite3.connect(":memory:")
     try:
         conn.execute("CREATE TABLE stats_hourly (hour TEXT PRIMARY KEY, total INTEGER DEFAULT 0)")
+        # v5 老库的其余表（v7 回填需要）
+        conn.execute(
+            "CREATE TABLE ban_list ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " ip TEXT NOT NULL,"
+            " status TEXT NOT NULL DEFAULT 'pending',"
+            " created_at INTEGER,"
+            " updated_at INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE access_log ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " ip TEXT NOT NULL,"
+            " event_ts INTEGER NOT NULL,"
+            " created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE risk_event ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " ip TEXT NOT NULL,"
+            " event_ts INTEGER NOT NULL,"
+            " created_at TEXT)"
+        )
         conn.execute("PRAGMA user_version = 5")
         conn.commit()
 
         assert migrate(conn) == SCHEMA_VERSION
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "stats_hourly" not in tables
+    finally:
+        conn.close()
+
+
+def test_migration_v7_keeps_legacy_text_rows():
+    """v7 是「时间列收敛 epoch 毫秒」的语义版本号：不物理改列（SQLite 的
+    TEXT 亲和列即便 CAST 也会被拉回 TEXT，UPDATE 实为空转），老库 TEXT 行
+    在升级后必须**原样保留**，由读端 `to_epoch_ms` 双容忍承载。
+
+    变异：把 v7 做成物理改列 / 对老库 TEXT 做强转 → 断言「原样保留」变红。
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            "CREATE TABLE ban_list (id INTEGER PRIMARY KEY, ip TEXT, "
+            "created_at TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO ban_list (id, ip, created_at, updated_at) VALUES (?,?,?,?)",
+            (1, "1.1.1.1", "2026-10-20 09:15:00", "2026-10-20 09:15:02"),
+        )
+        conn.execute(
+            "INSERT INTO ban_list (id, ip, created_at, updated_at) VALUES (?,?,?,?)",
+            (2, "2.2.2.2", "1700000000123", "1700000000456"),  # 纯数字串也留在 TEXT
+        )
+        conn.execute("PRAGMA user_version = 6")
+        conn.commit()
+
+        assert migrate(conn) == SCHEMA_VERSION == 7
+
+        rows = {
+            r[0]: (r[1], r[2])
+            for r in conn.execute("SELECT id, created_at, updated_at FROM ban_list")
+        }
+        # 老库 TEXT 数据在 v7 升级后原样保留（不破坏、不误转）
+        assert rows[1] == ("2026-10-20 09:15:00", "2026-10-20 09:15:02")
+        assert rows[2] == ("1700000000123", "1700000000456")
+
+        # 幂等：已是最新再跑一次结果不变
+        assert migrate(conn) == SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_new_schema_created_at_is_integer_epoch_ms():
+    """P2⑦ 主契约：新库建表语句里三张历史表的 created_at（及 bans.updated_at）
+    必须是 INTEGER epoch 毫秒，不能退回字符串 datetime。
+
+    变异：把 DDL 的 default / 列类型改回 TEXT datetime → 本例变红。
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            """CREATE TABLE ban_list (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+                updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
+            );
+            CREATE TABLE access_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
+            );
+            CREATE TABLE risk_event (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
+            );"""
+        )
+        conn.execute("INSERT INTO ban_list (ip) VALUES ('1.1.1.1')")
+        conn.execute("INSERT INTO access_log (ip) VALUES ('2.2.2.2')")
+        conn.execute("INSERT INTO risk_event (ip) VALUES ('3.3.3.3')")
+        # 未显式写 created_at 时走 default，必须是整数 epoch 毫秒（>1.4e12）
+        for table in ("ban_list", "access_log", "risk_event"):
+            v = conn.execute(f"SELECT created_at FROM {table}").fetchone()[0]
+            assert isinstance(v, int) and v > 1_400_000_000_000, (table, v)
+        # bans.updated_at 同样整数
+        upd = conn.execute("SELECT updated_at FROM ban_list").fetchone()[0]
+        assert isinstance(upd, int) and upd > 1_400_000_000_000
     finally:
         conn.close()
 

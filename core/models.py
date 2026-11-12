@@ -62,6 +62,45 @@ def ms_to_min(ms: Optional[int]) -> str:
         return "-"
 
 
+def to_epoch_ms(value: Optional[object]) -> Optional[int]:
+    """把时间值归一化到 epoch 毫秒整数，兼容新旧两种存储形态。
+
+    P2⑦ 后 `created_at / updated_at` 一律写整数 epoch 毫秒；但历史库里
+    仍可能有旧程序写入的 `YYYY-MM-DD HH:MM:SS` 本地时间字符串行
+    （含旧备份 restore）。读取端用本函数统一解析：
+
+    - 整数 → 原样返回（epoch 毫秒）
+    - `YYYY-MM-DD HH:MM[:SS]` 字符串 → 按本地时区解析成 epoch 毫秒
+    - 其他（空 / 无法解析）→ None
+
+    不做破坏性回填改写历史，只保证读端能正确解析。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        # 纯数字字符串：已是 epoch 毫秒（例如被 CAST 过的行）
+        if text.isdigit():
+            try:
+                return int(text)
+            except ValueError:
+                return None
+        # 旧格式本地时间字符串
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return int(datetime.datetime.strptime(text, fmt).timestamp() * 1000)
+            except ValueError:
+                continue
+        return None
+    return None
+
+
 # ═══════════════════════════════════════════════════════════
 #  IP 归属地
 # ═══════════════════════════════════════════════════════════
@@ -357,8 +396,10 @@ class BanRecord:
     status: str = STATUS_ACTIVE
     duration_sec: Optional[int] = None  # None = 永久
     expire_at: Optional[int] = None  # epoch 毫秒
-    created_at: str = ""
-    updated_at: str = ""
+    #: 落库时刻（epoch 毫秒）。P2⑦ 起统一写整数；旧库/旧备份里可能是
+    #: `YYYY-MM-DD HH:MM:SS` 字符串，读取端经 `to_epoch_ms` 兼容解析。
+    created_at: Optional[int] = None
+    updated_at: Optional[int] = None
     error_msg: str = ""
     #: 谁解封的（v2 迁移加的列，长期为空是因为一直没有写入点；现在由审计
     #: 埋点统一填，口径见 app.audit.ACTOR_*）
@@ -438,8 +479,9 @@ class BanRecord:
 
     @property
     def created_min(self) -> str:
-        """`created_at` 是库里的 `YYYY-MM-DD HH:MM:SS` 字符串，表格里去掉秒"""
-        text = (self.created_at or "").strip()
-        if len(text) >= 16 and text[4] == "-" and text[7] == "-":
-            return text[:16]
-        return text or "-"
+        """`created_at` 是库里的 epoch 毫秒整数，表格里展示 `YYYY-MM-DD HH:MM`；
+        历史行仍是 `YYYY-MM-DD HH:MM:SS` 字符串时直接截掉秒。"""
+        ms = to_epoch_ms(self.created_at)
+        if ms is None:
+            return "-"
+        return ms_to_min(ms)

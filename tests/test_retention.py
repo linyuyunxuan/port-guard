@@ -70,14 +70,12 @@ def _ban(status: str, days_ago: int, ip: str = IP) -> int:
     """
     插一条 `days_ago` 天前的封禁记录。
 
-    `created_at` 由 insert_ban 用 `datetime('now','localtime')` 生成且不在
+    P2⑦ 后 `created_at` 由 insert_ban 用 `now_ms()` 写成整数 epoch 毫秒且不在
     `_BAN_UPDATABLE` 白名单里，所以只能直接改库回拨 —— 这也正好逼着
-    `delete_old_bans` 必须按**字符串**比较（见 test_delete_old_bans_uses_string_time）。
+    `delete_old_bans` 必须按**整数**比较（见 test_delete_old_bans_uses_ms_time_column）。
     """
     ban_id = insert_ban(BanRecord(ip=ip, status=status, reason="t", risk_score=90))
-    old = (datetime.datetime.now() - datetime.timedelta(days=days_ago)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    old = now_ms() - days_ago * DAY_MS
     conn = database._connect()
     try:
         conn.execute("UPDATE ban_list SET created_at = ? WHERE id = ?", (old, ban_id))
@@ -195,16 +193,33 @@ def test_fresh_bans_survive_regardless_of_status(isolated_env):
     assert delete_old_bans(180) == 0
 
 
-def test_delete_old_bans_uses_string_time_column(isolated_env):
+def test_delete_old_bans_uses_ms_time_column(isolated_env):
     """
-    变异：把 `datetime(created_at) < datetime('now','localtime',?)` 改成
-    `created_at < <epoch 毫秒>` → 本例变红（字符串与整数比较，SQLite 里
-    类型亲和性会让两边都不成立，一条都删不掉）。
+    变异：把 `created_at < <整数 epoch 毫秒>` 分支删掉（只留字符串兜底）
+    → 本例变红（新数据是整数，字符串兜底清不到整数行）。
 
-    这是 ban_list 的历史包袱：全项目时间是 epoch 毫秒，唯独 created_at 是
-    `YYYY-MM-DD HH:MM:SS` 字符串。改表结构要另开一次迁移。
+    这是 P2⑦ 的主契约：ban_list.created_at 已是整数 epoch 毫秒，
+    `delete_old_bans` 必须能按整数比较清掉过期的整数行。
     """
     _ban(STATUS_UNBANNED, 400)
+    assert delete_old_bans(180) == 1
+
+
+def test_delete_old_bans_compat_with_legacy_string_rows(isolated_env):
+    """
+    P2⑦ 双容忍：历史库 / 旧备份里的 `YYYY-MM-DD HH:MM:SS` 字符串行仍需能清理。
+
+    字符串与整数比较在 SQLite 类型亲和性下恒为假，`delete_old_bans` 必须额外
+    保一条按字符串日期解析的兜底分支，否则老数据永远删不掉。
+    """
+    ban_id = insert_ban(BanRecord(ip=IP, status=STATUS_UNBANNED, reason="t", risk_score=90))
+    old = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = database._connect()
+    try:
+        conn.execute("UPDATE ban_list SET created_at = ? WHERE id = ?", (old, ban_id))
+        conn.commit()
+    finally:
+        conn.close()
     assert delete_old_bans(180) == 1
 
 

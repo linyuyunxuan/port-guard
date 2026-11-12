@@ -153,15 +153,25 @@ def _rules_cell(rules: Any) -> str:
     return "、".join(rule_label(str(r)) for r in rules)
 
 
-def _db_time_cell(text: Any) -> str:
+def _db_time_cell(value: Any) -> str:
     """`ban_list.created_at / updated_at` 的归一化。
 
-    这两列在库里已经是 `YYYY-MM-DD HH:MM:SS` 字符串（`datetime('now','localtime')`
-    写出来的），和事件表的 epoch 毫秒**不同源**。这里只做空值归一，不重新解析
-    再格式化 —— 重新格式化要猜时区，而猜错就会让「什么时候封的」读错。
+    P2⑦ 起这两列写整数 epoch 毫秒，这里换算成 `YYYY-MM-DD HH:MM:SS`；
+    历史库 / 旧备份里可能仍是 `YYYY-MM-DD HH:MM:SS` 字符串（restore 兼容），
+    此时原样放行，不再重新解析（重新格式化要猜时区，猜错会让「什么时候封的」
+    读错）。
     """
-    s = str(text or "").strip()
-    return s or "-"
+    if value is None:
+        return "-"
+    if isinstance(value, (int,)) and not isinstance(value, bool):
+        return ms_to_str(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if s.isdigit():
+            # 被 CAST 过的纯数字字符串行
+            return ms_to_str(int(s))
+        return s or "-"
+    return "-"
 
 
 # ═══════════════════════════════════════════════════════════

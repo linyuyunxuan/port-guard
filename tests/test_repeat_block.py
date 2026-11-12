@@ -121,13 +121,29 @@ def test_migration_v5_adds_hit_columns_and_backfills_zero(isolated_env, tmp_path
             "CREATE TABLE ban_list ("
             " id INTEGER PRIMARY KEY AUTOINCREMENT,"
             " ip TEXT NOT NULL,"
-            " status TEXT NOT NULL DEFAULT 'pending')"
+            " status TEXT NOT NULL DEFAULT 'pending',"
+            " created_at TEXT,"
+            " updated_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE access_log ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " ip TEXT NOT NULL,"
+            " event_ts INTEGER NOT NULL,"
+            " created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE risk_event ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " ip TEXT NOT NULL,"
+            " event_ts INTEGER NOT NULL,"
+            " created_at TEXT)"
         )
         conn.execute("INSERT INTO ban_list(ip, status) VALUES ('1.2.3.4', 'active')")
         conn.execute("PRAGMA user_version = 4")
         conn.commit()
 
-        assert migrate(conn) == SCHEMA_VERSION == 6
+        assert migrate(conn) == SCHEMA_VERSION == 7
 
         cols = {r[1] for r in conn.execute("PRAGMA table_info(ban_list)")}
         assert {"hit_count", "last_hit_at"} <= cols

@@ -33,7 +33,7 @@ from app.export_csv import (
     iter_sug_rows,
     sanitize_cell,
 )
-from core.models import BanRecord, GeoInfo
+from core.models import BanRecord, GeoInfo, ms_to_str
 
 
 def _read(path):
@@ -266,8 +266,10 @@ def test_event_rows_handle_missing_geo_and_unknown_level() -> None:
     assert cells["处理状态"] == "-"
 
 
-def test_ban_rows_keep_db_time_strings_and_format_epoch() -> None:
-    """ban_list 的时间是 `YYYY-MM-DD HH:MM:SS` 字符串，不能当 epoch 毫秒再转一次"""
+def test_ban_rows_format_epoch_ms_and_report_epoch() -> None:
+    """P2⑦ 起 ban_list 的时间是整数 epoch 毫秒，导出换算成 `YYYY-MM-DD HH:MM:SS`"""
+    created_ms = int(datetime.datetime(2026, 10, 20, 9, 15, 0).timestamp() * 1000)
+    updated_ms = int(datetime.datetime(2026, 10, 20, 9, 15, 2).timestamp() * 1000)
     b = BanRecord(
         id=12,
         ip="203.0.113.10",
@@ -278,20 +280,36 @@ def test_ban_rows_keep_db_time_strings_and_format_epoch() -> None:
         status="active",
         duration_sec=3600,
         expire_at=1700003600000,
-        created_at="2026-10-20 09:15:00",
-        updated_at="2026-10-20 09:15:02",
+        created_at=created_ms,
+        updated_at=updated_ms,
     )
     row = next(iter_ban_rows([b]))
     assert len(row) == len(BAN_CSV_HEADERS)
     cells = dict(zip(BAN_CSV_HEADERS, row))
-    assert cells["创建时间"] == "2026-10-20 09:15:00"
-    assert cells["更新时间"] == "2026-10-20 09:15:02"
+    assert cells["创建时间"] == ms_to_str(created_ms)
+    assert cells["更新时间"] == ms_to_str(updated_ms)
     assert cells["到期时间"] == datetime.datetime.fromtimestamp(1700003600).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
     assert cells["时长"] == "1 小时"
     assert cells["状态"] == "已封禁"
     assert cells["来源"] == "自动"
+
+
+def test_ban_rows_keep_legacy_string_db_times() -> None:
+    """P2⑦ 双容忍：旧备份 restore 的 `YYYY-MM-DD HH:MM:SS` 字符串行原样放行，
+    不做重新格式化（避免猜时区把「什么时候封的」读错）。"""
+    b = BanRecord(
+        id=13,
+        ip="203.0.113.11",
+        status="active",
+        created_at="2026-10-20 09:15:00",  # type: ignore[arg-type]  # 模拟旧备份字符串行
+        updated_at="2026-10-20 09:15:02",  # type: ignore[arg-type]
+    )
+    row = next(iter_ban_rows([b]))
+    cells = dict(zip(BAN_CSV_HEADERS, row))
+    assert cells["创建时间"] == "2026-10-20 09:15:00"
+    assert cells["更新时间"] == "2026-10-20 09:15:02"
 
 
 def test_ban_rows_permanent_and_unbanned() -> None:

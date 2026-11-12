@@ -387,12 +387,26 @@ def test_migration_v4_adds_and_backfills_disposition(isolated_env, tmp_path):
         # CREATE TABLE IF NOT EXISTS 永远先跑，表一定在）。
         # 刻意**不带** hit_count / last_hit_at：带上就等于预先加好列，
         # v5 的 ALTER 会被「duplicate column」静默跳过，栏板变成空转。
+        # created_at/updated_at 保留（v1 基线就有，v7 回填依赖这两列）。
         conn.execute(
             """
             CREATE TABLE ban_list (
-                id     INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip     TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending'
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip          TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                created_at  TEXT,
+                updated_at  TEXT
+            )
+            """
+        )
+        # v7 回填也覆盖 access_log 的 created_at（v1 基线就有该表）。
+        conn.execute(
+            """
+            CREATE TABLE access_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip         TEXT NOT NULL,
+                event_ts   INTEGER NOT NULL,
+                created_at TEXT
             )
             """
         )

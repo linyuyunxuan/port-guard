@@ -17,7 +17,7 @@ from core.logger import get_logger
 log = get_logger(__name__)
 
 # 当前程序支持的 schema 版本（每加一版 +1 并在下方登记 DDL）
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # version -> DDL 列表（从上一版升级到该版需要执行的语句）
 MIGRATIONS: Dict[int, List[str]] = {
@@ -103,6 +103,26 @@ MIGRATIONS: Dict[int, List[str]] = {
     6: [
         "DROP TABLE IF EXISTS stats_hourly",
     ],
+    # v7：时间列统一到 epoch 毫秒的「语义版本号」（P2⑦）
+    #
+    # 取舍（不物理改列，v7 仅做版本号进账）：
+    # · 目标：ban_list / access_log / risk_event 的 created_at（及 bans.updated_at）
+    #   从 `YYYY-MM-DD HH:MM:SS` 字符串收敛到 epoch 毫秒整数。
+    # · 新库：建表 DDL（core/database.py SCHEMA）已切到
+    #   `INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)`，
+    #   写入端 insert_ban / update_ban 一律用 `now_ms()`，新数据天然是整数。
+    # · 老库（TEXT 亲和列）：SQLite 没有 ALTER COLUMN TYPE，把列就地改成 INTEGER
+    #   只能「重建表 + 拷贝 + 改名」，历史数据越大越慢，断电会留下半重建；且
+    #   即便用 `UPDATE ... SET created_at = CAST(created_at AS INTEGER)`，TEXT 亲和列
+    #   会把 CAST 得到的整数**又按列亲和拉回 TEXT 存储**，纯数字串依旧留在 TEXT，
+    #   该语句实际是空转（已实测验证）。所以老库**不强转**：
+    #   - 读端（_row_to_ban / created_min / 导出 / 排序 / 保留期清理 / 恢复）统一走
+    #     `to_epoch_ms` 双容忍：整数 / 纯数字串 / `YYYY-MM-DD HH:MM:SS` 都能归一化。
+    #   - 保留期清理（delete_old_bans）同时按「整数比较」与「旧字符串日期兜底」
+    #     两个分支覆盖，保证老数据也能正确清理。
+    # · 因此 v7 不需要任何 DDL 语句，只把 `created_at` 的语义契约升级到「epoch 毫秒」
+    #   并作为一个版本锚点，为将来若真的物理改列预留平滑起点。
+    7: [],
 }
 
 
