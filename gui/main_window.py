@@ -9,7 +9,7 @@ PortGuard — 主窗口
 
 import contextlib
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from app import audit, ban_service
 from app.xdb_service import get_service as get_xdb_service
@@ -17,16 +17,16 @@ from core import firewall
 from core import settings as cfg
 from core.alerts import Alerter
 from core.config import APP_AUTHOR, APP_CONTACT, APP_TITLE, APP_VERSION
-from core.database import find_active_ban_by_ip, init_db
-from core.event_bus import bus
+from core.database import init_db
 from core.geo_locator import get_locator
 from core.logger import get_logger
 from core.rule_engine import is_never_ban
 from gui.about_dialog import AboutDialog, ClickableLabel, register_about_shortcut
+from gui.ban_coordinator import BanCoordinator
 from gui.components import ShieldMark, TopStatusBar
 from gui.mixins import EventPumpMixin
 from gui.page_access import AccessPage
-from gui.page_bans import BansPage, ManualBanDialog
+from gui.page_bans import BansPage
 from gui.page_events import EventsPage
 from gui.page_iplookup import IpLookupPage
 from gui.page_logs import LogsPage
@@ -324,6 +324,9 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self._build_ui()
         self._setup_tray()
         self.alerter = Alerter(tray=self.tray, parent_widget=self)
+        # 封禁编排下沉到独立协调器：主窗只保留信号(batch_ban_done)与装配，
+        # 业务逻辑在 BanCoordinator 内、经 owner 回调主窗的界面能力。
+        self.banCoord = BanCoordinator(self)
         self._wire_pages()
         self._setup_timers()
         self._load_geo_async()
@@ -853,17 +856,17 @@ class MainWindow(EventPumpMixin, QMainWindow):
     def _wire_pages(self) -> None:
         self.page_monitor.ask_lookup.connect(self._goto_lookup)
         self.page_monitor.ask_blacklist.connect(self._add_blacklist)
-        self.page_monitor.ask_ban.connect(self.request_ban)
+        self.page_monitor.ask_ban.connect(self.banCoord.request_ban)
         self.page_monitor.ask_history.connect(self._goto_history)
-        self.page_events.ask_ban.connect(self.request_ban)
-        self.page_events.ask_ban_many.connect(self.request_ban_many)
+        self.page_events.ask_ban.connect(self.banCoord.request_ban)
+        self.page_events.ask_ban_many.connect(self.banCoord.request_ban_many)
         self.page_events.ask_history.connect(self._goto_history)
         # 手动刷新过 = 解除「事件激增时暂停自动刷新」（见 gui/mixins.py）
         self.page_events.refreshed_manually.connect(self._resume_events_auto_refresh)
-        self.page_access.ask_ban.connect(self.request_ban)
+        self.page_access.ask_ban.connect(self.banCoord.request_ban)
         self.page_access.ask_lookup.connect(self._goto_lookup)
-        self.page_bans.ask_ban.connect(self.request_ban)
-        self.page_bans.ask_ban_many.connect(self.request_ban_many)
+        self.page_bans.ask_ban.connect(self.banCoord.request_ban)
+        self.page_bans.ask_ban_many.connect(self.banCoord.request_ban_many)
         self.page_bans.ask_lookup.connect(self._goto_lookup)
         self.page_bans.ask_history.connect(self._goto_history)
         self.page_monitor.ask_settings.connect(self._goto_settings)
@@ -875,7 +878,7 @@ class MainWindow(EventPumpMixin, QMainWindow):
         self.page_settings.xdb_check_requested.connect(self._check_xdb_now)
         self.page_settings.logs_open_requested.connect(self._open_logs_dir)
         self.page_settings.watch_changed.connect(self._on_watch_changed)
-        self.batch_ban_done.connect(self._on_batch_ban_done)
+        self.batch_ban_done.connect(self.banCoord._on_batch_ban_done)
         self.blacklist_sync_done.connect(self._on_blacklist_sync_done)
         self.fw_state_ready.connect(self._on_fw_state)
         self.page_logs.logs_open_requested.connect(self._open_logs_dir)
@@ -1130,177 +1133,6 @@ class MainWindow(EventPumpMixin, QMainWindow):
             self._set_status(f"定位库重新加载失败：{err}", C.danger)
         with contextlib.suppress(Exception):
             self.page_iplookup._update_lib_info()
-
-    # ═══════════════════════════════════════════════
-    #  封禁
-    # ═══════════════════════════════════════════════
-
-    def request_ban(self, ip: str, score: int = 0, reason: str = "") -> None:
-        """封禁入口：右键菜单 / 风险事件页 / 封禁页 / 手动输入"""
-        if not ip:
-            dlg = ManualBanDialog("", self)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return
-            ip2, reason2, dur = dlg.values()
-            self._do_ban(ip2, 0, reason2, dur)
-            return
-
-        # 唯一校验入口（同时挡掉命令注入与受保护地址）
-        try:
-            rec = ban_service.prepare(ip, score, reason, 0)
-        except ban_service.BanError as e:
-            QMessageBox.warning(self, "无法封禁", str(e))
-            return
-
-        if not firewall.is_admin():
-            if (
-                QMessageBox.question(
-                    self,
-                    "权限不足",
-                    "封禁需要管理员权限。\n\n是否以管理员身份重启程序？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                == QMessageBox.StandardButton.Yes
-            ):
-                self._restart_as_admin()
-            return
-
-        try:
-            exists = find_active_ban_by_ip(rec.ip)
-        except Exception:
-            log.exception("查询已有封禁失败 ip=%s", rec.ip)
-            exists = None
-        if exists:
-            QMessageBox.information(
-                self, "已封禁", f"{rec.ip} 已处于封禁状态（记录 #{exists.id}）。"
-            )
-            return
-
-        dur_dlg = BanDurationDialog(rec.ip, score, reason, self)
-        if dur_dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._do_ban(rec.ip, score, reason, dur_dlg.duration_sec())
-
-    def _do_ban(self, ip: str, score: int, reason: str, duration_sec: int) -> None:
-        """后台线程执行真实封禁（防火墙命令可能耗时数秒）"""
-        self._set_status(f"正在封禁 {ip} …", C.warning)
-
-        def work():
-            ban_id, err = ban_service.execute(ip, score, reason, duration_sec)
-            if ban_id is None:
-                # 校验失败等前置错误不会走 ban_service 的事件投递，这里补一条
-                bus.emit_ban(
-                    {
-                        "ip": ip,
-                        "ok": False,
-                        "rule_name": "",
-                        "error": err,
-                        "ban_id": None,
-                        "source": "manual",
-                    }
-                )
-
-        threading.Thread(target=work, daemon=True, name=f"ban-{ip}").start()
-
-    def request_ban_many(self, items: List[Dict[str, Any]]) -> None:
-        """批量封禁入口（风险事件页「一键封禁」）。
-
-        流程与单条封禁一致，区别只在「确认」与「执行」被批量化：
-        校验逐条做（唯一校验入口不能绕），确认只做一次，执行放在同一个
-        后台线程里串行跑 —— 每个 IP 起一个线程会让 30 个 PowerShell 进程
-        同时抢 CPU，反而更慢、也更容易触发杀软拦截。
-        """
-        if not items:
-            return
-
-        if not firewall.is_admin():
-            if (
-                QMessageBox.question(
-                    self,
-                    "权限不足",
-                    f"批量封禁 {len(items)} 个 IP 需要管理员权限。\n\n是否以管理员身份重启程序？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                == QMessageBox.StandardButton.Yes
-            ):
-                self._restart_as_admin()
-            return
-
-        prepared = []
-        skipped: List[tuple] = []
-        for it in items:
-            ip = str(it.get("ip") or "")
-            try:
-                rec = ban_service.prepare(
-                    ip, int(it.get("score") or 0), str(it.get("reason") or ""), 0
-                )
-            except ban_service.BanError as e:
-                skipped.append((ip or "?", str(e)))
-                continue
-            try:
-                if find_active_ban_by_ip(rec.ip) is not None:
-                    skipped.append((rec.ip, "已在封禁中"))
-                    continue
-            except Exception:
-                log.exception("批量封禁：查询已有封禁失败 ip=%s", rec.ip)
-            prepared.append(rec)
-
-        if not prepared:
-            detail = "\n".join(f"· {ip}：{why}" for ip, why in skipped[:10])
-            QMessageBox.information(
-                self,
-                "无需封禁",
-                "选中的 IP 全部被跳过：\n\n" + detail if detail else "没有可封禁的 IP。",
-            )
-            return
-
-        dlg = BatchBanDialog([rec.ip for rec in prepared], skipped, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        duration = dlg.duration_sec()
-        self._set_status(f"正在批量封禁 {len(prepared)} 个 IP …", C.warning)
-
-        def work():
-            ok = 0
-            fail = 0
-            # 事件状态不在这里回填：`ban_service.execute` 成功时已按 IP 把该 IP
-            # 下所有「未处理」事件标成「已确认」，且是在投递封禁事件**之前**做的，
-            # 所以界面收到结果时刷新到的就是最终状态。
-            for rec in prepared:
-                ban_id, err = ban_service.execute(
-                    rec.ip, int(rec.risk_score or 0), rec.reason or "", duration
-                )
-                if ban_id is None:
-                    fail += 1
-                    # 前置校验失败不会走 ban_service 的事件投递，这里补一条，
-                    # 否则界面上只会看到「正在批量封禁」，永远等不到结果
-                    bus.emit_ban(
-                        {
-                            "ip": rec.ip,
-                            "ok": False,
-                            "rule_name": "",
-                            "error": err,
-                            "ban_id": None,
-                            "source": "manual",
-                        }
-                    )
-                else:
-                    ok += 1
-            self.batch_ban_done.emit(ok, fail)
-
-        threading.Thread(target=work, daemon=True, name="ban-batch").start()
-
-    def _on_batch_ban_done(self, ok: int, fail: int) -> None:
-        if fail:
-            self._set_status(
-                f"批量封禁完成：成功 {ok} 个，失败 {fail} 个（详见运行日志）", C.warning
-            )
-        else:
-            self._set_status(f"批量封禁完成：{ok} 个 IP 已封禁", C.success)
-        # 状态栏改完必须把**当前页**重刷一遍：封禁顺带改了事件的处理状态与
-        # 行内按钮的「已封禁」态，不刷新的话用户看到的还是封禁前的快照，
-        # 会以为一键封禁没生效（这正是「状态不跟操作联动」的主诉）。
-        self._refresh_current_page()
 
     def _refresh_current_page(self) -> None:
         """只重刷当前可见页 —— 隐藏页在切回来时本来就会 refresh（见 `_switch_page`）"""
