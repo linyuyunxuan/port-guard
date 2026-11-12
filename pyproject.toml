@@ -30,12 +30,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# ── 开发/门禁工具 ──
+# 用 `==` 精确钉死到与实际安装一致的版本：同一仓库不同 venv 若因工具版本
+# 漂移（如 mypy 2.4.0 vs 2.4.1 对同一代码判出 7 vs 11 个 error），会直接导致
+# 门禁基线不可复现。钉死以避免工具升级导致门禁基线漂移。
+# 如需升级工具，应显式改此处版本并同步重跑门禁、更新基线。
 dev = [
-    "pytest>=8.0",
-    "pytest-cov>=5.0",
-    "ruff>=0.6",
-    "mypy>=1.10",
-    "pyinstaller>=6.10",   # 打包验证：pyinstaller port_guard.spec
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.17.1",
+    "mypy==2.4.0",
+    "pyinstaller==6.22.3",   # 打包验证：pyinstaller port_guard.spec
 ]
 
 # ═══════════════════════════════════════════════════════════
