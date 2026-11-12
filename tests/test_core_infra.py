@@ -96,6 +96,94 @@ def test_numeric_ranges_clamp_dirty_values():
     assert cfg.get_int("auto_ban_threshold", 90) == 90
 
 
+def test_schema_derives_default_settings():
+    """P2-6：DEFAULT_SETTINGS 由声明式 schema 派生，且逐键一致（53 键）。
+
+    变异：删掉 build_default_settings 里的 _SETTINGS_NO_SEED 过滤 → rate_limit_per_sec
+    混入落表键，键数变 54；或 schema 某默认值改错 → 与固化快照不一致 → 本例变红。
+    """
+    from core.config import DEFAULT_SETTINGS, SETTINGS_SCHEMA
+
+    # key 顺序与值 = 改前的 flat dict 快照（53 键，含 rate_limit_per_sec 之外全部）
+    expected = {
+        "auto_mode": "0",
+        "auto_ban_threshold": "90",
+        "default_ban_duration_sec": "3600",
+        "ban_duration_critical_sec": "86400",
+        "ban_duration_high_sec": "21600",
+        "ban_duration_medium_sec": "7200",
+        "ban_duration_low_sec": "1800",
+        "ban_escalation_enabled": "0",
+        "ban_escalation_factor": "2",
+        "ban_escalation_max_sec": "604800",
+        "repeat_blacklist_enabled": "1",
+        "repeat_blacklist_hits": "5",
+        "max_ban_duration_sec": "604800",
+        "alert_sound": "1",
+        "alert_popup_level": "critical",
+        "alert_merge_sec": "60",
+        "alert_block_silent": "1",
+        "alert_webhook_enabled": "0",
+        "alert_webhook_url": "",
+        "alert_webhook_level": "critical",
+        "autostart_enabled": "0",
+        "maintenance_enabled": "1",
+        "log_retention_days": "30",
+        "risk_retention_days": "90",
+        "ban_retention_days": "180",
+        "audit_retention_days": "180",
+        "maintenance_hour": "3",
+        "maintenance_last_date": "",
+        "log_level": "INFO",
+        "geo_cache_size": "20000",
+        "monitor_buffer_size": "5000",
+        "db_batch_size": "200",
+        "db_flush_ms": "200",
+        "watch_enabled": "0",
+        "watch_ports": "3389,1433,3306,6379,18080",
+        "watch_methods": "table,fwlog",
+        "watch_interval_sec": "5",
+        "watch_dedupe_sec": "120",
+        "watch_fwlog_path": "",
+        "watch_resolve_pid": "1",
+        "watch_skip_history": "1",
+        "watch_auto_ban": "0",
+        "log_view_max_lines": "2000",
+        "log_view_tail_ms": "1000",
+        "xdb_auto_sync": "1",
+        "xdb_sync_interval_hours": "24",
+        "xdb_sync_on_start": "1",
+        "xdb_auto_download": "1",
+        "xdb_sources": "[]",
+        "xdb_proxy": "",
+        "xdb_last_check_at": "0",
+        "xdb_last_update_at": "0",
+        "xdb_last_result": "",
+    }
+    assert len(expected) == 53
+    assert dict(DEFAULT_SETTINGS) == expected
+    # 落表键数与 schema 一键之差（rate_limit_per_sec 不落表）
+    assert len(SETTINGS_SCHEMA) - len(DEFAULT_SETTINGS) == 1
+    assert "rate_limit_per_sec" not in DEFAULT_SETTINGS
+
+
+def test_numeric_ranges_derived_from_schema():
+    """P2-6：settings._NUMERIC_RANGES 由 schema 的 min/max 推导，非手工维护。
+
+    变异：改 schema 里某数值键的 min/max → clamp 范围随之变化 → 覆盖率断言变红。
+    """
+    from core.config import SETTINGS_SCHEMA
+    from core.settings import _NUMERIC_RANGES
+
+    # schema 里 int/float 且 min/max 齐全的键，推导出的范围必须一一对应
+    for key, spec in SETTINGS_SCHEMA.items():
+        if spec.type in ("int", "float") and spec.min is not None and spec.max is not None:
+            assert _NUMERIC_RANGES[key] == (spec.min, spec.max), f"{key} 范围未从 schema 推导"
+    # 未登记 min/max 的键（时间戳、str 型）不被 clamp
+    for key in ("xdb_last_check_at", "xdb_last_update_at", "alert_popup_level", "log_level"):
+        assert key not in _NUMERIC_RANGES
+
+
 # ═══════════════════ 令牌桶 ═══════════════════
 
 

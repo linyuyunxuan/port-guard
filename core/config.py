@@ -8,6 +8,7 @@ PortGuard — 路径与全局常量
 import os
 import shutil
 import sys
+from typing import Dict, NamedTuple, Optional
 
 APP_NAME = "PortGuard"
 APP_TITLE = "PortGuard 端口访问防御工具"
@@ -255,98 +256,316 @@ RETENTION_PRESETS: list = [1, 3, 7, 30, 90, 180]
 DEFAULT_REPEAT_BLACKLIST_HITS = 5
 
 
+# ═══════════════════════════════════════════════════════════
+#  配置声明式 schema
+#
+#  目标：把「默认值（config.py）」与「取值范围（settings.py 的 _NUMERIC_RANGES）」
+#  这两份各自维护的源合并到唯一一份 schema —— 每个键的类型 / 默认值 / 范围 /
+#  可选枚举 / 中文说明集中登记在这里。settings.py 的数值读取（get_int / get_float）
+#  直接读 schema 做解析 + clamp，不再重复手写范围。
+# ═══════════════════════════════════════════════════════════
+
+
+class SettingSpec(NamedTuple):
+    """单个设置键的元数据声明。
+
+    字段：
+    - `type`: 存储值的目标类型，用于读取层解析。str 型也要登记（值为字符串）
+      以便统一说明；int/float 型除默认值外还需 min/max 供 clamp。
+    - `default`: 出厂默认值。**始终以字符串表示**（settings 表 value 是 TEXT，
+      INSERT OR IGNORE 与 cfg.get(key, "str") 调用点都假定字符串）。
+      尽量引用已有常量作为「来源真值」，避免复制数值。
+    - `min` / `max`: 数值型键的合法闭区间（可省略，省略则读取层不 clamp）。
+    - `choices`: 枚举型键的合法取值集合（可省略）。
+    - `desc`: 中文说明，代替原来散落在 flat dict 各处的行尾注释。
+    """
+
+    type: str  # int / float / bool / str / json / map
+    default: str
+    min: Optional[float] = None
+    max: Optional[float] = None
+    choices: Optional[tuple] = None
+    desc: str = ""
+
+
+#: 封禁时长类的统一上限（秒），与 ban_service.MAX_BAN_SECONDS（365 天）对齐
+_BAN_SEC_MIN = 0
+_BAN_SEC_MAX = 365 * 86400
+
+
+def build_settings_schema() -> Dict[str, SettingSpec]:
+    """构建全量设置 schema。
+
+    默认值 `default` 引用 `build_default_settings` 里用到的常量（来源真值），
+    schema 化后这些常量仍是唯一数值来源。`rate_limit_per_sec` 不在
+    DEFAULT_SETTINGS 里但历史上一直有 clamp，一并登记以保留行为。
+    """
+    ban_tier = BAN_DURATION_TIER_DEFAULTS
+    return {
+        # ── 封禁 ──
+        "auto_mode": SettingSpec("int", "0", min=0, max=1, desc="1=自动封禁（默认关闭）"),
+        "auto_ban_threshold": SettingSpec("int", "90", min=0, max=100, desc="自动封禁的最低风险分"),
+        "default_ban_duration_sec": SettingSpec(
+            "int",
+            str(DEFAULT_BAN_DURATION_SEC),
+            min=_BAN_SEC_MIN,
+            max=_BAN_SEC_MAX,
+            desc="手动封禁 / 策略兜底的默认封禁时长（秒），0=永久",
+        ),
+        # ── 封禁时长策略：按等级分档 ──
+        # 分档只在「自动封禁 / 走策略」时生效，手动封禁仍以 default_ban_duration_sec 为默认值。
+        # 0 = 该等级不分档，退回 default_ban_duration_sec。
+        "ban_duration_critical_sec": SettingSpec(
+            "int",
+            str(ban_tier[LEVEL_CRITICAL]),
+            min=_BAN_SEC_MIN,
+            max=_BAN_SEC_MAX,
+            desc="严重等级封禁时长（秒），0=不分档退回默认",
+        ),
+        "ban_duration_high_sec": SettingSpec(
+            "int",
+            str(ban_tier[LEVEL_HIGH]),
+            min=_BAN_SEC_MIN,
+            max=_BAN_SEC_MAX,
+            desc="高危等级封禁时长（秒），0=不分档退回默认",
+        ),
+        "ban_duration_medium_sec": SettingSpec(
+            "int",
+            str(ban_tier[LEVEL_MEDIUM]),
+            min=_BAN_SEC_MIN,
+            max=_BAN_SEC_MAX,
+            desc="中危等级封禁时长（秒），0=不分档退回默认",
+        ),
+        "ban_duration_low_sec": SettingSpec(
+            "int",
+            str(ban_tier[LEVEL_LOW]),
+            min=_BAN_SEC_MIN,
+            max=_BAN_SEC_MAX,
+            desc="低危等级封禁时长（秒），0=不分档退回默认",
+        ),
+        # ── 封禁时长策略：重复封禁递增 ──
+        "ban_escalation_enabled": SettingSpec(
+            "int", "0", min=0, max=1, desc="1=同一 IP 再次被封时按倍数加长"
+        ),
+        "ban_escalation_factor": SettingSpec(
+            "int",
+            str(DEFAULT_ESCALATION_FACTOR),
+            min=1,
+            max=1000,
+            desc="每次递增的倍数",
+        ),
+        "ban_escalation_max_sec": SettingSpec(
+            "int",
+            str(DEFAULT_ESCALATION_MAX_SEC),
+            min=60,
+            max=_BAN_SEC_MAX,
+            desc="递增封顶（秒）",
+        ),
+        # ── 惯犯自动加固：已封禁 IP 反复访问 → 直接列入黑名单（永久）──
+        "repeat_blacklist_enabled": SettingSpec(
+            "int", "1", min=0, max=1, desc="1=惯犯自动加固开启"
+        ),
+        "repeat_blacklist_hits": SettingSpec(
+            "int",
+            str(DEFAULT_REPEAT_BLACKLIST_HITS),
+            min=1,
+            max=10000,
+            desc="达到该次数直接列入黑名单",
+        ),
+        # ── 最大封禁时长（硬上限，秒）──
+        "max_ban_duration_sec": SettingSpec(
+            "int",
+            str(MAX_BAN_DURATION_DEFAULT_SEC),
+            min=60,
+            max=_BAN_SEC_MAX,
+            desc="所有有限时长的硬上限（秒），0=永久封禁不受此限",
+        ),
+        # ── 告警 ──
+        "alert_sound": SettingSpec("int", "1", min=0, max=1, desc="1=告警时播放提示音"),
+        # ⚠️ 已废弃（2026-10-27）：模态弹窗已取消，告警只走托盘气泡 + 声音 + 外部推送。
+        "alert_popup_level": SettingSpec("str", LEVEL_CRITICAL, desc="已废弃，仅兼容旧库"),
+        "alert_merge_sec": SettingSpec(
+            "int",
+            "60",
+            min=0,
+            max=86400,
+            desc="同 IP 告警合并窗口（秒）",
+        ),
+        # ── 已拦截（该 IP 已在封禁名单中）的重复命中 ──
+        "alert_block_silent": SettingSpec(
+            "int",
+            "1",
+            min=0,
+            max=1,
+            desc="1=已拦截的重复命中静默（不弹窗、不气泡、不响铃）",
+        ),
+        # ── 外部告警推送（Webhook，默认关闭）──
+        "alert_webhook_enabled": SettingSpec(
+            "int", "0", min=0, max=1, desc="1=开启外部 Webhook 推送"
+        ),
+        "alert_webhook_url": SettingSpec("str", "", desc="Webhook 地址（含机器人 key）"),
+        "alert_webhook_level": SettingSpec(
+            "str",
+            LEVEL_CRITICAL,
+            desc="告警推送的最低等级",
+        ),
+        # ── 运行与守护 ──
+        "autostart_enabled": SettingSpec(
+            "int", "0", min=0, max=1, desc="1=开机自启（普通权限观察模式）"
+        ),
+        # ── 数据 ──
+        "maintenance_enabled": SettingSpec("int", "1", min=0, max=1, desc="1=每天到点自动清理"),
+        "log_retention_days": SettingSpec(
+            "int",
+            str(DEFAULT_LOG_RETENTION_DAYS),
+            min=1,
+            max=3650,
+            desc="访问记录 + 日志文件的保留天数",
+        ),
+        "risk_retention_days": SettingSpec(
+            "int",
+            str(DEFAULT_RISK_RETENTION_DAYS),
+            min=1,
+            max=3650,
+            desc="risk_event 保留天数",
+        ),
+        "ban_retention_days": SettingSpec(
+            "int",
+            str(DEFAULT_BAN_RETENTION_DAYS),
+            min=1,
+            max=3650,
+            desc="ban_list 保留天数",
+        ),
+        "audit_retention_days": SettingSpec(
+            "int",
+            str(DEFAULT_AUDIT_RETENTION_DAYS),
+            min=1,
+            max=3650,
+            desc="audit_log 保留天数",
+        ),
+        "maintenance_hour": SettingSpec(
+            "int",
+            "3",
+            min=0,
+            max=23,
+            desc="每天几点执行定期清理（0-23）",
+        ),
+        "maintenance_last_date": SettingSpec(
+            "str", "", desc="最近一次清理日期 YYYY-MM-DD（内部状态）"
+        ),
+        "log_level": SettingSpec("str", "INFO", desc="日志级别"),
+        "geo_cache_size": SettingSpec(
+            "int",
+            "20000",
+            min=1000,
+            max=10_000_000,
+            desc="IP 归属地缓存条数",
+        ),
+        "monitor_buffer_size": SettingSpec(
+            "int",
+            "5000",
+            min=100,
+            max=10_000_000,
+            desc="实时监控环形缓冲行数",
+        ),
+        "db_batch_size": SettingSpec("int", "200", desc="批量写入攒批条数"),
+        "db_flush_ms": SettingSpec("int", "200", desc="批量写入最大延迟（毫秒）"),
+        # ── 本机端口访问观察（双通道采集）──
+        "watch_enabled": SettingSpec("int", "0", min=0, max=1, desc="1=启动时自动开启本机端口观察"),
+        "watch_ports": SettingSpec("str", "3389,1433,3306,6379,18080", desc="要观察的本机端口列表"),
+        "watch_methods": SettingSpec(
+            "str",
+            "table,fwlog",
+            desc="采集通道：table=TCP连接表 fwlog=防火墙日志",
+        ),
+        "watch_interval_sec": SettingSpec(
+            "float",
+            "5",
+            min=1.0,
+            max=86400.0,
+            desc="采样间隔（秒）",
+        ),
+        "watch_dedupe_sec": SettingSpec(
+            "int",
+            "120",
+            min=0,
+            max=86400,
+            desc="同一来源在多少秒内只上报一次",
+        ),
+        "watch_fwlog_path": SettingSpec("str", "", desc="防火墙日志路径，留空用系统默认位置"),
+        "watch_resolve_pid": SettingSpec("int", "1", min=0, max=1, desc="1=尝试解析监听进程名"),
+        "watch_skip_history": SettingSpec("int", "1", min=0, max=1, desc="1=启动时跳过历史日志"),
+        "watch_auto_ban": SettingSpec("int", "0", min=0, max=1, desc="1=允许本机采集触发自动封禁"),
+        # ── 程序内日志显示页 ──
+        "log_view_max_lines": SettingSpec(
+            "int",
+            "2000",
+            min=200,
+            max=1_000_000,
+            desc="日志页保留的最大行数",
+        ),
+        "log_view_tail_ms": SettingSpec(
+            "int",
+            "1000",
+            min=200,
+            max=3_600_000,
+            desc="日志页刷新间隔（毫秒）",
+        ),
+        # ── 离线库在线同步 ──
+        "xdb_auto_sync": SettingSpec("int", "1", min=0, max=1, desc="1=按间隔自动检查更新"),
+        "xdb_sync_interval_hours": SettingSpec(
+            "int",
+            "24",
+            min=1,
+            max=8760,
+            desc="自动检查间隔（小时）",
+        ),
+        "xdb_sync_on_start": SettingSpec("int", "1", min=0, max=1, desc="1=启动后后台检查一次"),
+        "xdb_auto_download": SettingSpec(
+            "int", "1", min=0, max=1, desc="1=发现新版本自动下载并热换"
+        ),
+        "xdb_sources": SettingSpec("json", "[]", desc="自定义镜像源（JSON 数组，空=只用内置源）"),
+        "xdb_proxy": SettingSpec("str", "", desc="下载代理，留空=直连"),
+        "xdb_last_check_at": SettingSpec("int", "0", desc="epoch 毫秒"),
+        "xdb_last_update_at": SettingSpec("int", "0", desc="epoch 毫秒"),
+        "xdb_last_result": SettingSpec("str", "", desc="最近一次同步结果摘要"),
+        # ── 令牌桶限速（历史 clamp 键，不在 DEFAULT_SETTINGS 里）──
+        "rate_limit_per_sec": SettingSpec(
+            "int",
+            "300",
+            min=1,
+            max=1_000_000,
+            desc="令牌桶每秒补充令牌数",
+        ),
+    }
+
+
+#: 进程内全局 schema（构建一次）。settings.py 读它做类型解析与 clamp；
+#: 新增 / 调整键只改 build_settings_schema() 即可，默认值与范围天然一致。
+SETTINGS_SCHEMA: Dict[str, SettingSpec] = build_settings_schema()
+
+
+#: 只在 schema 里登记（供 clamp/解析）、但不写入 settings 表的键。
+#: 目前仅 `rate_limit_per_sec`（令牌桶限速）：它没有出厂默认值，默认由调用方
+#: 传（如 selftest.py cfg.get_int("rate_limit_per_sec", 300)），历史上只作为
+#: 读取层的范围 clamp 存在，不属于 DEFAULT_SETTINGS 的 53 个落表键。
+_SETTINGS_NO_SEED = {"rate_limit_per_sec"}
+
+
 # ── 默认设置（写入 settings 表）──
-DEFAULT_SETTINGS = {
-    # 封禁
-    "auto_mode": "0",  # 1=自动封禁（默认关闭）
-    "auto_ban_threshold": "90",  # 自动封禁的最低风险分
-    "default_ban_duration_sec": "3600",
-    # ── 封禁时长策略：按等级分档 ──
-    # 分档只在「自动封禁 / 走策略」时生效，手动封禁仍以 default_ban_duration_sec 为默认值。
-    # 0 = 该等级不分档，退回 default_ban_duration_sec。
-    "ban_duration_critical_sec": str(BAN_DURATION_TIER_DEFAULTS[LEVEL_CRITICAL]),
-    "ban_duration_high_sec": str(BAN_DURATION_TIER_DEFAULTS[LEVEL_HIGH]),
-    "ban_duration_medium_sec": str(BAN_DURATION_TIER_DEFAULTS[LEVEL_MEDIUM]),
-    "ban_duration_low_sec": str(BAN_DURATION_TIER_DEFAULTS[LEVEL_LOW]),
-    # ── 封禁时长策略：重复封禁递增 ──
-    "ban_escalation_enabled": "0",  # 1=同一 IP 再次被封时按倍数加长
-    "ban_escalation_factor": str(DEFAULT_ESCALATION_FACTOR),  # 每次递增的倍数
-    "ban_escalation_max_sec": str(DEFAULT_ESCALATION_MAX_SEC),  # 递增封顶（秒）
-    # ── 惯犯自动加固：已封禁 IP 反复访问 → 直接列入黑名单（永久）──
-    # 只封 1 小时的 IP 到期后还能再来，而「封了还在撞」本身就是最明确的恶意信号。
-    # 达到阈值后把它写进黑名单（永久封禁 + 之后每次访问都按 100 分算），
-    # 彻底省掉「到期 → 重来 → 再封」的循环。动作会自动审计，并提示一次。
-    "repeat_blacklist_enabled": "1",
-    "repeat_blacklist_hits": str(DEFAULT_REPEAT_BLACKLIST_HITS),
-    # ── 最大封禁时长（硬上限，秒）──
-    # 防火墙规则本身没有到期时间，到期完全靠程序内巡检删规则。程序长期不在时，
-    # 「封一年」就等于永久封掉一个可能无辜的地址。所以所有**有限时长**都会被截断到
-    # 这个值以内（app.ban_service.max_ban_seconds 是唯一读取点）。
-    # ⚠️ 永久封禁（default_ban_duration_sec=0 / 黑名单）**不受此限**。
-    "max_ban_duration_sec": str(MAX_BAN_DURATION_DEFAULT_SEC),
-    # 告警
-    "alert_sound": "1",
-    # ⚠️ 已废弃（2026-10-27）：模态弹窗已取消，告警只走托盘气泡 + 声音 + 外部推送。
-    # 键保留只为兼容旧库（旧值 "none"/"critical" 不再被任何代码读取），
-    # 删掉它会让老库里的 rows 变成无主数据，收益为零。
-    "alert_popup_level": LEVEL_CRITICAL,
-    "alert_merge_sec": "60",  # 同 IP 告警合并窗口
-    # ── 已拦截（该 IP 已在封禁名单中）的重复命中 ──
-    # 2026-10-22 用户反馈：「已拦截了还弹窗提示或者右下角窗口提示，影响电脑操作」。
-    # 防火墙规则已经生效，重复命中只是**同一件事又发生了一次**，不是新待办 ——
-    # 这时候弹窗除了抢走焦点没有任何信息量。默认改为静默：只累加拦截次数
-    # （ban_list.hit_count），不弹窗、不气泡、不响铃。
-    "alert_block_silent": "1",
-    # ── 外部告警推送（Webhook，默认关闭）──
-    # 地址里通常带机器人 key，日志只记录 scheme://host（见 core/alert_webhook.py）
-    "alert_webhook_enabled": "0",
-    "alert_webhook_url": "",
-    "alert_webhook_level": "critical",
-    # 运行与守护
-    # 开机自启：封禁时长只靠本程序的到点巡检兑现（防火墙规则没有到期时间），
-    # 所以进程没了 = 到期的封禁永远不解除。默认关闭是让用户自己决定是否常驻；
-    # v1.9.5 起开机自启的是普通权限观察模式，不弹 UAC，也不写防火墙规则。
-    "autostart_enabled": "0",
-    # 数据
-    "maintenance_enabled": "1",  # 1=每天到点自动清理（关掉就只保留手动入口）
-    "log_retention_days": str(DEFAULT_LOG_RETENTION_DAYS),  # 访问记录 + 日志文件的保留天数
-    # ── 其余三张表各自的保留期（见 DEFAULT_*_RETENTION_DAYS 说明）──
-    "risk_retention_days": str(DEFAULT_RISK_RETENTION_DAYS),  # risk_event
-    "ban_retention_days": str(DEFAULT_BAN_RETENTION_DAYS),  # ban_list（仅终态记录）
-    "audit_retention_days": str(DEFAULT_AUDIT_RETENTION_DAYS),  # audit_log
-    "maintenance_hour": "3",  # 每天几点执行定期清理（0-23）
-    "maintenance_last_date": "",  # 最近一次清理日期 YYYY-MM-DD（内部状态）
-    "log_level": "INFO",
-    "geo_cache_size": "20000",
-    "monitor_buffer_size": "5000",  # 实时监控环形缓冲行数
-    "db_batch_size": "200",  # 批量写入攒批条数
-    "db_flush_ms": "200",  # 批量写入最大延迟（毫秒）
-    # ── 本机端口访问观察（双通道采集）──
-    "watch_enabled": "0",  # 1=启动程序时自动开启本机端口观察
-    "watch_ports": "3389,1433,3306,6379,18080",  # 要观察的本机端口列表
-    "watch_methods": "table,fwlog",  # 采集通道：table=TCP连接表 fwlog=防火墙日志
-    "watch_interval_sec": "5",  # 采样间隔（秒）
-    "watch_dedupe_sec": "120",  # 同一来源在多少秒内只上报一次
-    "watch_fwlog_path": "",  # 防火墙日志路径，留空用系统默认位置
-    "watch_resolve_pid": "1",  # 1=尝试解析监听进程名（需要权限）
-    "watch_skip_history": "1",  # 1=启动时跳过日志里的历史内容，避免洪水
-    "watch_auto_ban": "0",  # 1=允许本机采集的数据触发自动封禁（默认关闭）
-    # ── 程序内日志显示页 ──
-    "log_view_max_lines": "2000",  # 日志页保留的最大行数
-    "log_view_tail_ms": "1000",  # 日志页刷新间隔（毫秒）
-    # 离线库在线同步
-    "xdb_auto_sync": "1",  # 1=按间隔自动检查更新
-    "xdb_sync_interval_hours": "24",  # 自动检查间隔（小时）
-    "xdb_sync_on_start": "1",  # 1=启动后后台检查一次
-    "xdb_auto_download": "1",  # 1=发现新版本自动下载并热换（全程校验+可回滚）
-    # 自定义镜像源：JSON 数组，每项一个模板前缀（含 {path} 占位），按顺序优先尝试。
-    # 空数组 = 只用内置源；旧的单条 xdb_source 仍会被读取并自动迁移过来。
-    "xdb_sources": "[]",
-    "xdb_proxy": "",  # 下载代理，留空=直连
-    "xdb_last_check_at": "0",  # epoch 毫秒
-    "xdb_last_update_at": "0",  # epoch 毫秒
-    "xdb_last_result": "",  # 最近一次同步结果摘要
-}
+def build_default_settings() -> Dict[str, str]:
+    """由 schema 派生 flat-string 默认设置 dict。
+
+    每个键的默认值取 `SettingSpec.default`（本就是字符串，直接落表 /
+    供 `cfg.get(key, "str")` 使用），顺序即 schema 的登记顺序。
+    跳过 `_SETTINGS_NO_SEED` 中登记的键（它们只参与 clamp，不落表）。
+    这是 seeding（core/database.py:189 `for k, v in DEFAULT_SETTINGS.items()`）
+    的唯一事实来源。
+    """
+    return {k: spec.default for k, spec in SETTINGS_SCHEMA.items() if k not in _SETTINGS_NO_SEED}
+
+
+DEFAULT_SETTINGS: Dict[str, str] = build_default_settings()
 
 # 预留常量：当前版本没有读取该环境变量，不要对外宣称「一键关联网」。
 # 纯内网关闭出站同步的正式途径是设置页的三个开关：

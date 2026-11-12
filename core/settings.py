@@ -17,12 +17,14 @@ import threading
 from typing import Dict, Mapping, Optional, Tuple
 
 from core import database
+from core.config import SETTINGS_SCHEMA
 
 _lock = threading.RLock()
 _cache: Dict[str, str] = {}
 _warmed = False
 
-# ── 数值型设置的合法区间（闭区间，P2-2）──
+
+# ── 数值型设置的合法区间（闭区间，P2-2 / P2-6）──
 #
 # 为什么在读取层夹：设置表的 value 是 TEXT，手工改库 / 老版本 bug / 恢复了别人
 # 导出的库，都可能写入「保留期 0 天」（启动即删光日志）或「阈值 -5」（每个
@@ -32,33 +34,25 @@ _warmed = False
 # 注意边界语义（改范围前先核对 tests/）：
 # - 封禁时长 0 = 「永久」（ban_service.prepare 的既有约定），min 必须是 0；
 # - 时长上限与 MAX_BAN_SECONDS（365 天）对齐，超长值由 ban_service 再夹一次；
-# - 时间戳类键（xdb_last_check_at 等）**不登记**——它们是动态值，不该被夹。
-_NUMERIC_RANGES: Dict[str, Tuple[float, float]] = {
-    "auto_ban_threshold": (0, 100),
-    "default_ban_duration_sec": (0, 365 * 86400),
-    "ban_duration_critical_sec": (0, 365 * 86400),
-    "ban_duration_high_sec": (0, 365 * 86400),
-    "ban_duration_medium_sec": (0, 365 * 86400),
-    "ban_duration_low_sec": (0, 365 * 86400),
-    "max_ban_duration_sec": (60, 365 * 86400),
-    "ban_escalation_factor": (1, 1000),
-    "ban_escalation_max_sec": (60, 365 * 86400),
-    "repeat_blacklist_hits": (1, 10000),
-    "alert_merge_sec": (0, 86400),
-    "log_retention_days": (1, 3650),
-    "risk_retention_days": (1, 3650),
-    "ban_retention_days": (1, 3650),
-    "audit_retention_days": (1, 3650),
-    "maintenance_hour": (0, 23),
-    "monitor_buffer_size": (100, 10_000_000),
-    "geo_cache_size": (1000, 10_000_000),
-    "watch_interval_sec": (1.0, 86400.0),
-    "watch_dedupe_sec": (0, 86400),
-    "xdb_sync_interval_hours": (1, 8760),
-    "log_view_max_lines": (200, 1_000_000),
-    "log_view_tail_ms": (200, 3_600_000),
-    "rate_limit_per_sec": (1, 1_000_000),
-}
+# - 时间戳类键（xdb_last_check_at 等）**不登记 min/max**——它们是动态值，不该被夹。
+#
+# ⚠️ 范围唯一来源是 core.config.SETTINGS_SCHEMA（P2-6 声明式 schema），这里
+# 只做「运行时推导一次」，不再手工维护第二份数值区间。
+def _build_numeric_ranges() -> Dict[str, Tuple[float, float]]:
+    """从 schema 推导 int/float 型键的 clamp 区间。
+
+    只纳入同时登记了 min 与 max 的数值型键；未登记范围（str 型、时间戳等）
+    不 clamp，原样返回。`rate_limit_per_sec` 在 schema 中（min=1,
+    max=1_000_000），自动纳入，无需在此单列。
+    """
+    ranges: Dict[str, Tuple[float, float]] = {}
+    for key, spec in SETTINGS_SCHEMA.items():
+        if spec.type in ("int", "float") and spec.min is not None and spec.max is not None:
+            ranges[key] = (spec.min, spec.max)
+    return ranges
+
+
+_NUMERIC_RANGES: Dict[str, Tuple[float, float]] = _build_numeric_ranges()
 
 
 def _clamp_range(key: str, value: float) -> float:
