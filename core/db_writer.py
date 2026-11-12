@@ -40,11 +40,15 @@ class BatchWriter:
         flush_interval: float = 0.2,
         queue_size: int = 200_000,
         name: str = "pg-writer",
+        max_backoff: float = 5.0,
+        connect_attempts: int = 30,
     ):
         self._q: queue.Queue[Tuple[str, Any]] = queue.Queue(maxsize=queue_size)
         self._batch_size = max(1, int(batch_size))
         self._flush_interval = max(0.005, float(flush_interval))
         self._name = name
+        self._max_backoff = max(0.05, float(max_backoff))
+        self._connect_attempts = max(1, int(connect_attempts))
         self._stop = threading.Event()
         self._idle = threading.Event()  # 「没有半途取走但未提交的数据」
         self._idle.set()
@@ -55,6 +59,8 @@ class BatchWriter:
         self.dropped = 0
         self.errors = 0
         self.batches = 0
+        self._conn_fails = 0  # 累计建连失败次数（看护日志用）
+        self._reconnects = 0  # 累计成功重连次数
 
     # ── 生命周期 ──
     def start(self) -> None:
@@ -145,31 +151,117 @@ class BatchWriter:
         return self._q.empty() and self._idle.is_set()
 
     # ── 写入线程 ──
+    def _connect_once(self):
+        """单次建连尝试（无重试，仅成功/抛异常）。供启动期与看护期复用。"""
+        return database.connect_for_writer()
+
+    def _count_conn_fail(self) -> None:
+        with self._lock:
+            self._conn_fails += 1
+
     def _connect(self):
         """
         建立写入连接。SQLite 的 `PRAGMA journal_mode=WAL` 需要一个短暂的
         排他锁，遇到杀软扫描 / 备份 / 刚建库时会瞬间拿到 "database is locked"。
         这种锁几乎都是瞬时的，所以做有限重试，而不是一失败就放弃写入。
+
+        返回 `None` 表示「本回合建连不可用」（超限失败或收到停止信号）；调用方
+        （`_loop` 的看护逻辑）须进入有限退避重试，绝不允许因此退线程。
         """
         attempt = 0
         while not self._stop.is_set():
             try:
-                return database.connect_for_writer()
+                return self._connect_once()
             except Exception as e:
                 attempt += 1
-                if attempt >= 30:
-                    log.exception("批量写入器连续 %d 次建连失败，写入功能不可用", attempt)
+                self._count_conn_fail()
+                if attempt >= self._connect_attempts:
+                    log.exception(
+                        "批量写入器连续 %d 次建连失败（启动期），转入看护重连；累计失败 %d 次",
+                        attempt,
+                        self._conn_fails,
+                    )
                     return None
                 if attempt == 1:
                     log.warning("批量写入器建立连接失败（%s），正在重试…", e)
-                time.sleep(min(0.05 * attempt, 1.0))
+                self._wait_backoff(attempt)
         return None
 
-    def _loop(self) -> None:
-        conn = self._connect()
-        if conn is None:
-            return
+    def _wait_backoff(self, attempt: int) -> bool:
+        """
+        指数退避等待，且可被 ``stop()`` 立即打断。
 
+        返回 ``True`` 表示期间未收到停止信号可继续；``False`` 表示已请求停止，
+        应退出循环。用 ``_stop.wait()`` 代替 ``time.sleep()`` 是让看护重试的
+        长时间等待在 stop 时立即唤醒，而不是干等满一个退避周期。
+        """
+        delay = min(self._max_backoff, 0.05 * (2 ** min(attempt, 10)))
+        return not self._stop.wait(delay)
+
+    def _loop(self) -> None:
+        """
+        写线程主循环：建连 → 攒批写入 → 建连失败进入看护重连 → 恢复续写。
+
+        关键设计：**建连失败绝不退线程**。`_connect()` 返回 None 后进入指数
+        退避重连循环（可被 stop 打断）；期间队列里的待写数据**不从队列取走**，
+        天然安全暂存、不丢。连接一恢复，正常 drain/写继续。
+        """
+        while not self._stop.is_set():
+            conn = self._connect()
+            if conn is None:
+                # 看护重连：有限指数退避 + 可被打断；不吞异常、不假活。
+                if self._watchdog_backoff():
+                    continue
+                break
+            try:
+                self._run_with_conn(conn)
+                break  # 正常退出路径（收到 stop 且队列榨干）
+            except Exception:
+                # 运行期连接突然失效（非本批可回滚的错，连接本身坏了）→ 重连。
+                log.exception("批量写入器运行期连接异常，丢弃后重连")
+                with contextlib.suppress(Exception):
+                    conn.close()
+                with self._lock:
+                    self._reconnects += 1
+                continue
+        log.info("批量写入器已退出：%s", self.stats())
+
+    def _watchdog_backoff(self) -> bool:
+        """
+        连接不可用时的看护等待。指数退避递增至 ``_max_backoff`` 封顶，
+        可被 ``stop()`` 打断。返回 True 表示应继续重试，False 表示应退出。
+
+        探测用轻量 `_connect_once`（单次）而不是 `_connect`（30 连发），
+        否则每一轮探测自身就要阻塞近 150s，看护退避形同虚设。
+        """
+        attempt = 0
+        while not self._stop.is_set():
+            delay = min(self._max_backoff, 0.2 * (2 ** min(attempt, 10)))
+            log.warning(
+                "批量写入器连接不可用，%.1fs 后重试（第 %d 轮，累计失败 %d 次）",
+                delay,
+                attempt + 1,
+                self._conn_fails,
+            )
+            if self._stop.wait(delay):
+                return False
+            try:
+                probe = self._connect_once()
+            except Exception:
+                # 本轮探测失败，计数并退避递增继续看护
+                self._count_conn_fail()
+                attempt += 1
+                continue
+            with contextlib.suppress(Exception):
+                probe.close()  # 只验证可连，真正建连交给外层 _loop 下次
+            with self._lock:
+                self._reconnects += 1
+            log.info("批量写入器连接已恢复，重新进入写入循环")
+            return True
+        return False
+
+    def _run_with_conn(self, conn) -> None:
+        """持有一条健康连接时的正常写入循环；连接失效抛异常交给外层看护。"""
         while True:
             items = self._drain()
             if items:
@@ -180,10 +272,13 @@ class BatchWriter:
                 continue
             self._idle.set()
             if self._stop.is_set():
-                break
-        with contextlib.suppress(Exception):
-            conn.close()
-        log.info("批量写入器已退出：%s", self.stats())
+                # 收到停止：榨干队列（此时队列为空）后正常退出，关闭连接
+                with contextlib.suppress(Exception):
+                    conn.close()
+                return
+            # 队列空且未停止：回到 _drain 阻塞等待积累下一条（最长 flush_interval），
+            # 既不会忙等空转 CPU，又保证低流量也照常落库。
+        return
 
     def _write_batch(self, conn, items: List[Tuple[str, Any]]) -> None:
         try:
@@ -215,6 +310,14 @@ class BatchWriter:
             with self._lock:
                 self.errors += len(items)
             log.exception("批量写入失败，本批 %d 条已回滚", len(items))
+
+            # 连接已证失效（库被关/写锁被锁死到不可用）：回滚后不能继续复用，
+            # 把「连接坏」这一事实抛给外层看护去重连 —— 否则带着坏连接会在
+            # 下一次 drain 反复失败。已入队批次在此计入 errors，非静默丢。
+            try:
+                conn.execute("SELECT 1")
+            except Exception:
+                raise
 
     def _drain(self) -> List[Tuple[str, Any]]:
         """
