@@ -696,8 +696,10 @@ class BansPage(BaseTablePage):
             head.addWidget(w)
         lay.addLayout(head)
 
-        # ── 筛选行 ──
-        bar = QHBoxLayout()
+        # ── 筛选行（包进 widget 容器便于空态折叠，见 _render_bans，与 page_monitor Q4 一致）
+        self.bar_box = QWidget()
+        self.bar_box.setObjectName("bans_filter_bar")
+        bar = QHBoxLayout(self.bar_box)
         bar.setContentsMargins(16, 0, 16, 8)
         bar.setSpacing(8)
         self.search = QLineEdit()
@@ -724,7 +726,7 @@ class BansPage(BaseTablePage):
         bar.addWidget(self.status_filter)
         bar.addStretch(1)
         bar.addWidget(self.lbl_info)
-        lay.addLayout(bar)
+        lay.addWidget(self.bar_box)
 
         # ── 批量行：只对已解封/已封禁的记录生效，与上面建议表互不影响 ──
         bb = QHBoxLayout()
@@ -1401,6 +1403,7 @@ class BansPage(BaseTablePage):
             self.empty.desc.setText("确认封禁后，记录会出现在这里")
         self.empty.setVisible(not rows)
         self.table.setVisible(bool(rows))
+        self.bar_box.setVisible(bool(rows))
         # 计数写在卡片标题里：两块卡片并排上下时，「这块有几条」是定位的第一步
         self.ban_title.setText(f"封禁记录（{len(rows)}）")
         self.tabs.setTabText(self.tabs.indexOf(self.ban_panel), f"封禁记录（{len(rows)}）")

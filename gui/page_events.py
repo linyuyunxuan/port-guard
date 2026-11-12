@@ -363,7 +363,7 @@ class EventsPage(BaseTablePage):
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
         lay.setSpacing(8)
-        lay.addLayout(self._build_filters())
+        lay.addWidget(self._build_filters())
 
         div = QFrame()
         div.setObjectName("panel_divider")
@@ -373,8 +373,12 @@ class EventsPage(BaseTablePage):
         lay.addWidget(self._build_batch_bar())
         return card
 
-    def _build_filters(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
+    def _build_filters(self) -> QWidget:
+        # 过滤栏包进 widget 容器，便于空态时整体折叠（见 _render，与 page_monitor Q4 一致）
+        self.bar_box = QWidget()
+        self.bar_box.setObjectName("events_filter_bar")
+        bar = QHBoxLayout(self.bar_box)
+        bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
 
         self.search = QLineEdit()
@@ -443,15 +447,17 @@ class EventsPage(BaseTablePage):
         # 刷新中的提示 + 「更新于」时间戳都落在这行小字上（见 widgets.RefreshGuard）
         self._refresh = RefreshGuard(self.lbl_info)
 
-        for combo in (self.search, self.level, self.handled, self.range):
-            bar.addWidget(combo)
+        bar.addWidget(self.search)
+        bar.addWidget(self.level)
+        bar.addWidget(self.handled)
+        bar.addWidget(self.range)
         bar.addWidget(self.dt_from)
         bar.addWidget(self.lbl_to)
         bar.addWidget(self.dt_to)
         bar.addWidget(self.limit)
         bar.addWidget(self.merge)
         bar.addStretch(1)
-        return bar
+        return self.bar_box
 
     def _build_batch_bar(self) -> QWidget:
         wrap = QWidget()
@@ -772,6 +778,7 @@ class EventsPage(BaseTablePage):
     def _render(self, rows: List[Dict]) -> None:
         if rows:
             self.empty.setVisible(False)
+            self.bar_box.setVisible(True)
         else:
             self.empty.set_state(
                 "没有符合条件的事件" if self._filters_active() else "暂无风险事件",
@@ -780,6 +787,7 @@ class EventsPage(BaseTablePage):
                 else "当前规则未命中任何访问，这是正常状态",
             )
             self.empty.setVisible(True)
+            self.bar_box.setVisible(False)
         self.table.setVisible(bool(rows))
 
         self.sel.begin_render()

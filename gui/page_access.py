@@ -277,7 +277,7 @@ class AccessPage(QWidget):
         head.add_action(self.btn_clear)
         root.addWidget(head)
 
-        root.addLayout(self._build_filters())
+        root.addWidget(self._build_filters())
 
         # 封禁态没读出来时必须说清楚，不能让行内菜单照常写「封禁该 IP」
         self._ban_state_banner = WarnBanner("", "重试", C.danger, level="danger")
@@ -292,8 +292,12 @@ class AccessPage(QWidget):
         root.addWidget(self._build_table(), 1)
         root.addLayout(self._build_pager())
 
-    def _build_filters(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
+    def _build_filters(self) -> QWidget:
+        # 过滤栏包进 widget 容器，便于空态时整体折叠（见 _render，与 page_monitor Q4 一致）
+        self.bar_box = QWidget()
+        self.bar_box.setObjectName("access_filter_bar")
+        bar = QHBoxLayout(self.bar_box)
+        bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
 
         self.search = QLineEdit()
@@ -374,7 +378,7 @@ class AccessPage(QWidget):
         bar.addWidget(self.btn_export)
         bar.addStretch(1)
         bar.addWidget(self.lbl_hint)
-        return bar
+        return self.bar_box
 
     def _build_table(self) -> QTableWidget:
         self.table = QTableWidget(0, len(HEADERS))
@@ -627,6 +631,7 @@ class AccessPage(QWidget):
     def _render(self, rows: List[AccessRecord]) -> None:
         if rows:
             self.empty.setVisible(False)
+            self.bar_box.setVisible(True)
         else:
             self.empty.set_state(
                 "没有符合条件的访问记录" if self._filters_active() else "暂无访问记录",
@@ -635,6 +640,7 @@ class AccessPage(QWidget):
                 else "还没有收到任何访问上报",
             )
             self.empty.setVisible(True)
+            self.bar_box.setVisible(False)
         self.table.setVisible(bool(rows))
 
         self.table.setRowCount(0)
