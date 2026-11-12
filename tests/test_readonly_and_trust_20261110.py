@@ -92,7 +92,8 @@ def test_startup_geo_failure_never_blocks_unattended():
 def test_geo_reload_entry_is_wired():
     assert "geo_reload_requested" in _read("gui/page_settings.py")
     assert "geo_reload_requested.connect" in _read("gui/main_window.py")
-    assert "重新加载定位库" in _read("gui/page_settings.py")
+    # 定位库按钮在「数据与离线库」子页（拆分后归属 page_data）
+    assert "重新加载定位库" in _read("gui/page_data.py")
     assert "reload_locator()" in _read("gui/main_window.py")
 
 

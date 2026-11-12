@@ -138,7 +138,8 @@ def test_about_dialog_points_to_files_that_really_ship():
 
 
 def test_settings_button_does_not_promise_app_update():
-    text = _read("gui/page_settings.py")
+    # 离线库更新按钮文本随「数据与离线库」tab 拆分迁移到 page_data
+    text = _read("gui/page_data.py")
     assert "检查离线库更新" in text
     assert "立即检查更新" not in text
 
