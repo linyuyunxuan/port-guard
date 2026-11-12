@@ -451,10 +451,13 @@ class OverviewPage(QWidget):
             s = xdb_updater.status_summary()
             files = s.get("files", {})
             ready = sum(1 for d in files.values() if d.get("exists"))
+            n_files = len(files) or 2  # XDB_UPSTREAM 至少 v4/v6 两份
             auto = "开" if s.get("auto_sync") else "关"
-            num.setText(f"v{APP_VERSION}")
-            note.setText(f"离线 IP 库 {ready}/{len(files) or 2} 个文件就绪 · 自动同步{auto}")
-            foot.setText("离线库版本与同步状态 · 点击查看设置")
+            # 主数字保持「统计值」语气（与其余五卡一致）：就绪的离线库文件数；
+            # 版本号属于标识属性，改放进明细行，不放主数字区（见 04_ui_review Q3）。
+            num.setText(f"{ready}/{n_files}")
+            note.setText(f"离线 IP 库就绪 {ready}/{n_files} 个文件 · 自动同步{auto}")
+            foot.setText("点击查看离线库更新 · 版本 v" + APP_VERSION)
             last = int(s.get("last_update_at", 0) or 0)
             last_txt = (
                 datetime.datetime.fromtimestamp(last / 1000.0).strftime("%m-%d %H:%M")
@@ -463,8 +466,8 @@ class OverviewPage(QWidget):
             )
             self._set_detail(
                 "system",
-                "上次同步：{}\n自动下载：{}".format(
-                    last_txt, "开" if s.get("auto_download") else "关"
+                "上次同步：{}\n自动下载：{} · 版本 v{}".format(
+                    last_txt, "开" if s.get("auto_download") else "关", APP_VERSION
                 ),
             )
         except Exception as exc:

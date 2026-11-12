@@ -534,8 +534,11 @@ class MonitorPage(QWidget):
             cards.addWidget(c, 1)
         root.addLayout(cards)
 
-        # 过滤栏
-        bar = QHBoxLayout()
+        # 过滤栏（包进容器便于空态整体折叠，见 _update_empty Q4）
+        self.bar_box = QWidget()
+        self.bar_box.setObjectName("monitor_filter_bar")
+        bar = QHBoxLayout(self.bar_box)
+        bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索 IP / 路径 / 进程 / User-Agent…")
@@ -579,7 +582,7 @@ class MonitorPage(QWidget):
         bar.addWidget(self.chk_merge)
         bar.addStretch(1)
         bar.addWidget(self.lbl_count)
-        root.addLayout(bar)
+        root.addWidget(self.bar_box)
 
         # 暂停提示（仅暂停时出现）
         self.pause_banner = WarnBanner(
@@ -826,12 +829,17 @@ class MonitorPage(QWidget):
         """
         total = self.model.total
         view = self.model.rowCount()
+        # 空态时时过滤栏一并折叠：搜索框 + 筛选本就是为了在结果里缩小范围，
+        # 列表都空了它们毫无用处，还占一整行让空态页重心上飘（Q4）。统计卡
+        # 仍保留 —— 它反映今日/风险/封禁概览，空表下仍是有意义的读数。
         if view > 0:
             self.table.setVisible(True)
             self.empty.setVisible(False)
+            self.bar_box.setVisible(True)
             return
 
         self.table.setVisible(False)
+        self.bar_box.setVisible(False)
         if total > 0:
             self._empty_kind = "norisk"
             self.empty.set_state("没有匹配记录", "换个关键字，或把范围改回「全部」", "重置筛选")
