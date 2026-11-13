@@ -10,9 +10,21 @@
 import json
 import os
 
+import pytest
+
 from core import database
 from core import settings as cfg
 from core import xdb_updater as U
+
+
+@pytest.fixture(autouse=True)
+def _isolate_autostart_registry(monkeypatch):
+    """save() 会读真实注册表；CI runner 上读取失败会弹模态框，offscreen 下无人关闭。"""
+    from core import autostart
+
+    monkeypatch.setattr(autostart, "_read_value", lambda: "")
+    monkeypatch.setattr(autostart, "_write_value", lambda command: (True, ""))
+    monkeypatch.setattr(autostart, "_delete_value", lambda: (True, ""))
 
 
 def _qapp():

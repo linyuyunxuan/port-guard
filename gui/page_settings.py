@@ -217,7 +217,7 @@ class SettingsPage(QWidget):
         """
         for page in self._subpages():
             if page is not None and hasattr(page, name):
-                object.__setattr__(page, name, value)
+                setattr(page, name, value)
                 return
         super().__setattr__(name, value)
 
