@@ -67,3 +67,9 @@ Desktop.ini
 _design/*.png
 _design/after/
 _design/before/
+
+# ── 发布评估期遗留的未跟踪项（一次性排除，防 git add -A 误收）──
+# 注意：只排除这一个具体 md，_design/ 下其余入库脚本仍需纳入版本库。
+_design/04_ui_review.md
+_verify_tmp/
+gui/page_settings_old.py

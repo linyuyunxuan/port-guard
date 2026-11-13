@@ -25,4 +25,4 @@ PySide2==5.15.2.1; python_version < "3.9"
 # 开发栈：刻意只装 Essentials —— 本项目只用到 QtCore / QtGui / QtWidgets / QtSvg，
 # 完整版会额外拖入 Addons（Qt3D/Charts/Multimedia/Quick3D…）与 WebEngine/Pdf，
 # 实测 site-packages/PySide6 从 215 MB 涨到 656 MB。导入路径不变，代码零改动。
-PySide6-Essentials>=6.6; python_version >= "3.9"
+PySide6-Essentials>=6.6,<7; python_version >= "3.9"

@@ -26,7 +26,7 @@ dependencies = [
     "PySide2==5.15.2.1; python_version < '3.9'",
     # 开发栈只要 Essentials：Addons / WebEngine / Pdf 一个都用不到，
     # 装上会让 site-packages/PySide6 从 215 MB 涨到 656 MB。
-    "PySide6-Essentials>=6.6; python_version >= '3.9'",
+    "PySide6-Essentials>=6.6,<7; python_version >= '3.9'",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +38,9 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
+    # CI 的 pytest --timeout / --timeout-method 依赖此插件（py3-none-any，
+    # Requires-Dist pytest>=7.0.0），已实测与 pytest 9.1.1 兼容。
+    "pytest-timeout==2.4.0",
     "ruff==0.17.1",
     "mypy==2.4.0",
     "pyinstaller==6.22.3",   # 打包验证：pyinstaller port_guard.spec

@@ -59,7 +59,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov pytest-timeout httpx ruff mypy
+          # 门禁工具一律读钉死清单（requirements-dev.txt，与 pyproject [dev]
+          # 逐字一致），不在 CI 里另写版本号，避免工具升级导致 mypy 基线漂移。
+          # httpx 经复核 tests/ 无 import、CI 也不需要，已从清单移除。
+          pip install -r requirements-dev.txt
 
       # 防回退：requirements.txt 一旦被改回 `PySide6`（完整版），会静默多装
       # Addons / WebEngine / Pdf 约 441 MB，而界面一个都用不到。这里直接卡住。
@@ -81,8 +84,11 @@ jobs:
       - name: 格式检查（ruff format）
         run: ruff format --check .
 
-      - name: 类型检查（mypy）
-        run: mypy .
+      # mypy 有 7 个既有 error（4 个文件），裸跑 `mypy .` 必然 exit 1。
+      # 改用基线判定脚本：允许既有债务、拦截任何新增或扩散到别的文件，
+      # 避免用 continue-on-error / 全局 ignore_errors 一刀切豁免糊弄。
+      - name: 类型检查（mypy 基线门禁）
+        run: python tools/check_mypy_baseline.py
 
       # --timeout：单个用例超时就用 faulthandler 把全部线程栈打出来。
       # 2026-10-23 的教训 —— py3.11 上 pytest 卡了 26 分钟没结束（3.12 同一份代码

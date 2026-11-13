@@ -3,11 +3,16 @@
 # 安装：pip install -r requirements-dev.txt
 #
 # 说明：
-# - 版本下限与 pyproject.toml 的 [project.optional-dependencies].dev 保持一致。
+# - 用 `==` 精确钉死，与 pyproject.toml 的 [project.optional-dependencies].dev
+#   逐字一致；CI 的门禁工具安装也读本文件（不再另写版本），避免工具升级
+#   导致门禁基线漂移（如 mypy 2.4.0 vs 2.4.1 对同一代码判 7 vs 11 个 error）。
 
-pytest>=8.0
-pytest-cov>=5.0
-ruff>=0.6
-mypy>=1.10
+pytest==9.1.1
+pytest-cov==7.1.0
+# CI 的 pytest --timeout / --timeout-method 依赖此插件；py3-none-any wheel，
+# Requires-Python>=3.7、Requires-Dist pytest>=7.0.0，已实测与 pytest 9.1.1 兼容。
+pytest-timeout==2.4.0
+ruff==0.17.1
+mypy==2.4.0
 # 打包验证用：pyinstaller port_guard.spec
-pyinstaller>=6.10
+pyinstaller==6.22.3
