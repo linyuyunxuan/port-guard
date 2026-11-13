@@ -29,6 +29,7 @@ ignore_errors 一刀切豁免，又会漏掉真正的新增 error。
     1  检测到越界/新增 error，或 mypy 本身执行失败 / 输出无法解析
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -57,6 +58,15 @@ WHITELIST_FILES: FrozenSet[str] = frozenset(fp[0] for fp in BASELINE)
 BASELINE_TOTAL = sum(BASELINE.values())
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _force_utf8_stdio() -> None:
+    """Windows CI runner 的控制台可能是 cp1252；中文输出会抛 UnicodeEncodeError。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 def _norm_path(raw: str) -> str:
@@ -97,6 +107,7 @@ def _fingerprint(row: Dict[str, Any]) -> Fingerprint:
 
 
 def main() -> int:
+    _force_utf8_stdio()
     rc, out, err = _run_mypy()
     # mypy 退出码：0 无 error、1 有 error、2 用法/内部错误。
     # 2（或任何非 0/1）必须视为失败 —— 绝不能让空输出被当成「0 error」放行。

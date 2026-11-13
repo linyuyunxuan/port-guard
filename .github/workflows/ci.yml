@@ -29,6 +29,10 @@ jobs:
     env:
       # runner 是无桌面的服务会话：不指定离屏平台，Qt 可能卡在建原生窗口句柄
       QT_QPA_PLATFORM: offscreen
+      # Windows runner 的 pwsh 默认把 Python stdout 编码设为 cp1252，门禁脚本
+      # 打印中文（如「mypy 基线判定」）会抛 UnicodeEncodeError 而非判定失败。
+      # 放在 job 级，一并保护 pytest 步骤里的中文测试名输出。
+      PYTHONIOENCODING: "utf-8"
 
     steps:
       - uses: actions/checkout@v4
