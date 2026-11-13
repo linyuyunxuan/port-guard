@@ -113,6 +113,14 @@ def main() -> int:
 
     errors = [row for row in rows if row.get("severity") == "error"]
 
+    # mypy 约定 rc==1 表示「检出了 error」。若此时 stdout 解析不出任何 error 行，
+    # 说明输出格式变了、被截断、或工具行为异常 —— 绝不能当成「0 error」放行。
+    # 这比「errors 为空就放行」安全：空输出必须配 rc==0。
+    if rc == 1 and not errors:
+        print("mypy 返回 rc=1 但未解析出任何 error 行，输出异常，拒绝放行：", file=sys.stderr)
+        print((err or out or "").strip()[:2000], file=sys.stderr)
+        return 1
+
     seen: Dict[Fingerprint, int] = {}
     violations: List[str] = []
     for row in errors:
