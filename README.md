@@ -396,6 +396,36 @@ python -m pytest -q --cov           :: 带覆盖率
 | `test_diag.py` | PE 解析、就近判定、**Win7 兼容闸门（Qt6 被拦 / Qt5 放行）**、系统版本判定（双线路） |
 | `test_py38_compat.py` | Python 3.8 语法与 API 兼容（老系统线路不能用新语法） |
 
+### CI 矩阵实测结论与三条环境差异（v1.9.5）
+
+**本地全绿 ≠ CI 全绿。** 三套栈彼此不同，任何只在其中一套上验过的结论都不算数：
+
+| 栈 | 解释器 / Qt | 用途 |
+| --- | --- | --- |
+| 开发栈（本机） | Python 3.13 + PySide6 6.12 | 日常门禁、单测 |
+| CI 矩阵 | Python 3.11 / 3.12 + PySide6-Essentials 6.12（`windows-latest`） | 四步门禁 |
+| 交付栈 | Python 3.8 + PySide2 5.15.2.1 | 打进 exe、跑在 Win7/2008R2 |
+
+v1.9.5 发布时，CI 里 `pytest` 步骤第一次真正跑完，一次暴露了三条被前面步骤
+（或本地环境）遮住的既有缺陷。以下均为实测结论，不是推测：
+
+| # | 现象 | 根因 | 现在的做法 |
+| --- | --- | --- | --- |
+| 1 | 两矩阵同时红在「类型检查」step，`UnicodeEncodeError: 'charmap' codec` | GitHub Windows runner 的 pwsh 把 Python stdout 设成 **cp1252**，基线门禁脚本打印中文时抛异常；mypy 判定本身其实已 PASS | `ci.yml` job 级 `PYTHONIOENCODING: "utf-8"`；`tools/check_mypy_baseline.py` 自带 `_force_utf8_stdio()`（stdout/stderr `reconfigure`），脚本不依赖宿主编码 |
+| 2 | py3.11 `3 failed`：`TypeError: can't apply this __setattr__ to DataPage object` | `object.__setattr__` 是 wrapper descriptor，会检查 `tp_setattro`；shiboken 类型覆盖了该 slot，**CPython 3.11/3.12 拒绝、3.13 放宽**，PySide2 交付栈则必抛。本地 1108 全绿把缺陷遮了一整个版本 | `gui/page_settings.py` 的扁平转发路径改用 `setattr(page, name, value)`；**不能**改成 `super().__setattr__`（super 作用于父页 self，会写错对象） |
+| 3 | py3.12 `--timeout=180` 超时，栈停在 `QMessageBox.warning` | 用例读**真实注册表**：runner 上 `core/autostart._read_value()` 返回 `None` → `sync()` 返回失败 → `save()` 弹模态框，offscreen 下无人关闭 → 无限阻塞 | `tests/test_settings_xdb_sources.py` 用 autouse fixture 打桩 `autostart._read_value/_write_value/_delete_value`；**绝不 patch `sync` 本身**（`test_autostart.py` 直接调它，会全红）。与 `conftest.py` 的 `stub_firewall_enabled` 同一条原则：用例结果不能随机器状态漂移 |
+
+写 CI 门禁/工具脚本时请记住两条：**新增门禁脚本要用
+`PYTHONIOENCODING=cp1252 python <脚本>` 实跑一次**（本地 UTF-8 会掩盖编码崩溃）；
+`try/except/pass` 会被 ruff `SIM105` 拦下，用 `contextlib.suppress`。
+
+v1.9.5 最终 CI（run `43390471113`，`a408858`）两矩阵四步全绿，
+各 `1107 passed, 3 skipped`、0 failed。3 个 skip 是环境性跳过
+（`test_diag.py` Qt5 线路 ×2、`test_launcher_scripts.py` runner 无可用 venv ×1），
+本地开发栈是 `1108 passed, 2 skipped`，差异属环境、不是削弱手段。
+新增/改动用例后，请把「两矩阵是否都跑到 pytest 结束」当成放行条件 ——
+曾经连续三次 push run 全红，但都停在更早的 step，问题被层层遮住。
+
 ### 端到端自检（真实环境冒烟，交付前跑）
 
 ```bat
@@ -484,13 +514,17 @@ ruff check .
 :: 格式化（CI 门禁；本地直接执行即可自动排版）
 ruff format .
 
-:: 类型检查（CI 门禁，覆盖全项目，必须全绿）
-mypy .
+:: 类型检查（CI 门禁，按既有债务基线判定，不要裸跑 mypy .）
+python tools/check_mypy_baseline.py
 ```
 
 * 规则配置统一在 `pyproject.toml`，不要在各自机器上各配一套
-* **四道门禁**：`ruff check` / `ruff format --check` / `mypy .` / `pytest` 全部必须全绿。
-  其中 `ruff format` 可本地直接跑来自动排版，不必手工调格式
+* **四道门禁**：`ruff check` / `ruff format --check` / 类型检查基线门禁 / `pytest` 全部必须全绿。
+  其中 `ruff format` 可本地直接跑来自动排版，不必手工调格式。
+  类型检查**不要裸跑 `mypy .`**：mypy 2.4.0 下有 7 条既有 error（4 个文件），
+  裸跑必然 exit 1。`tools/check_mypy_baseline.py` 用 `(文件, 行号, error code)`
+  多重集判定，允许既有债务减少、拒绝任何新增或扩散到白名单之外；工具版本钉死在
+  `requirements-dev.txt`，自装更高版本会报额外噪音
 * 新增「拼进命令行」的值 → 必须先在 `core/validators.py` 加校验/转义
 * 新增「会影响判定逻辑」的改动 → 必须补 `tests/` 用例
 * 日志统一走 `core.logger.get_logger()`，不要用裸 `print` 或静默 `except: pass`
@@ -525,9 +559,28 @@ pyinstaller port_guard.spec
 OSError: [WinError 123] 文件名、目录名或卷标语法不正确。: '...\ip???-2region-3.18.0\...\PySide2'
 ```
 
-用目录联接（junction）指过去**无效** —— Qt 从 `Qt5Core.dll` 的真实加载路径推导，
+用目录联接（junction）、`subst` 盘符映射指过去**无效** —— Qt 从 `Qt5Core.dll` 的真实加载路径推导，
 Windows 的 `GetModuleFileName` 会把联接解开，拿到的还是中文真实路径。只能把环境真的放在
 ASCII 路径下（例如 `C:\pg\venv38`），源目录可以是中文/联接。PySide6 线路没有这个问题。
+
+因此**重建交付 exe 必须用纯 ASCII 路径里的交付栈解释器**，
+绝对不能用仓库内 `envs\portguard38`（它在中文目录下）：
+
+```bat
+PYTHONPATH= C:/Users/Administrator/pg/venv38/Scripts/python.exe -m PyInstaller --noconfirm --clean port_guard.spec
+```
+
+`PYTHONPATH=` 用于清掉宿主注入的 shim，不能省；构建日志须见
+`[port_guard.spec] 检测到 Qt 绑定：PySide2（目录 C:\Users\Administrator\pg\...）`。
+重建前删 `build/port_guard` + `dist/PortGuard`，否则 Analysis 缓存会把旧代码打进包。
+
+**改了产品代码就必须重建 exe + 重打 zip**。源码修好而二进制仍带旧字节码，
+会造成同版本号两个行为体、验收证据与实际交付物错位（交付栈 PySide2 恰恰是必抛
+`object.__setattr__` 的那条栈）。验新字节码要落到目标函数自身的 `co_names`：
+解析 exe 的 PYZ 取 `gui.page_settings`，递归找 `co_name == '__setattr__'`，
+确认命中 `setattr` 且**不含** `object`。不要只搜整模块字节里的 `b'object'` ——
+`_subpages()` 还有 `object.__getattribute__`，会造成假阳性。
+辅助工具：`tools/peek_packaged_code.py dist/PortGuard/PortGuard.exe "1.9.5" "BanCoordinator"`。
 
 ### 运行环境要求（实测结论，不要凭感觉）
 
