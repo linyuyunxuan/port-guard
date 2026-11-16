@@ -12,7 +12,7 @@ from typing import Dict, NamedTuple, Optional
 
 APP_NAME = "PortGuard"
 APP_TITLE = "PortGuard 端口访问防御工具"
-APP_VERSION = "1.9.5"
+APP_VERSION = "1.9.6"
 #: 作者与联系方式。出现在三处，必须是同一个来源（core.config）：
 #: 关于对话框、exe 文件属性（version_info.txt 由本文件同步）、README。
 APP_AUTHOR = "林玉云轩"

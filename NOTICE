@@ -47,9 +47,20 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 | shiboken2 5.15.2.1 | PySide2 的 C++/Python 绑定层 | **是**：`_internal/shiboken2/` | LGPL v3 |
 | PySide6-Essentials | 桌面界面（Python 3.9+，开发栈） | 否 | LGPL v3（另有 Qt 商业许可可选） |
 | shiboken6 | PySide6 的 C++/Python 绑定层 | 否 | LGPL v3 |
-| CPython 3.8 运行库与标准库 | 运行时 | **是**：`python38.dll` / `base_library.zip` 等 | PSF License |
+| CPython 3.8 运行库与标准库 | 运行时 | **是**：`python38.dll` / `base_library.zip` 等 | PSF License v2（全文 `licenses/LICENSE-Python-3.8-PSF.txt`） |
+| OpenSSL 1.1.1i | 标准库 `_ssl.pyd` / webhook HTTPS 的 TLS 后端 | **是**：`_internal/libcrypto-1_1.dll`、`_internal/libssl-1_1.dll` | OpenSSL License + Original SSLeay License（双许可，全文 `licenses/LICENSE-OpenSSL-1.1.1i.txt`） |
 | Microsoft VC++ 运行库 | Qt / Python 依赖的 DLL | **是**：平铺在 `_internal/` | 随 Visual Studio 再分发条款 |
 | ip2region 客户端与 xdb 数据 | 离线 IP 归属地查询 | **是**（见第 1、2 节） | Apache-2.0 |
+
+> **v1.9.5 合规补齐（2026-11-14）**：此前 `licenses/` 只有 LGPL / GPL / Apache 三份，
+> 而包内实际分发了 OpenSSL 1.1.1i 的两个 DLL 与 CPython 3.8 运行库 —— 二进制随包
+> 但许可全文与声明缺失，二次分发存在合规缺口。现补齐：
+> `LICENSE-OpenSSL-1.1.1i.txt` 取自 openssl/openssl 仓库 `OpenSSL_1_1_1i` tag 的
+> `LICENSE` 原文件（同一文件内含 OpenSSL License 与 Original SSLeay License 两部分）；
+> `LICENSE-Python-3.8-PSF.txt` 取自 Python 3.8.8 官方 Windows 安装目录的
+> `LICENSE.txt`（含 PSF License v2 全文）。两份均保持上游原字节、不加 BOM。
+> DLL 版本由 PE 版本资源实测确认为 `1.1.1i`（`ProductVersion=1.1.1i`）。
+> 这两份与 LGPL 全文一样属于**交付包固定组成**，缺一即拒绝出包。
 
 > **1.2.0 起内置的 HTTP 上报接收服务已移除**，因此 FastAPI / Uvicorn /
 > Starlette / Pydantic 不再是运行时依赖，也不随交付包分发；
@@ -97,6 +108,9 @@ PortGuard 本体代码为项目自有代码。本文件列出仓库中**不是**
 
 **交付包的权威清单以包内 `NOTICE.txt` 为准**（本文件由打包脚本改名随包附上），
 并应与 `licenses/` 下的许可全文、包内 `SHA256SUMS.txt` 逐项核对。
+v1.9.5 起 `licenses/` 应为 **5 份**：LGPL-3.0、GPL-3.0、Apache-2.0、
+OpenSSL-1.1.1i、Python-3.8-PSF；打包脚本 `DELIVERY_FILES` 是其唯一真源，
+新增/删除随包二进制时必须同步核对这份清单。
 
 ```bash
 # 开发期复查直接依赖及其许可（需先安装 pip-licenses）

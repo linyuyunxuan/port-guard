@@ -47,6 +47,27 @@ DEFAULT_LOG_PATH = os.path.join(
     "pfirewall.log",
 )
 
+
+def resolve_log_path(override: str = "") -> str:
+    """采集侧与写入侧共用的**唯一**日志路径来源。
+
+    Windows 防火墙日志路径是系统级设置：`netsh ... logging filename` 写哪里、
+    观察器就得从哪里 tail。以前 `enable_logging()` 无条件写 DEFAULT_LOG_PATH，
+    而 `WatchConfig.from_settings()` 按 `watch_fwlog_path` 读自定义路径 —— 用户
+    一改路径，就会「提示已开启」但采集永远没数据（静默漏采）。
+
+    `override` 给设置页传输入框的当前值（可能还没点保存）；留空时回落到已保存
+    的设置，再回落到系统默认位置。永远返回非空字符串。
+    """
+    path = (override or "").strip()
+    if not path:
+        # 运行时导入：core.settings 在导入期会牵到别的 core 模块，顶层互引会成环
+        from core import settings as cfg
+
+        path = (cfg.get("watch_fwlog_path", "") or "").strip()
+    return path or DEFAULT_LOG_PATH
+
+
 # 默认字段顺序（读不到 #Fields 头时使用）
 FIELDS: List[str] = [
     "date",

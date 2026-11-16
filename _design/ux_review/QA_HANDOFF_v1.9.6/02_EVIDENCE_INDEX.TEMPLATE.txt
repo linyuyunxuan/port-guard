@@ -1,0 +1,52 @@
+=====================================================================
+PortGuard v1.9.6 - EVIDENCE INDEX (fill one line per evidence file)
+Format: <ITEM> <FILE_NAME> <WHAT_IT_PROVES>
+Keep pure ASCII / CRLF. Copy OUT of the VM before G3 rollback.
+=====================================================================
+MACHINE_NAME:
+OS_FULL_NAME:
+OS_BUILD:
+VM_SNAPSHOT_NAME:
+DPI_SETTING:
+LOGPIXELS_VALUE:
+WINDOW_SIZE:
+OPERATION_WINDOW_START:
+OPERATION_WINDOW_END:
+ANCHOR_DELIVERY_CHANNEL:
+ANCHOR_SENT_BY:
+ANCHOR_RECEIVED_BY:
+ANCHOR_DELIVERY_TIME:
+ANCHOR_EVIDENCE_LOCATION:
+F1_CUSTOM_LOG_PATH:
+D2_TEST_IPV4:
+D2_BAN_ID:
+E2_AUDIT_CSV_PATH:
+F3_LOG_SAMPLE_PATH:
+DIAG_REPORT_PATH:
+KB2999226_UCRT_STATUS:
+OS_LANGUAGE_REGION:
+CLEAN_MACHINE_PROOF:
+
+A1 PG196_A1_....png ver + registry + winver three-way proof
+A5 PG196_A5_....png font files + registry families
+B1 PG196_B1_....png main window within 15s, no banner
+B2 PG196_B2_....png five-way version match
+B3 PG196_B3_....png each of the 9 pages
+C1 PG196_C1_100pct_1360x860_....png worst-case no ellipsis
+C2 PG196_C2_....png each of 3 window+DPI combos
+C3 PG196_C3_....png events / suggestions / ban records
+C4 PG196_C4_....png font fallback, side-by-side with Win10
+C5 PG196_C5_....png tooltip full text
+D2 PG196_D2_....png exactly one active ban row
+D3 PG196_D3_....png exact rule names, Enabled/Action/RemoteIP
+D4 PG196_D4_....png unblocked + exact set diff
+D5 PG196_D5_....png unban within 5s
+E2 PG196_E2_....png audit CSV result=fail + log marker
+E3 PG196_E3_....png DIFF no new PortGuard_Block_*
+E4 PG196_E4_....png DB writable proof + all pages
+F1 PG196_F1_....png custom path verbatim + PID
+F2 PG196_F2_....png three netsh path lines
+F3 PG196_F3_....png new parsed row in operation window
+F4 PG196_F4_....png default path + PID unchanged
+G1 PG196_G1_....png zero rules after positive control
+G2 PG196_G2_....png APPDATA listing

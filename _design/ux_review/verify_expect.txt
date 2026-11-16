@@ -1,0 +1,31 @@
+# =====================================================================
+# PortGuard release verification - INDEPENDENT EXPECTATION ANCHOR
+# Plain ASCII / CRLF / no BOM. Format: KEY=VALUE, one per line.
+#
+# WHY THIS FILE EXISTS
+# The release zip, its .sha256 sidecar and this file are THREE separate
+# inputs to the A2 check. If the zip AND the sidecar are swapped together,
+# a two-way comparison still passes. This file is the independent anchor
+# that makes such a swap detectable. Removing it returns A2 to false-green.
+#
+# PROVENANCE RULE (must not be weakened)
+# This file MUST reach the verification machine through an INDEPENDENT
+# channel: the signed release announcement / signature page. DO NOT
+# generate it in the same batch as the release zip and its sidecar, and
+# DO NOT ship all three together. If all three arrive in one bundle the
+# anchor is worthless and the human must say so on the signature page.
+#
+# Fill EVERY value before running the collector. A placeholder or a
+# malformed value makes A2_ZIP_SHA256 a HARD FAIL (never NEEDS-VISUAL,
+# never overridable by a human).
+#
+# EXPECTED_ZIP_SHA      : 64 hex, independently published SHA256 of the
+#                         release zip.
+# EXPECTED_VERSION      : X.Y.Z, must equal the version parsed from the
+#                         zip filename (PortGuard-vX.Y.Z.zip).
+# EXPECTED_SUMS_ENTRIES : positive integer, expected hash-row count in
+#                         SHA256SUMS.txt (historical build used 174).
+# =====================================================================
+EXPECTED_ZIP_SHA=dcee40cf00b05ccfb402bb9436c01545e2362f90b659b0e711ef05de369394da
+EXPECTED_VERSION=1.9.6
+EXPECTED_SUMS_ENTRIES=174

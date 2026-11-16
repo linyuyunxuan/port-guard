@@ -268,7 +268,7 @@ python -c "from core import xdb_updater as U; c=U.check(); print(c.method, c.mes
 ```
 port-guard/
 ├── main.py                 程序入口（后端先就绪 → 单实例保护 → 托盘常驻）
-├── selftest.py             离屏端到端自检（真实环境冒烟，44 项检查）
+├── selftest.py             离屏端到端自检（真实环境冒烟，45 项检查）
 ├── pyproject.toml          ruff / mypy / pytest 统一配置（工程规范的锚点）
 ├── NOTICE                  第三方代码与数据来源、许可说明
 ├── .github/workflows/ci.yml  CI：ruff check + ruff format + mypy + pytest 四道门禁
@@ -580,7 +580,7 @@ PYTHONPATH= C:/Users/Administrator/pg/venv38/Scripts/python.exe -m PyInstaller -
 解析 exe 的 PYZ 取 `gui.page_settings`，递归找 `co_name == '__setattr__'`，
 确认命中 `setattr` 且**不含** `object`。不要只搜整模块字节里的 `b'object'` ——
 `_subpages()` 还有 `object.__getattribute__`，会造成假阳性。
-辅助工具：`tools/peek_packaged_code.py dist/PortGuard/PortGuard.exe "1.9.5" "BanCoordinator"`。
+辅助工具：`tools/peek_packaged_code.py dist/PortGuard/PortGuard.exe "1.9.6" "BanCoordinator"`。
 
 ### 运行环境要求（实测结论，不要凭感觉）
 
@@ -686,7 +686,9 @@ PortGuard <当前版本> 启动：运行方式=打包 exe 管理员=True
   可开启在线同步保持最新
 * 第三方代码与许可见 `NOTICE`（交付包内改名为 `NOTICE.txt`）。
   **正式交付包使用 PySide2 5.15.2.1（LGPL v3），因此允许闭源分发**，
-  LGPL v3 / GPL v3 / Apache-2.0 全文随包附在 `licenses/`；此前用的 PyQt6 是
+  LGPL v3 / GPL v3 / Apache-2.0 / OpenSSL 1.1.1i / Python 3.8 PSF 五份许可全文
+  随包附在 `licenses/`（后两份对应包内实际分发的 `libcrypto-1_1.dll` /
+  `libssl-1_1.dll` 与 CPython 3.8 运行库）；此前用的 PyQt6 是
   GPL v3 / 商业双许可，闭源分发会触发 GPL 传染性，已整体迁移
 * 开发栈装的是 **PySide6-Essentials** 而非完整版 PySide6：界面只用到 QtCore / QtGui /
   QtWidgets / QtNetwork / QtSvg，都在 Essentials 内；不装 Addons / WebEngine / Pdf，
@@ -723,16 +725,20 @@ PortGuard <当前版本> 启动：运行方式=打包 exe 管理员=True
 | `NOTICE.txt` | 第三方组件与许可清单（仓库根 `NOTICE` 改名而来） |
 | `VERSION.txt` | 本包版本号，与关于页 / exe 版本资源一致 |
 | `SHA256SUMS.txt` | 包内逐文件 SHA256，由打包脚本按实际内容生成 |
-| `licenses/` | LGPL v3 / GPL v3 / Apache-2.0 许可全文 |
+| `licenses/` | LGPL v3 / GPL v3 / Apache-2.0 / OpenSSL 1.1.1i / Python 3.8 PSF 共 5 份许可全文 |
 
+**本包的验收证据以发布签单为准**（仓库 `_design/ux_review/RELEASE_VERIFICATION_v1.9.6.md`：30 项 2008R2 干净机验证清单、签字页、锚点与三层作废口径）；本节只描述**包结构**，**不复制会随重打包变动的条目数 / 哈希**——那些一律以包内 `SHA256SUMS.txt` 与签单实测值为准，避免两处数字打架。
 源材料在仓库 `delivery/` 与根 `NOTICE`；包外同名 `.sha256` 是整包校验单，
 须与 zip 一起交付。压缩约定不变：无目录条目、全部 DEFLATED、无 STORED。
 
-**当前交付基线**：开发栈全量 `pytest` **1053 passed / 2 skipped**、
-两栈离屏自检 `selftest.py` 全过、`tools/stress.py refresh` PASS；
+**当前交付基线**：开发栈全量 `pytest` **1119 passed / 2 skipped**、
+两栈离屏自检 `selftest.py` 全过；
+`tools/stress.py refresh` 在本机（Win10 18363，宿主 CPU 连续 4 次采样 96.5~100% 满载）
+**判「无法判定 / 待 QA 空闲环境复核」**——既非回归也非 PASS，本机不存在空闲窗口，
+需在 QA 空闲环境单独复核，**不作为交付基线**；
 静态检查 `ruff check` / `ruff format --check` 全绿，
 `mypy` 存量基线 7 errors / 4 files（零新增即通过）；
-交付合规护栏 12 项，已做 7 组变异验证（每组都能让护栏变红）。
+交付合规护栏 13 项，已做 12 组变异验证（每组都能让护栏变红）。
 `docs/` 下三份评测 / 压测报告是 **v1.1~v1.2 时期的历史快照**，其中的
 209 / 762 / 866 / 889 等测试数字不代表当前版本；
 `screenshots/` 已按 v1.9.4 重拍，覆盖总览 + 8 个业务页共 9 张。
@@ -750,7 +756,7 @@ v1.9.5 已提供只读 / 观察模式，默认普通权限启动，写防火墙�
 | --- | --- |
 | 作者 | 林玉云轩 |
 | 联系方式 | 1416161819 |
-| 程序版本 | v1.9.5 |
+| 程序版本 | v1.9.6 |
 
 * 程序内入口：`F1` 或侧栏底部版本号 → 「关于」页，第一栏就是作者与联系方式；
 * exe 文件属性：右键 `PortGuard.exe` → 属性 → 详细信息，同样带作者 / 联系方式；

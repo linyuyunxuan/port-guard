@@ -41,19 +41,39 @@ def test_delivery_files_exist():
     assert (ROOT / "NOTICE").is_file()
     for rel in pack_release.DELIVERY_FILES:
         assert (DELIVERY / rel).is_file(), f"缺少交付材料：{rel}"
-    assert len(pack_release.DELIVERY_FILES) == 9
+    assert len(pack_release.DELIVERY_FILES) == 11
 
 
 def test_license_texts_are_official_full_texts():
     lgpl = (DELIVERY / "licenses/LICENSE-LGPL-3.0.txt").read_bytes()
     gpl = (DELIVERY / "licenses/LICENSE-GPL-3.0.txt").read_bytes()
     apache = (DELIVERY / "licenses/LICENSE-Apache-2.0.txt").read_bytes()
+    openssl = (DELIVERY / "licenses/LICENSE-OpenSSL-1.1.1i.txt").read_bytes()
+    psf = (DELIVERY / "licenses/LICENSE-Python-3.8-PSF.txt").read_bytes()
     assert b"GNU LESSER GENERAL PUBLIC LICENSE" in lgpl
     assert b"GNU GENERAL PUBLIC LICENSE" in gpl
     assert b"Apache License" in apache and b"Version 2.0, January 2004" in apache
-    # 许可全文保持上游原字节，便于与官方 wheel 逐字比对
-    assert not lgpl.startswith(b"\xef\xbb\xbf")
-    assert not apache.startswith(b"\xef\xbb\xbf")
+    # OpenSSL 是双许可：一份文件里必须同时含 OpenSSL License 与 SSLeay 原文
+    assert b"OpenSSL License" in openssl and b"Original SSLeay License" in openssl
+    assert b"The OpenSSL Project" in openssl
+    assert b"PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2" in psf
+    # 许可全文保持上游原字节，便于与官方 wheel / 上游 tag 逐字比对
+    for raw in (lgpl, gpl, apache, openssl, psf):
+        assert not raw.startswith(b"\xef\xbb\xbf")
+
+
+def test_licenses_cover_every_distributed_binary():
+    """包里确实分发的 OpenSSL DLL 必须有对应许可全文，且与 NOTICE 声明一致。
+
+    变异：把 `LICENSE-OpenSSL-1.1.1i.txt` 从 DELIVERY_FILES 删掉 → 本例变红。
+    """
+    declared = set(pack_release.DELIVERY_FILES)
+    assert "licenses/LICENSE-OpenSSL-1.1.1i.txt" in declared
+    assert "licenses/LICENSE-Python-3.8-PSF.txt" in declared
+    notice = _read("NOTICE")
+    assert "LICENSE-OpenSSL-1.1.1i.txt" in notice
+    assert "LICENSE-Python-3.8-PSF.txt" in notice
+    assert "libcrypto-1_1.dll" in notice and "libssl-1_1.dll" in notice
 
 
 def test_delivery_docs_contain_required_facts():
@@ -77,7 +97,7 @@ def test_delivery_docs_contain_required_facts():
         assert fact in deploy, f"部署说明漏了关键事实：{fact}"
 
     terms = _doc("02_TERMS.txt")
-    for fact in ("LGPL v3", "PySide2", "替换", "Webhook"):
+    for fact in ("LGPL v3", "PySide2", "替换", "Webhook", "OpenSSL", "PSF License"):
         assert fact in terms
 
     integrity = _doc("03_INTEGRITY.txt")
@@ -101,6 +121,9 @@ def test_notice_matches_delivered_stack():
     assert "PySide2 5.15.2.1" in text
     assert "已随交付 exe 包附带" in text
     assert "licenses/LICENSE-LGPL-3.0.txt" in text
+    assert "licenses/LICENSE-OpenSSL-1.1.1i.txt" in text
+    assert "licenses/LICENSE-Python-3.8-PSF.txt" in text
+    assert "1.1.1i" in text
     for gone in ("| FastAPI |", "| Uvicorn |", "| Starlette", "| Pydantic"):
         assert gone not in text, f"NOTICE 仍把已移除的依赖列为运行时依赖：{gone}"
     assert "httpx" not in text

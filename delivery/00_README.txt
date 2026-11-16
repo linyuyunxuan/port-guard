@@ -17,7 +17,8 @@ PortGuard 端口访问防御工具 · 交付包先读我
   02_TERMS.txt           最终用户使用条款（使用前请先阅读）
   03_INTEGRITY.txt       完整性校验方法与发布者身份现状
   04_CHANGELOG.txt       与版本对应的更新日志
-  licenses/              LGPL v3、GPL v3、Apache-2.0 许可全文
+  licenses/              LGPL v3、GPL v3、Apache-2.0、OpenSSL 1.1.1i、
+                         Python 3.8 PSF 共 5 份许可全文
 
   压缩包外另附 PortGuard-v<版本>.zip.sha256，是整个压缩包的校验单，
   请与本压缩包一起保存、一起提供给最终使用方。

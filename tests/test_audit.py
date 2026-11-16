@@ -527,6 +527,60 @@ def test_single_event_ignore_is_audited(isolated_env, msgbox):
     assert _last(audit.ACTION_EVENT_IGNORE)["target_id"] == "3"
 
 
+# ── 封禁页「忽略该建议」：与事件页必须是同一套审计口径 ──
+
+
+def test_bans_ignore_is_audited_with_before_state(isolated_env, msgbox):
+    """变异：把 `_ignore` 改回直接调 core.database → 本例变红（一条审计都没有）"""
+    from gui.page_bans import BansPage
+
+    class _Host:
+        def refresh(self) -> None:
+            pass
+
+    _call(BansPage._ignore, _Host(), _event_row(3))
+    row = _last(audit.ACTION_EVENT_IGNORE)
+    assert row["target_id"] == "3"
+    assert '"handled": 0' in (row["before_json"] or ""), "操作前的处理状态必须留档"
+    assert "封禁建议" in row["summary"]
+
+
+def test_bans_batch_ignore_is_audited(isolated_env, msgbox):
+    """批量忽略合并行：before 快照要覆盖摊平后的每一条"""
+    from gui.page_bans import BansPage
+
+    rows = [_event_row(21), _event_row(22)]
+
+    class _Host:
+        sug_hint = _Lbl()
+
+        def _checked_suggestions(self):
+            return rows
+
+        def refresh(self) -> None:
+            pass
+
+    _call(BansPage._batch_ignore_suggestions, _Host())
+    row = _last(audit.ACTION_EVENT_IGNORE)
+    assert '"id": 22' in (row["before_json"] or "")
+
+
+def test_set_risk_handled_failure_is_audited(isolated_env, monkeypatch):
+    """业务失败也要留痕，且异常要继续抛给界面（不能静默吞掉）"""
+    from app import data_service
+
+    def _boom(_ids, _handled):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(database, "set_risk_handled_batch", _boom)
+    with pytest.raises(RuntimeError):
+        data_service.set_risk_handled([1], 2, scope_desc="单测")
+
+    row = _last(audit.ACTION_EVENT_IGNORE)
+    assert row["result"] == audit.RESULT_FAIL
+    assert "db down" in (row["detail"] or "")
+
+
 def test_batch_event_confirm_is_audited_with_before_state(isolated_env, msgbox):
     """
     变异：before 只记条数不记原状态 → 本例变红。

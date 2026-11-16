@@ -1,0 +1,30 @@
+=====================================================================
+PortGuard v1.9.6 - ANCHOR VALUES FOR THE PUBLISHER (HAND COPY ONLY)
+This file is for the PUBLISHER. Do NOT put it in the QA handoff zip.
+Do NOT let the verifier receive these values from any package that
+also carries the release zip or its .sha256 sidecar.
+=====================================================================
+Copy these three lines BY HAND into the signed release announcement
+body / signature page. The verifier copies them BY HAND into
+verify_expect.txt on the clean machine.
+
+EXPECTED_ZIP_SHA=dcee40cf00b05ccfb402bb9436c01545e2362f90b659b0e711ef05de369394da
+EXPECTED_VERSION=1.9.6
+EXPECTED_SUMS_ENTRIES=174
+
+DELIVERY RECORD (fill when you send them)
+Channel:
+Sent by:
+Received by:
+Timestamp:
+Evidence of delivery (where stored):
+Verifier confirmed receipt (initials + time):
+
+RULES
+- Send BEFORE verification starts on the clean machine.
+- The Release announcement body is an AFTER-THE-FACT copy only.
+- Never upload verify_expect.txt or this card as a Release asset.
+- If the verifier can only get the values after the Release is
+  public, STOP: that is the chicken-and-egg failure.
+- The signature page field "anchor delivered BEFORE section 4" must
+  be dated earlier than the first item of section 4.

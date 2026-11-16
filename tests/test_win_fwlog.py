@@ -9,6 +9,7 @@
 """
 
 import os
+from typing import Any
 
 import pytest
 
@@ -345,3 +346,93 @@ def test_enable_logging_defaults_to_dropped(monkeypatch):
     assert ok
     joined = " ".join(" ".join(c) for c in captured)
     assert "droppedconnections" in joined and "enable" in joined
+
+
+# --------------------------------------------------------------------------- #
+# 日志路径：netsh 写入侧与 tailer 读取侧必须是同一个值
+# --------------------------------------------------------------------------- #
+CUSTOM_LOG = r"D:\fwlogs\pfirewall.log"
+
+
+def test_resolve_log_path_precedence():
+    """override > 已保存设置 > 系统默认；三处解析都走这一条路径"""
+    from core import settings as cfg
+    from core.win_fwlog import resolve_log_path
+
+    cfg.set("watch_fwlog_path", CUSTOM_LOG, persist=False)
+    assert resolve_log_path() == CUSTOM_LOG
+    assert resolve_log_path(r"E:\other.log") == r"E:\other.log"
+    assert resolve_log_path("   ") == CUSTOM_LOG
+    cfg.set("watch_fwlog_path", "", persist=False)
+    assert resolve_log_path() == DEFAULT_LOG_PATH
+
+
+def test_watcher_reads_the_resolved_path():
+    """观察器构造与热切换都按 resolve_log_path，不能再自己拼一份默认值"""
+    from core import port_watcher
+    from core import settings as cfg
+    from core.win_fwlog import resolve_log_path
+
+    cfg.set("watch_fwlog_path", CUSTOM_LOG, persist=False)
+    c = port_watcher.WatchConfig.from_settings()
+    assert c.fwlog_path == resolve_log_path() == CUSTOM_LOG
+    w = port_watcher.PortWatcher(c)
+    assert w._tailer.path == CUSTOM_LOG
+
+    assert w.sync_fwlog_path(r"E:\new.log") == r"E:\new.log"
+    assert w._tailer.path == r"E:\new.log"
+    assert w._cfg.fwlog_path == r"E:\new.log"
+
+
+def test_enable_fwlog_writes_and_reads_same_path(monkeypatch):
+    """设置页「启用防火墙日志记录」：netsh 写哪里，观察器就得 tail 哪里。
+
+    变异：把 `_enable_fwlog` 改回 `enable_logging()` 不传 path → 本例变红。
+    """
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from core import database, port_watcher, win_fwlog
+    from core import settings as cfg
+    from gui import page_settings
+
+    database.init_db()  # 产品代码里的 cfg.set 会落库，单独跑本例也需要 settings 表
+    cfg.set("watch_fwlog_path", "", persist=False)
+    w = port_watcher.PortWatcher(port_watcher.WatchConfig.from_settings())
+    monkeypatch.setattr(port_watcher, "get_watcher", lambda: w)
+    monkeypatch.setattr(page_settings.firewall, "is_admin", lambda: True)
+
+    class _Box:
+        @staticmethod
+        def warning(*_a, **_k):
+            return None
+
+        @staticmethod
+        def information(*_a, **_k):
+            return None
+
+    monkeypatch.setattr(page_settings, "QMessageBox", _Box)
+
+    captured = []
+
+    def _fake_enable(path=None, **_kw):
+        captured.append(path)
+        return True, ""
+
+    monkeypatch.setattr(win_fwlog, "enable_logging", _fake_enable)
+
+    class _Edit:
+        def text(self):
+            return CUSTOM_LOG
+
+    class _Host:
+        ed_watch_log = _Edit()
+
+        def _refresh_watch_state(self):
+            return None
+
+    # 走 Any 通道：这里用替身宿主调未绑定方法，不构造真实 QWidget
+    _enable: Any = page_settings.SettingsPage._enable_fwlog
+    _enable(_Host())
+
+    assert captured == [CUSTOM_LOG], "netsh 写的仍是系统默认位置"
+    assert w._tailer.path == CUSTOM_LOG, "观察器读的路径与写入路径不一致"
+    assert cfg.get("watch_fwlog_path", "") == CUSTOM_LOG, "输入框的值没有落库"

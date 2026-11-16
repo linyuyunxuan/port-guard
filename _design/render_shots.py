@@ -144,11 +144,17 @@ ELASTIC_MIN = {
 # 不依赖当前样本；实际还会和样本里最长的那条取较大者，样本换了也不会漏）。
 # 路径 / 请求 / 原因 / 归属地 / 命中规则 / 进程 允许 Qt elide，不在此表内。
 NO_ELIDE = {
-    "时间": "23:59:59",
+    # 合并行带 `×N` 次数后缀，最差值必须带后缀：只写 `23:59:59` 的话
+    # 判据永远比真实内容窄一截，×27 那行被裁了也测不出来。
+    "时间": "23:59:59×27",
     "风险": "严重",
     "等级": "严重",
     "端口": "18080",
     "协议": "HTTPS",
+    # IPv6 是这张表最宽的 IP；不写进判据就只有样本里恰好出现 IPv6 时才会发现。
+    "来源 IP": "2400:3200:baba::1",
+    # 封禁建议 / 封禁记录页表头写的是 `IP`，最差值与监控页同源。
+    "IP": "2400:3200:baba::1",
     "状态": "已封禁",
     "评分": "100",
     "ID": "9999",
@@ -164,6 +170,11 @@ NO_ELIDE = {
 # 同名列在不同表语义不同：监控的「状态」是 HTTP 状态码、事件页是处理状态、
 # 记录页才是封禁状态 —— 共用一份最差值会把「200」误判成 3 个汉字（假阳性）。
 NO_ELIDE_BY_TABLE = {
+    # 各表时间格式不同：监控是 `HH:MM:SS×N`，事件/建议是 `MM-DD HH:MM:SS ×N`。
+    # 事件页按三位数次数后缀留量，别等样本里恰好出现 ×100 才发现（2026-11-14
+    # 交付栈体检就是这样抓到事件页时间列少 3px 的）。
+    ("监控", "时间"): "23:59:59×27",
+    ("事件", "时间"): "11-14 11:24:03 ×100",
     ("监控", "状态"): "999",
     ("事件", "状态"): "未处理",
     # 事件页原「等级」列 2026-10-27 改名为「等级 / 命中规则」（规则名并进来），
@@ -180,10 +191,11 @@ SOFT_WORST = {"ID": "99999"}
 # 这两列由 QStyledItemDelegate 自绘 18px 徽章（不是文字），判据是
 # 「徽章文字宽 + 左右 padding 12 ≤ 列宽」，用 elide 判会假阳性。
 BADGE_COLUMNS = {"风险", "等级", "等级 / 命中规则"}
-ELIDE_PAD = 20  # 20 = QSS 左右各 8（共 16）+ Qt 渲染实测损耗 4
-# （1px item frame + 2px elide 给「…」的余量 + hinting 抖动）。
-# ⚠️ 不要按 theme 的 16 改小：协议列 56px 时 HTTPS 实测会裁（8× 放大是 `HTT…`），
-# 取 16 会算成 40≥37 → 假过，把真缺陷放过去。此值为实测标定，勿调小。
+# 22 = QSS `QTableView::item { padding: 0 9px; }` 左右共 18
+#   + `PM_FocusFrameHMargin` 左右共 4。
+# 旧值 20 是按「16 QSS + 4 损耗」估的，实测 QSS 写的是 9px 不是 8px，
+# 少算 2px 正好把协议列这种压线列判成 OK。用真实 style 常量，别再手调。
+ELIDE_PAD = 22
 
 
 # 用户自定义文本列：允许省略（表格 tooltip 兜底），但超过可用宽时打 WARN。
@@ -276,7 +288,11 @@ def check_tooltip(table, name: str, width: int, headers: list, failures: list) -
     model = table.model()
     rows = model.rowCount() if model is not None else 0
     if not rows:
-        print("    兜底检测: 无数据行，未覆盖（0 行 ≠ 通过）")
+        # 0 行不等于通过：整轮截图会触发各页 refresh，交付栈 PySide2 下
+        # 异步刷新可能把「封禁建议」的内存样本冲掉。静默打印一行「未覆盖」
+        # 会让体检全绿但根本没检到，这是比漏报更危险的假阴性。
+        print(f"    {name}: 兜底检测无数据行，未覆盖（0 行 ≠ 通过）")
+        failures.append(f"FAIL {width} {name} 兜底检测无数据行（0 行 ≠ 通过）")
         return
     for col, col_name in enumerate(headers):
         if col_name not in ALLOW_ELIDE:
@@ -326,8 +342,17 @@ def _worst_text(table, col: int, default: str) -> str:
 
 
 def check_elide(table, name: str, width: int, headers: list, failures: list, warns: list) -> None:
-    """逐列比对「最差值渲染宽度」与「可用内容宽度」，超了就报省略缺陷"""
-    from qtcompat import QFontMetrics
+    """逐列用 Qt 自己的省略逻辑判定「最差值会不会被截」。
+
+    以前用 `horizontalAdvance(text) <= col_w - PAD` 手算：省略号是画在**可用宽
+    之内**的，放不下时 Qt 会先留出 `…` 再截字符；手算既漏了省略号宽度、又
+    漏了 hinting 取整，压线列（协议 57px）因此被判成 OK。现在直接问 Qt：
+    `elidedText(...) == 原文` 才算放得下，两栈自动按各自的字体度量判定。
+    """
+    from qtcompat import QFontMetrics, Qt
+
+    # PySide2 是 Qt.ElideRight，PySide6 是 Qt.TextElideMode.ElideRight
+    elide_right = getattr(getattr(Qt, "TextElideMode", Qt), "ElideRight")
 
     for col, col_name in enumerate(headers):
         default = NO_ELIDE_BY_TABLE.get((name, col_name)) or NO_ELIDE.get(col_name)
@@ -339,11 +364,13 @@ def check_elide(table, name: str, width: int, headers: list, failures: list, war
         need = fm.horizontalAdvance(text)
         col_w = table.columnWidth(col)
         if col_name in BADGE_COLUMNS:
+            # 徽章由 delegate 自绘，不是文字，不适用 elidedText
             need += 12
             avail = col_w
+            ok = need <= avail
         else:
             avail = col_w - ELIDE_PAD
-        ok = need <= avail
+            ok = fm.elidedText(text, elide_right, max(0, avail)) == text
         print(
             f"    {col_name}: 字体={font.family()} {font.pixelSize()}px "
             f"最差「{text[:20]}」需{need}px 可用{avail}px {'OK' if ok else '省略'}"
@@ -414,13 +441,23 @@ def report_tables(win, width: int) -> bool:
                 headers.append("" if h is None else str(h))
             widths = [table.columnWidth(i) for i in range(n)]
             hbar = table.horizontalScrollBar().maximum()
-            print(f"{name}.{attr}: 横滚={hbar} 列数={n} 列宽={widths} 合计={sum(widths)}")
+            print(
+                f"{name}.{attr}: 横滚={hbar} 视口={table.viewport().width()} "
+                f"列数={n} 列宽={widths} 合计={sum(widths)}"
+            )
         except Exception as exc:
             failures.append(f"FAIL {width} {name}.{attr} 读取失败 {type(exc).__name__}: {exc}")
             continue
 
-        if hbar > 0:
-            failures.append(f"FAIL {width} {name} 横向滚动条={hbar}>0")
+        if hbar > 8:
+            # QHeaderView 带 Stretch 列时，Qt 会给 horizontalScrollBar().maximum()
+            # 留 4px 左右的 frame / 取整余量 —— `maximum()==4` 用户根本滚不动，
+            # 真溢出（列宽合计 > 视口）通常是几十到几百 px。旧判据写 `>0`
+            # 让封禁记录页每次体检都假红，反而淹没了真正的省略缺陷。
+            failures.append(
+                f"FAIL {width} {name} 横向滚动条={hbar}>8（视口={table.viewport().width()} "
+                f"列宽合计={sum(widths)} width={table.width()}）"
+            )
         mins = ELASTIC_MIN.get(name, {})
         for col_name, min_w in mins.items():
             if col_name not in headers:
@@ -518,6 +555,16 @@ def main(argv=None) -> int:
         path = os.path.join(out_dir, name + ".png")
         win.grab().save(path)
         print(f"{path}  {os.path.getsize(path)} bytes")
+
+    # 体检前重新灌样本：整轮截图又切了 5 次页，交付栈 PySide2 下这些 refresh
+    # 可能晚于截图把「封禁建议」的内存样本冲成空表；0 行时 check_tooltip
+    # 会直接判 FAIL（0 行 ≠ 通过），所以这里必须补回来，而不是靠运气。
+    win._switch_page(0)
+    seed_monitor(win)
+    win._switch_page(3)
+    seed_bans(win)
+    app.processEvents()
+    app.processEvents()
 
     print()
     return 0 if report_tables(win, args.width) else 1

@@ -319,21 +319,17 @@ def test_ignore_single_group_row_marks_all_members(monkeypatch):
     只标记代表那条的话，刷新后剩下的 26 条又以同一条建议冒出来 ——
     用户会认为「忽略根本没生效」，然后去点第二次。
     """
+    from app import data_service
     from gui import page_bans
 
     batch: List[List[int]] = []
-    single: List[int] = []
 
-    def _fake_batch(ids, handled):
+    def _fake(ids, handled, **_kw):
         batch.append(list(ids))
         return 0
 
-    def _fake_single(i, handled):
-        single.append(int(i))
-        return True
-
-    monkeypatch.setattr(page_bans, "set_risk_handled_batch", _fake_batch)
-    monkeypatch.setattr(page_bans, "set_risk_handled", _fake_single)
+    # 打桩点必须是真调用点：忽略动作已收口到 app.data_service.set_risk_handled
+    monkeypatch.setattr(data_service, "set_risk_handled", _fake)
 
     members = [_evt(i, BASE_TS + i) for i in range(1, 4)]
     group = {"id": 27, "ip": "120.194.187.190", "members": members, "group_count": 3}
@@ -344,20 +340,20 @@ def test_ignore_single_group_row_marks_all_members(monkeypatch):
 
     page_bans.BansPage._ignore(_Host(), group)  # type: ignore[arg-type]
     assert batch == [[1, 2, 3]], "合并行必须摊平成组内每一条"
-    assert single == []
 
 
 def test_batch_ignore_expands_group_members(monkeypatch):
     """勾一条合并行去「批量忽略」，组内 27 条必须全部标记，否则刷新后又冒出来"""
+    from app import data_service
     from gui import page_bans
 
     captured: List[List[int]] = []
 
-    def _fake_batch(ids, handled):
+    def _fake(ids, handled, **_kw):
         captured.append(list(ids))
         return 0
 
-    monkeypatch.setattr(page_bans, "set_risk_handled_batch", _fake_batch)
+    monkeypatch.setattr(data_service, "set_risk_handled", _fake)
 
     merged = [_evt(i, BASE_TS + i) for i in range(1, 4)]
     group = {"id": 27, "ip": "120.194.187.190", "members": merged, "group_count": 3}

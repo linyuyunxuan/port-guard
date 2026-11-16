@@ -51,6 +51,10 @@ DELIVERY_FILES: Tuple[str, ...] = (
     "licenses/LICENSE-LGPL-3.0.txt",
     "licenses/LICENSE-GPL-3.0.txt",
     "licenses/LICENSE-Apache-2.0.txt",
+    # v1.9.5 合规补齐：包内确实分发了 OpenSSL 1.1.1i 的两个 DLL 与
+    # CPython 3.8 运行库，两份上游许可全文必须随包（见 NOTICE 第 3 节）。
+    "licenses/LICENSE-OpenSSL-1.1.1i.txt",
+    "licenses/LICENSE-Python-3.8-PSF.txt",
 )
 
 # 这些是给客户看的中文文档，包内需要 UTF-8 BOM

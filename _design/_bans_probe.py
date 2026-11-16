@@ -101,7 +101,10 @@ pb.firewall.is_admin = lambda: True
 pb.ban_service.unban = lambda b: (UNBAN_CALLS.append(b.id) or (True, ""))
 
 HANDLED = []
-pb.set_risk_handled_batch = lambda ids, h: (HANDLED.append((list(ids), h)) or len(ids))
+# 打桩点必须是真调用点：忽略动作已收口到 app.data_service.set_risk_handled
+import app.data_service as _ds  # noqa: E402
+
+_ds.set_risk_handled = lambda ids, h, **_kw: (HANDLED.append((list(ids), h)) or len(ids))
 
 DELETED = []
 
@@ -111,7 +114,7 @@ def fake_delete(ids):
     return len(ids)
 
 
-pb.delete_ban_records = fake_delete
+_ds.delete_ban_records_by_ids = lambda ids, snapshot: fake_delete(ids)
 
 # 批量删除 / 批量解封都会弹确认框，离屏下模态框会挂死 → 一律自动「是」
 pb.QMessageBox.question = staticmethod(lambda *a, **k: pb.QMessageBox.StandardButton.Yes)
@@ -202,10 +205,12 @@ assert {it["ip"] for it in items} == {"133.118.113.177", "113.118.113.77", "8.8.
 # 统一处理），这里不要断言 event_ids —— 早先那版脚本断言过，是已废弃的字段。
 
 # ── 2026-10-27 需求①：对账 / 全部封禁必须直接显示在界面上 ──
-assert page.btn_sync.isVisible(), "「与防火墙对账」要常驻，不能藏在「更多」菜单里"
-assert page.btn_unban_all.isVisible(), "「一键全部解封」同上"
+# `isHidden()` 判的是「有没有被显式藏进菜单」；`isVisible()` 还会受未激活
+# 胶囊页签的祖先可见性影响，封禁管理页默认停在「待确认建议」时会假红。
+assert not page.btn_sync.isHidden(), "「与防火墙对账」要常驻，不能藏在「更多」菜单里"
+assert not page.btn_unban_all.isHidden(), "「一键全部解封」同上"
 assert not hasattr(page, "btn_more"), "折叠菜单已移除：动作应一屏直达"
-assert page.btn_sug_ban_all.isVisible(), "「全部封禁」必须在建议卡标题行常驻"
+assert not page.btn_sug_ban_all.isHidden(), "「全部封禁」必须在建议卡标题行常驻"
 assert page.btn_sug_ban_all.isEnabled(), "有建议时「全部封禁」应可点"
 assert "全部封禁" in page.btn_sug_ban_all.text(), page.btn_sug_ban_all.text()
 assert "3" in page.btn_sug_ban_all.text(), (

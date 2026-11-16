@@ -67,6 +67,62 @@ def test_monitor_disposition_column_fits_three_chars() -> None:
     assert page_monitor.COL_WIDTHS[page_monitor.COL_DISPOSITION] >= 65
 
 
+def test_monitor_bounded_columns_keep_elide_headroom() -> None:
+    """监控页「不该省略」的列：列宽 − 真实内缩 22 ≥ 两栈实测最宽文字。
+
+    变异：协议列退回 57（可用 35 < 37）或来源 IP 退回 138（可用 116 < 118）
+    → 本例变红。这两个数字来自 `_design/render_shots.py` 用
+    `QFontMetrics.elidedText()` 在真实表格上实测的 horizontalAdvance：
+    离屏 QApplication 的字体库可能不完整，所以 pytest 里用实测值钉住列宽，
+    而「Qt 自己怎么省略」的判定放在渲染体检脚本里（那里有完整字体库）。
+    """
+    from gui import page_monitor
+
+    w = page_monitor.COL_WIDTHS
+    real_pad = 22  # QSS item padding 18 + PM_FocusFrameHMargin 4
+    for col, need, label in (
+        (0, 71, "时间 23:59:59×27"),
+        (2, 133, "IPv6 来源 IP（交付栈 15px）"),
+        (4, 35, "端口 18080"),
+        (5, 37, "协议 HTTPS"),
+        (7, 21, "状态码 999"),
+    ):
+        avail = w[col] - real_pad
+        assert avail >= need, f"{label}：列宽 {w[col]} 只给 {avail}px，需 {need}px"
+    # 加宽不能吃掉请求列的预算：固定列合计仍须给 Stretch 列留 ≥200
+    assert _stretch_width(w, page_monitor.COL_REQUEST) >= 200
+
+
+def test_other_pages_use_widest_of_both_stacks() -> None:
+    """事件 / 封禁两页在**交付栈**也不能截断有界内容。
+
+    PySide2 的界面字体实测 15px（PySide6 是 14px），IPv6 字符串从 118px
+    涨到 133px、`18080` 从 35px 涨到 45px（该表用界面字体而非 Consolas）。
+    变异：把任一列退回 2026-11-14 之前的宽度 → 本例变红。
+    """
+    from gui import page_bans, page_events
+
+    real_pad = 22
+    e = page_events.COL_WIDTHS
+    for col, need, label in (
+        (1, 119, "事件 时间 MM-DD HH:MM:SS ×100"),
+        (3, 133, "事件 IPv6 来源 IP"),
+        (5, 35, "事件 端口 18080"),
+        (7, 24, "事件 评分 100"),
+    ):
+        assert e[col] - real_pad >= need, f"{label}：列宽 {e[col]}，需 {need}px"
+    assert _stretch_width(e, page_events.COL_PATH) >= 150
+
+    s = page_bans.SUG_WIDTHS
+    assert s[3] - real_pad >= 133, "封禁建议 IPv6 会被截断"
+    assert s[5] - real_pad >= 45, "封禁建议端口：Consolas 需 35px，字体回退到界面字体需 45px"
+    assert s[page_bans.COL_SUG_REASON] >= 160
+
+    b = page_bans.BAN_WIDTHS
+    assert b[1] - real_pad >= 133, "封禁记录 IPv6 会被截断"
+    assert b[page_bans.COL_BAN_REASON] >= 180
+
+
 def test_events_path_and_action_columns_keep_their_content() -> None:
     """事件页：路径列 ≥ 150（`/api/v1/orders/search` 实测需 171），
     操作列 ≥ 100（行内「封禁」+「⋯」两个按钮，96 时第二个被裁掉）。

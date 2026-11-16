@@ -754,7 +754,7 @@ class SettingsPage(QWidget):
         self._refresh_watch_state()
 
     def _enable_fwlog(self) -> None:
-        from core import win_fwlog
+        from core import port_watcher, win_fwlog
 
         if not firewall.is_admin():
             QMessageBox.warning(
@@ -763,13 +763,22 @@ class SettingsPage(QWidget):
                 "开启防火墙日志记录需要管理员权限。\n\n请以管理员身份重新运行程序后再试。",
             )
             return
-        ok, err = win_fwlog.enable_logging()
+        # 写入系统设置的路径与观察器 tail 的路径必须是同一个值。以前这里不传
+        # path（恒写系统默认位置），而观察器按 watch_fwlog_path 读自定义路径；
+        # 用户改过路径后会「提示已开启」但通道永远没数据 —— 静默漏采。
+        # 输入框可能还没点「保存设置」，所以先把这一项落库，再让正在运行的
+        # 观察器同步切到同一路径（不重启线程、不动其它配置）。
+        raw = self.ed_watch_log.text().strip()
+        if raw != cfg.get("watch_fwlog_path", ""):
+            cfg.set("watch_fwlog_path", raw)
+        target = port_watcher.get_watcher().sync_fwlog_path(raw)
+        ok, err = win_fwlog.enable_logging(path=target)
         if ok:
             QMessageBox.information(
                 self,
                 "已开启",
                 "已开启 Windows 防火墙安全日志（记录被丢弃的连接）。\n\n"
-                f"日志路径：{win_fwlog.DEFAULT_LOG_PATH}\n\n"
+                f"日志路径：{target}\n\n"
                 "新的连接尝试会开始写入日志，「防火墙日志」通道即可看到数据。",
             )
         else:

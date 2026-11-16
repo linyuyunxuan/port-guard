@@ -140,7 +140,7 @@ class WatchConfig:
             methods=parse_methods(cfg.get("watch_methods", METHOD_TABLE)),
             interval_sec=max(1.0, cfg.get_float("watch_interval_sec", 5.0)),
             dedupe_sec=max(0, cfg.get_int("watch_dedupe_sec", 120)),
-            fwlog_path=cfg.get("watch_fwlog_path", "") or win_fwlog.DEFAULT_LOG_PATH,
+            fwlog_path=win_fwlog.resolve_log_path(),
             resolve_pid=cfg.get_bool("watch_resolve_pid", True),
             allow_auto_ban=cfg.get_bool("watch_auto_ban", False),
             skip_existing_log=cfg.get_bool("watch_skip_history", True),
@@ -181,6 +181,20 @@ class PortWatcher:
         with self._lock:
             return self._cfg
 
+    def sync_fwlog_path(self, path: str = "") -> str:
+        """只把 tailer 切到新日志路径，不动其它配置、不重启线程。
+
+        设置页点「启用防火墙日志记录」时，输入框里的自定义路径可能还没保存；
+        这一方法让正在运行的观察器立刻与系统日志写入路径对齐，避免
+        「已开启但采集永远没数据」。返回实际生效路径，供调用方显示与传给 netsh。
+        """
+        with self._lock:
+            target = win_fwlog.resolve_log_path(path)
+            if self._tailer.path != target:
+                self._tailer.set_path(target)
+            self._cfg.fwlog_path = target
+            return target
+
     def update_config(self, config: WatchConfig, restart: bool = True) -> None:
         """热更新配置。
 
@@ -195,8 +209,7 @@ class PortWatcher:
         """
         with self._lock:
             self._cfg = config
-            if self._tailer.path != (config.fwlog_path or win_fwlog.DEFAULT_LOG_PATH):
-                self._tailer.set_path(config.fwlog_path or win_fwlog.DEFAULT_LOG_PATH)
+            self.sync_fwlog_path(config.fwlog_path)
         if not restart:
             return
         # restart=True：把运行状态对齐到 config.enabled，不重启线程

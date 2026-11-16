@@ -30,6 +30,90 @@ PortGuard — 数据服务层（不依赖 Qt）
 from typing import Optional
 
 
+def handled_action(handled: int) -> str:
+    """风险事件目标状态 → 审计 action（app 层单一真源）。
+
+    0「未处理」不是一个动作，兜底到 confirm 与界面菜单口径一致。
+    """
+    from app import audit
+
+    return {
+        1: audit.ACTION_EVENT_CONFIRM,
+        2: audit.ACTION_EVENT_IGNORE,
+    }.get(handled, audit.ACTION_EVENT_CONFIRM)
+
+
+def risk_event_snapshot(rows: list) -> list:
+    """被操作事件的审计 before 快照（只取事后真要回溯的字段）。
+
+    id 用于定位、ip 用于「动了谁的记录」、handled 用于「操作前是已确认还是
+    被忽略过又改回来」、等级与分数用于「这条结论有多严重」。地理/路径/规则
+    明细不取 —— 它们能从 access_log 还原，且会让 JSON 膨胀几倍。
+    """
+    return [
+        {
+            "id": r.get("id"),
+            "ip": r.get("ip") or "",
+            "handled": r.get("handled", 0),
+            "level": r.get("risk_level") or "",
+            "score": r.get("risk_score") or 0,
+        }
+        for r in rows
+    ]
+
+
+def set_risk_handled(
+    ids: list,
+    handled: int,
+    *,
+    scope_desc: str = "",
+    snapshot: Optional[list] = None,
+    target_id: object = None,
+) -> int:
+    """批量确认/忽略风险事件：业务与审计在 app 层一次做完。
+
+    以前事件页在界面层手写 `audit.record`，而封禁页的「忽略该建议」直接调
+    core.database 什么都不记 —— 同一个动作一半有审计一半没有，事后无法回答
+    「这条事件是谁在什么时候忽略的」。现在四个入口全部收口到这里：
+
+    · 成功：记 action + before 快照（每条原状态）+ after（目标状态与条数）；
+    · 失败：记 RESULT_FAIL + detail，再 `raise` 交给界面呈现；
+    · `scope_desc` 由调用方说明操作来源（事件页批量 / 行内 / 封禁建议）。
+
+    返回实际改动的条数。审计写失败绝不抛（见 `app.audit.record`），所以这里
+    不需要 try/except 包住审计。
+    """
+    from app import audit
+    from core.database import set_risk_handled_batch
+
+    action = handled_action(handled)
+    verb = "确认" if handled == 1 else "忽略"
+    scope = f"（{scope_desc}）" if scope_desc else ""
+    before = {"events": snapshot} if snapshot is not None else None
+    try:
+        n = set_risk_handled_batch(ids, handled)
+    except Exception as e:
+        audit.record(
+            action,
+            target_type="event",
+            target_id=target_id,
+            summary=f"{verb}风险事件失败{scope}：{e}",
+            before=before,
+            result=audit.RESULT_FAIL,
+            detail=str(e),
+        )
+        raise
+    audit.record(
+        action,
+        target_type="event",
+        target_id=target_id,
+        summary=f"{verb}风险事件 {n} 条{scope}",
+        before=before,
+        after={"handled": handled, "count": n},
+    )
+    return n
+
+
 def clear_access_logs(
     *,
     keyword: str,

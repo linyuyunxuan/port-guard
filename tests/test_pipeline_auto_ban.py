@@ -170,6 +170,45 @@ def test_dedupe_query_failure_does_not_block_ban(isolated_env, fake_fw, monkeypa
     assert len(fake_fw) == 1
 
 
+# ═══════════════════ 写库失败不得产生孤儿规则 ═══════════════════
+
+
+def test_insert_failure_never_creates_firewall_rule(isolated_env, fake_fw, monkeypatch):
+    """pending 记录写不进去时，防火墙规则一条都不能建。
+
+    变异：把 `return False` 去掉（恢复成「记个日志继续 block_ip」）→ 本例变红。
+    规则名带随机后缀，库里没有记录就没人能到期解封，界面也看不到 —— 这是
+    一条静默的永久规则，比漏封一次严重得多。
+    """
+
+    def _boom(_rec):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(database, "insert_ban", _boom)
+
+    assert auto_ban_record(_rec(), _result()) is False
+    assert fake_fw == [], "写库失败却创建了防火墙规则（孤儿规则）"
+    assert bus.drain_ban(max_n=1000) == [], "失败路径不该发「封禁成功」事件"
+    assert _ban_count() == 0
+
+
+def test_insert_failure_is_audited(isolated_env, fake_fw, monkeypatch):
+    """失败也要留痕：自动封禁没有人在场，事后只能靠审计解释「为什么没拦」"""
+
+    def _boom(_rec):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(database, "insert_ban", _boom)
+    auto_ban_record(_rec(), _result())
+
+    from app.audit import ACTION_BAN_AUTO, RESULT_FAIL, query_records
+
+    row = query_records(limit=10, offset=0, action=ACTION_BAN_AUTO)[0]
+    assert row["result"] == RESULT_FAIL
+    assert "未创建防火墙规则" in row["summary"]
+    assert "disk full" in (row["detail"] or "")
+
+
 # ═══════════════════ 永不封禁地址（回归） ═══════════════════
 
 

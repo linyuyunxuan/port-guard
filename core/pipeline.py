@@ -230,8 +230,30 @@ def auto_ban_record(
     ban_id = None
     try:
         ban_id = insert_ban(rec_ban)
-    except Exception:
+    except Exception as e:
         log.exception("自动封禁：写入 pending 记录失败 ip=%s", rec.ip)
+        # 写库失败绝不能继续建规则。规则名带随机后缀，库里没有这条记录就意味着
+        # 巡检找不到它、到期不会解封、封禁页也看不见 —— 会留下一条形同永久、
+        # 且谁都不知道存在的防火墙规则。宁可这次放过，也不能产生孤儿规则。
+        # 这里仍要留痕：自动封禁是唯一没有人在场的路径，事后只能靠审计回答
+        # 「为什么这个正在扫描的 IP 没被拦下来」。
+        from app import audit as _audit_mod
+
+        _audit_mod.record(
+            _audit_mod.ACTION_BAN_AUTO,
+            actor=actor or _audit_mod.ACTOR_SYSTEM,
+            target_type="ban",
+            summary=f"自动封禁 {rec.ip} 失败：写入封禁记录失败，未创建防火墙规则",
+            before={
+                "ip": rec.ip,
+                "score": result.score,
+                "level": result.level,
+                "reason": result.reason,
+            },
+            result=_audit_mod.RESULT_FAIL,
+            detail=str(e),
+        )
+        return False
     ok, name, err = block_ip(rec.ip, duration, note=result.reason)
     if ban_id:
         try:

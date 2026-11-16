@@ -24,14 +24,10 @@
 import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app import audit, data_service
+from app import data_service
 from app.export_csv import EVENT_CSV_HEADERS, iter_event_rows
 from core.config import LEVEL_LABEL, LEVEL_ORDER
-from core.database import (
-    ban_state_error,
-    risk_events_page,
-    set_risk_handled_batch,
-)
+from core.database import ban_state_error, risk_events_page
 from core.logger import get_logger
 from core.models import (
     DISPOSITION_ALERT,
@@ -142,7 +138,11 @@ COL_SCORE = 7
 COL_DISPOSITION = 8
 COL_ACTION = 9
 
-COL_WIDTHS = [37, 138, 200, 142, 112, 58, 180, 46, 80, 106]
+# 2026-11-14 交付栈复核：PySide2 的界面字体是 15px（开发栈 14px），
+# IPv6 / 带三位数 ×N 的时间戳分别要多 15px / 7px。时间 138→146、
+# 来源 IP 142→158，路径列初始值 180→156 等额让回，总宽仍 1099；
+# 固定列合计 943，1099 视口下路径列仍有 156 ≥ 150 下限。
+COL_WIDTHS = [37, 146, 200, 158, 112, 58, 156, 46, 80, 106]
 
 # 列排序规则（数据层，见 gui/table_sort.py 开头为什么不用 setSortingEnabled）。
 # 勾选列（点了是全选）与操作列（无值）不给规则 —— 点这两列表头不排序。
@@ -233,16 +233,13 @@ def _disposition_cell(row: Dict, handled: int) -> Tuple[str, str, str]:
     return text, _DISPOSITION_COLOR.get(disp, C.text_secondary), tip
 
 
-#: handled 值 → 审计 action。0 是「未处理」，不会被写进审计（没有这个动作）。
-_HANDLED_ACTION = {
-    1: audit.ACTION_EVENT_CONFIRM,
-    2: audit.ACTION_EVENT_IGNORE,
-}
-
-
 def _handled_action(handled: int) -> str:
-    """确认/忽略共用一个入口，按目标状态分流到两个 action"""
-    return _HANDLED_ACTION.get(handled, audit.ACTION_EVENT_CONFIRM)
+    """确认/忽略共用一个入口，按目标状态分流到两个 action。
+
+    映射本身在 app 层（改状态与记审计必须是同一套口径），这里保留兼容入口
+    供菜单 / 老调用点使用。
+    """
+    return data_service.handled_action(handled)
 
 
 def _handled_entries(handled: int, set_handled: Callable[[int], object]) -> List[MenuEntry]:
@@ -271,23 +268,8 @@ def _ban_tip(ban: Optional[Any]) -> str:
 
 
 def _event_snapshot(rows: List[Dict]) -> List[Dict]:
-    """
-    被操作事件的审计快照。
-
-    只取事后真要回溯的字段：id 用于定位、ip 用于「删了谁的记录」、
-    handled 用于「删的时候是已确认还是未处理」、等级与分数用于「这条结论有多严重」。
-    地理/路径/规则明细不取 —— 它们能被 access_log 还原，且会让 JSON 膨胀几倍。
-    """
-    return [
-        {
-            "id": r.get("id"),
-            "ip": r.get("ip") or "",
-            "handled": r.get("handled", 0),
-            "level": r.get("risk_level") or "",
-            "score": r.get("risk_score") or 0,
-        }
-        for r in rows
-    ]
+    """被操作事件的审计快照（实现在 app 层，封禁页忽略路径共用同一口径）。"""
+    return data_service.risk_event_snapshot(rows)
 
 
 class EventsPage(BaseTablePage):
@@ -927,29 +909,19 @@ class EventsPage(BaseTablePage):
         if not rows:
             return
         ids = [int(r["id"]) for r in rows]
-        action = _handled_action(handled)
-        verb = HANDLED_LABEL.get(handled, "处理")
+        # 业务与审计（含 before 每条原状态 / 失败留痕）统一由 app 层完成：
+        # 封禁页的「忽略该建议」也走同一个入口，两个页面不会再出现一半有
+        # 审计一半没有的口径差。界面只负责呈现条数与错误。
         try:
-            n = set_risk_handled_batch(ids, handled)
-        except Exception as e:
-            audit.record(
-                action,
-                target_type="event",
-                summary=f"批量{verb} {len(ids)} 条事件失败：{e}",
-                result=audit.RESULT_FAIL,
-                detail=str(e),
+            n = data_service.set_risk_handled(
+                ids,
+                handled,
+                scope_desc="事件页批量",
+                snapshot=_event_snapshot(rows),
             )
+        except Exception as e:
             QMessageBox.warning(self, "操作失败", str(e))
             return
-        # before 记「每条原来的状态」：确认/忽略是可来回切的，只记条数无法事后
-        # 判断某条事件是被确认过、还是被忽略过又改回来。
-        audit.record(
-            action,
-            target_type="event",
-            summary=f"批量{verb} {n} 条风险事件",
-            before={"events": _event_snapshot(rows)},
-            after={"handled": handled, "count": n},
-        )
         self.refresh()
         self.lbl_info.setText(
             f"已{HANDLED_LABEL.get(handled, '处理')} {n} 条 · 当前列表共 {len(self._rows)} 条"
@@ -1108,35 +1080,20 @@ class EventsPage(BaseTablePage):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _set_handled(self, r: Dict, handled: int) -> None:
-        action = _handled_action(handled)
-        verb = HANDLED_LABEL.get(handled, "处理")
         # 折叠行的行内「确认/忽略」作用于整组：用户看到的是一行 ×N，
         # 只改代表那条的话，刷新回来还有 N-1 条挂在未处理，等于操作没生效
         members = flatten_rows([r])
-        before = _event_snapshot(members)
         ids = [int(m["id"]) for m in members]
         try:
-            n = set_risk_handled_batch(ids, handled)
-        except Exception as e:
-            audit.record(
-                action,
-                target_type="event",
+            data_service.set_risk_handled(
+                ids,
+                handled,
+                scope_desc=f"事件页行内 {r.get('ip', '')}",
+                snapshot=_event_snapshot(members),
                 target_id=r.get("id"),
-                summary=f"{verb} {r.get('ip', '')} 的事件失败：{e}",
-                result=audit.RESULT_FAIL,
-                detail=str(e),
             )
+        except Exception as e:
             QMessageBox.warning(self, "操作失败", str(e))
-            self.refresh()
-            return
-        audit.record(
-            action,
-            target_type="event",
-            target_id=r.get("id"),
-            summary=f"{verb}事件：{r.get('ip', '')}" + (f"（同类 {n} 条）" if n > 1 else ""),
-            before={"events": before},
-            after={"handled": handled, "count": n},
-        )
         self.refresh()
 
     def _on_double_click(self, index) -> None:

@@ -22,8 +22,6 @@ from core.database import (
     count_active_bans,
     query_bans,
     query_risk_events,
-    set_risk_handled,
-    set_risk_handled_batch,
     sum_ban_hits,
 )
 from core.logger import get_logger
@@ -145,13 +143,23 @@ SUG_HEADERS = ["", "时间", "等级", "IP", "归属地", "端口", "评分", "�
 #     （搜索框只搜 IP / 原因），也不会被口头引用。48px 换回「IP 与时序可读」，
 #     记录号改挂在 IP 单元格的 tooltip 里，信息没丢，只是不再占位。
 # 固定列合计 1089，原因列（唯一 Stretch）吃掉剩余的 248（下限 240）。
-BAN_WIDTHS = [33, 136, 240, 122, 56, 46, 88, 136, 136, 96]
+# 2026-11-14 交付栈复核（PySide2 15px 界面字体比开发栈 14px 宽约 13%）：
+# 记录页 IP 136→158（IPv6 需 133 + 内缩 22 = 155）、建议页 IP 150→158、
+# 建议页端口 64→70；两张表各自从唯一的 Stretch 列等额让回，总宽分别仍是
+# 1089 / 946。
+# 记录页这 22px 不能全从原因列扣：原因列低于 240px 时
+# `[自动] 命中规则：判定风险：1024` 会被截，test_ui_layout 有硬护栏；
+# 到期/创建也不能低于 132（同一护栏）。于是从归属地 122→116 借 6px
+# （交付栈 `United States` /「河南省 焦作市」实测 ≤90，116−22=94 仍够，
+# 且高于注释里 110 的警戒线），IP 158、原因 240、两列时间 132 全部保住。
+# 总宽 1097，固定列 857，1097 视口下 Stretch 后原因列正好 240。
+BAN_WIDTHS = [33, 158, 240, 116, 56, 46, 88, 132, 132, 96]
 
 #: 防火墙开关状态的刷新间隔（秒）。netsh 一次 100~300ms，只在后台探测，
 #: 缓存期间页面刷新直接复用上一次结论（见 _probe_fw_state）
 FW_PROBE_SEC = 20.0
 
-SUG_WIDTHS = [37, 138, 69, 150, 122, 64, 53, 184, 129]
+SUG_WIDTHS = [37, 138, 69, 158, 122, 70, 53, 170, 129]
 COL_SUG_CHECK = 0
 COL_SUG_LEVEL = 2
 COL_SUG_REASON = 7
@@ -1025,12 +1033,20 @@ class BansPage(BaseTablePage):
     def _ignore(self, r) -> None:
         # 合并行代表一组：忽略必须落到组内每一条事件，否则「忽略」完刷新一下
         # 剩下的 26 条又以同一条建议冒出来（用户会以为忽略根本没生效）
-        ids = [int(m["id"]) for m in (r.get("members") or [r]) if m.get("id") is not None]
+        members = r.get("members") or [r]
+        ids = [int(m["id"]) for m in members if m.get("id") is not None]
+        if not ids:
+            return
         try:
-            if len(ids) > 1:
-                set_risk_handled_batch(ids, 2)
-            elif ids:
-                set_risk_handled(ids[0], 2)
+            # 走 app 层统一入口：审计 action / before 快照 / 失败留痕与事件页
+            # 完全一致（以前这里直接改库、一条审计都不记）。
+            data_service.set_risk_handled(
+                ids,
+                2,
+                scope_desc="封禁建议·忽略该建议",
+                snapshot=data_service.risk_event_snapshot(members),
+                target_id=r.get("id"),
+            )
         except Exception:
             log.exception("忽略风险事件失败 id=%s", r.get("id"))
         self.refresh()
@@ -1118,11 +1134,17 @@ class BansPage(BaseTablePage):
             return
         # 合并行代表一组：忽略必须摊平到组内每一条，否则刷新后剩下的
         # 26 条又会以同一条建议冒出来
-        ids = [int(m["id"]) for m in flatten_rows(rows) if m.get("id") is not None]
+        flat = flatten_rows(rows)
+        ids = [int(m["id"]) for m in flat if m.get("id") is not None]
         if not ids:
             return
         try:
-            n = set_risk_handled_batch(ids, 2)
+            n = data_service.set_risk_handled(
+                ids,
+                2,
+                scope_desc="封禁建议·批量忽略",
+                snapshot=data_service.risk_event_snapshot(flat),
+            )
         except Exception as e:
             QMessageBox.warning(self, "操作失败", str(e))
             return

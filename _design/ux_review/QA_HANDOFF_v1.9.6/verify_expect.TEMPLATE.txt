@@ -1,0 +1,18 @@
+# =====================================================================
+# PortGuard v1.9.6 - INDEPENDENT EXPECTATION ANCHOR (TEMPLATE)
+# Plain ASCII / CRLF / no BOM. Format: KEY=VALUE, one per line.
+#
+# This is the VERIFIER template. The three values are intentionally
+# LEFT BLANK. Type them BY HAND from the independent channel used by
+# the publisher (signed release announcement body / signature page).
+# They must NOT arrive inside the zip, the sidecar, or a handoff pack.
+#
+# Save as verify_expect.txt next to verify_2008r2.bat after filling.
+# ANSI or UTF-8 WITHOUT BOM, CRLF. NEVER UTF-16 (Notepad "Unicode"):
+# keys would contain NUL bytes and A2 would hard-fail. A hard fail on
+# a malformed expect file is CORRECT (fail-closed); fix the file, not
+# the zip. A placeholder left in place also hard-fails by design.
+# =====================================================================
+EXPECTED_ZIP_SHA=<FILL_FROM_INDEPENDENT_CHANNEL>
+EXPECTED_VERSION=<FILL_FROM_INDEPENDENT_CHANNEL>
+EXPECTED_SUMS_ENTRIES=<FILL_FROM_INDEPENDENT_CHANNEL>

@@ -1,0 +1,151 @@
+=====================================================================
+PortGuard v1.9.6 - 30-ITEM QUICK CHECKLIST (plain ASCII)
+Full Chinese criteria: RELEASE_VERIFICATION_v1.9.6.md section 4.
+Mark each PASS / FAIL / NEEDS-VISUAL. Never leave a box empty.
+[AUTO] = collector emits a verdict. [HUMAN] = you must judge.
+Exact Chinese log lines are quoted only in the Chinese document.
+=====================================================================
+
+A. ENVIRONMENT & INTEGRITY (5)
+[A1][HUMAN] ver + registry CurrentBuildNumber + CSDVersion + winver shot
+   PASS: token 6.1.7601 AND build=7601 AND CSDVersion contains SP1.
+   Any value missing -> NEEDS-VISUAL. No localized findstr.
+   Evidence: PG196_A1_*.png
+[A2][AUTO+HUMAN] collector: certutil hash / .sha256 sidecar / expect
+   PASS: three-way equal; sidecar name = PortGuard-v1.9.6.zip;
+   EXPECTED_VERSION=1.9.6 parsed from zip name; SUMS rows = expect value.
+   Missing/malformed expect -> HARD FAIL, no human override.
+   HUMAN: record anchor channel + timestamp on signature page.
+   Evidence: report A2_* rows, copy of expect file
+[A3][AUTO] SHA256SUMS.txt verification
+   PASS: rows = EXPECTED_SUMS_ENTRIES (from expect, not hardcoded),
+   verified>0, missing=0, mismatch=0, rows!=0. Skip 3 '#' lines + BOM.
+   Evidence: report A3_* rows
+[A4][AUTO+HUMAN] PortGuard.exe --diag --quiet
+   PASS: exit code 0 (authoritative), Qt=PySide2, version line OK,
+   MSVCP140* + VCRUNTIME140* rows OK; 'system also missing' note on
+   ucrtbase.dll is allowed while exit=0. No 'product missing', no new
+   crash-*.txt.
+   HUMAN: confirm UCRT/KB2999226 status; DO NOT install it.
+   Evidence: diag-YYYYMMDD-HHMMSS.txt, report A4_* rows
+[A5][HUMAN] font inventory: C:\Windows\Fonts + registry Fonts key
+   Record msyhui.ttc / msyh.ttc / consola.ttf AND family names.
+   Expect NO msyhui.ttc -> C4 mandatory. File present != usable family.
+   Evidence: PG196_A5_*.png
+
+B. NON-ADMIN START / OBSERVE (4)
+[B1][AUTO+HUMAN] double-click as normal user, no UAC
+   PASS: log bytes grow in THIS window; startup line containing
+   'admin' and 'False' dated in THIS window; THEN grep ALL
+   portguard.log* (including archived) for 0 errors; main window
+   visible within 15s.
+   HUMAN: write THIS operation window into evidence index. A historical
+   identical startup line is NOT proof (B1_WINDOW_PROOF=NEEDS-VISUAL).
+   Evidence: PG196_B1_*.png, portguard.log*
+[B2][HUMAN] five-way version check
+   VERSION.txt (skip BOM) / CHANGELOG FIRST line-head version entry /
+   zip name / exe file properties / About page = 1.9.6.
+   Do NOT take the first vX.Y.Z in the whole CHANGELOG (it mentions
+   older versions in the explanatory text).
+   Evidence: PG196_B2_*.png
+[B3][HUMAN] open all 9 pages: Overview / Monitor / Events / History /
+   Bans / Rules / IP Lookup / Logs / Settings. No crash, no blank
+   page, no red 'ban status read failed' banner. 'Statistics' is NOT
+   a stack page.
+   Evidence: 9 x PG196_B3_*.png
+[B4][HUMAN] permission banner + netsh before/after
+   PortGuard_Block_* / PortGuard_Allow_* = 0 both times, with the
+   positive control (netsh show allprofiles exit 0, non-empty).
+   Evidence: PG196_B4_*.png, netsh text
+
+C. VISUAL M2 (5)
+[C1][HUMAN] 1360x860 @100% DPI, worst-case text verbatim (Chinese doc):
+   '23:59:59x27' NO space, '2400:3200:baba::1', '18080', 'HTTPS',
+   '2099-12-31 23:59', '999', '100', long rule/risk label.
+   No ellipsis. Write HOW the sample was injected.
+   Evidence: PG196_C1_100pct_1360x860_*.png
+[C2][HUMAN] three combos, logout+relogin after each DPI change:
+   (1360x860,100%) / (1200x800,100%) / (1360x860,125%).
+   Screenshot shows DPI setting or LogPixels. Full column headers,
+   no horizontal scroll hiding a bounded column.
+   Evidence: PG196_C2_*.png, PG196_DPI_SETTING.png
+[C3][HUMAN] Events / Suggestions / Ban-records tables, worst-case text.
+   Bounded columns complete; samples verbatim from render_shots.py.
+   Evidence: PG196_C3_*.png
+[C4][HUMAN] FONT FALLBACK: redo C1/C2/C3 in all three combos.
+   PASS only if worst-case text columns still NOT truncated on 2008R2.
+   Compare side by side with Win10 baseline: z_port.png,
+   z_https_table.png, z_monitor_table.png, 1_monitor.png,
+   2_events.png, 4_bans.png. A font name or a 'QSS fell back'
+   assertion is NOT proof. C4 may NOT be N/A.
+   Evidence: PG196_C4_*.png
+[C5][HUMAN] hover long columns (location / request / process / reason).
+   Ellipsis allowed ONLY if tooltip shows the full text.
+   Evidence: PG196_C5_*.png (tooltip visible)
+
+D. ADMIN + FIREWALL (5)
+[D1][HUMAN] start-as-admin.bat -> UAC -> admin mode; banner changes.
+[D2][HUMAN] manual ban one TEST IPv4 for 1 minute. Exactly 1 active
+   row. Record ban ID + test IPv4 verbatim in evidence index.
+   IPv4 ONLY.
+[D3][AUTO+HUMAN] netsh show rule name=all; extract ALL Block_* and
+   Allow_* names (do NOT rely on localized 'Rule Name:' label).
+   show rule name=<exact> -> Enabled=Yes, Action=Block, RemoteIP=IP.
+   Keep both product-wildcard and exact-name outputs.
+[D4][HUMAN] wait >= 1 expiry sweep; record ACTUAL wait. Ban record
+   shows unblocked. Exact name set diff: exactly 1 removed, 0 added.
+   Positive control. 0 rows -> NEEDS-VISUAL.
+[D5][HUMAN] new ban, click Unban. Rule removed within 5s and state
+   synced. Positive control.
+
+E. M1 ORPHAN RULE (4)
+[E1][AUTO] SAVEBASE mode BEFORE E2 and before any auto-ban.
+   Writes pg_rules_baseline.txt with timestamp + positive control.
+   Do NOT reuse the D3 baseline.
+[E2][HUMAN] quit program -> make %APPDATA%\PortGuard\port_guard.db
+   read-only -> confirm unwritable using a new temp file -> restart ->
+   enable auto-ban + a high-score rule -> trigger a real hit.
+   Need BOTH: log marker containing 'pending' + 'ip=' (Chinese prefix,
+   see Chinese doc E2) AND GUI-exported audit CSV row with
+   result=fail and a summary saying no firewall rule was created.
+   Auto-ban is OFF by default; enable it first.
+[E3][AUTO+HUMAN] DIFF mode AFTER E2, only if BOTH E2 evidences exist.
+   Positive control. NEW set has 0 PortGuard_Block_*. Also list any
+   Allow_* additions. 0 rows -> NEEDS-VISUAL. E3 may NOT be N/A.
+[E4][HUMAN] restore DB write; prove it with a successful manual ban;
+   clear filters + screenshot all pages; netsh count matches DB.
+
+F. M5 LOG PATH (4)
+[F1][HUMAN] set custom log path e.g. D:\fwlogs\pfirewall.log and click
+   enable. Record the path VERBATIM. Not the default System32 path.
+   Record PID before.
+[F2][AUTO+HUMAN] netsh show allprofiles logging, exit 0 non-empty.
+   Extract ALL 3 path lines (Domain/Private/Public, NO dedup).
+   All 3 verbatim = F1 path. <3 lines -> NEEDS-VISUAL. Any default
+   path -> FAIL. F2 may NOT be N/A.
+[F3][HUMAN] record pre-op line count/offset; trigger a blocked
+   connection; monitor page shows a parsed row timestamped IN THIS
+   window, on the F1 custom file. 'File grew' is NOT proof.
+[F4][HUMAN] switch back to default, redo ALL F2+F3 criteria.
+   PID unchanged before/after (hot reload, no restart).
+
+G. UNINSTALL & RESIDUE (3)
+[G1][HUMAN] follow 01_DEPLOY.txt uninstall. AFTER positive control,
+   Block_* + Allow_* total 0. Take evidence AFTER step 2 (unblock)
+   and BEFORE step 4 (delete program directory). 0 rows ->
+   NEEDS-VISUAL. G1 may NOT be N/A.
+[G2][HUMAN] ONLY after all evidence copied OUT. List the full
+   %APPDATA%\PortGuard\ tree + screenshot. Human confirms; the
+   script deletes nothing.
+[G3][HUMAN] LAST step. Copy ALL evidence out of the VM BEFORE rollback:
+   portguard.log*, diag-*.txt, crash-*.txt, screenshots, F3 log sample,
+   E2 audit CSV, pg_rules_baseline.txt, verify_2008r2_report.txt.
+   Registry / services / HKCU Run checks BEFORE rollback.
+   Add NO evidence after rollback.
+
+DO NOT
+  - Install UCRT / KB2999226 to silence A4 notes (breaks clean machine)
+  - Trigger IPv6 bans on 2008R2 (rule names irreversible, out of scope)
+  - Mark C4 / E3 / F2 / G1 as N/A
+  - Let the script tick SHIP (it never does)
+  - Roll back the VM before evidence is OUT
